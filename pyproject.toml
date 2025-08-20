@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "drought-scan"
+version = "0.1.0"
+description = "Drought monitoring and seasonal prediction toolkit"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name="Nome Cognome", email="you@email.com" }]
+dependencies = [
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "xgboost",
+    "matplotlib",
+    "shap",
+    "scipy"
+]
