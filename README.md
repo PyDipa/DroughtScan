@@ -1,4 +1,4 @@
-# Drought-Scan
+# Drought Scan
 
 ## Overview
 **Drought Scan** is a Python library implementing a multi-temporal and basin-scale approach for drought analysis. It is designed to provide advanced tools for evaluating drought severity and trends at the river basin scale by integrating meteorological and hydrological data.
@@ -9,12 +9,12 @@ The methodology is described in the article:
 ---
 
 ## Key Features
-- Calculation of standardized drought indices (e.g., SPI, SQI).
+- Calculation of standardized drought indices (e.g., SPI, SQI, SPEI,etc).
 - Integration of precipitation and streamflow data for basin-level analysis.
 - Multi-temporal scales for flexibility in drought assessment.
 - Possibility of generating synthetic graphs and seasonal trend scenarios (What-If scenarios).
 
-    See **docs/DetailedUsage.md** for usage notes and examples
+    See **tests/user_guide.md** and **tests/visualization_guide.md** for usage notes and examples
 ---
 
 ## Note on Installation
@@ -37,31 +37,19 @@ Ensure that all dependencies listed in the repository are installed in your Pyth
 
 ## What Drought-Scan Does
 
-Drought-Scan provides an **end-to-end framework** for monitoring, analyzing, and forecasting drought conditions at the basin scale.  
-It combines **statistical drought indices**, **machine learning simulation tools**, and **scenario analysis** into a single Python package.
+Drought-Scan provides an **end-to-end framework** for monitoring and analyzing drought conditions at the basin scale.  
+It combines **statistical drought indices**, **quantitative analysis**  and **visualization tools"  into a single Python package.
 
 ### Core Capabilities
 - **Data handling**: Organizes meteorological and hydrological time series (precipitation, streamflow, external predictors) into a consistent calendar (`m_cal`) and spatial framework (shapefiles of provinces/basins).
 - **Drought indices**:
-  - **SPI (Standardized Precipitation Index)** from 1 to 36 months.
-  - **SIDI (Synthetic Drought Index)**: a weighted multi-scale index, standardized to mean 0 and variance 1.
-  - **CDN (Cumulative Deviation from Normal)**: integrates long-term memory of anomalies.
+  - **SPI (Standardized Precipitation Index)** from 1 to K months (default K=36).
+  - **SIDI or gotic D (Standardiezed Integrated Drought Index)**: a weighted multi-scale index, standardized to mean 0 and variance 1.
+  - **CDN (Cumulative Deviation from Normal)**: integrates long-term memory of anomalies by cumulating the standard index at 1-month scale.
   - **SQI (Standardized Streamflow Index)**: SPI-like indicator based on river discharge.
 - **Visualization**: Provides the three “pillars” of drought monitoring:
-  1. Heatmap of SPI1–36.
+  1. Heatmap of SPI(SQI/SPEI-like) 1–K set.
   2. SIDI as a compact synthesis across scales.
   3. CDN as a long-memory diagnostic.
-- **Machine Learning simulations**: Through the `MLsimulator` class, users can:
-  - Align predictors and targets with lag/skip windows.
-  - Perform feature selection (e.g., greedy backward via SHAP).
-  - Run cross-validation and bias correction.
-  - Produce seasonal forecasts of SIDI, CDN, or SPI-like indices.
-- **Scenario analysis**: The `Scenarios` class enables:
-  - Construction of *What-If* scenarios by altering precipitation inputs.
-  - Integration of seasonal climate forecasts (e.g., ECMWF/C3S).
-  - Combination of scenarios and ML forecasts with uncertainty bands (±RMSE).
-- **Diagnostics**: Allows joint analysis of precipitation- and streamflow-based indices (e.g., SIDI vs SQI) to detect anomalies such as unexpected withdrawals, diversions, or releases.
-
-### In Short
-Drought-Scan brings together **multi-temporal statistics**, **supervised learning**, and **scenario modeling** to deliver a comprehensive drought monitoring and forecasting toolkit.
+- **precipitation to streamflow analysis**: Allows joint analysis of precipitation- and streamflow-based indices (e.g., SIDI vs SQI) to measure the strength and the responding time of the hydrografic basin to drought events. 
 

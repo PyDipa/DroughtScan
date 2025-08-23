@@ -8,3 +8,6 @@ re >= 2.2.1
 regionmask >= 0.9.0
 scipy >= 1.10.1
 warnings
+cmcrameri
+dateutil
+datetime

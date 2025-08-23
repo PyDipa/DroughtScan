@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "drought_scan"
+name = "Drought Scan"
 version = "0.1.0"
 description = "Drought monitoring and seasonal prediction toolkit"
 readme = "README.md"
@@ -13,9 +13,14 @@ authors = [{ name="Arianna Di Paola", email="arianna.dipaola@cnr.it" }]
 dependencies = [
     "numpy",
     "pandas",
-    "scikit-learn",
-    "xgboost",
     "matplotlib",
-    "shap",
-    "scipy"
+    "cmcrameri",
+    "scipy",
+    "geopandas",
+    "regionmask",
+    "netCDF4",
+    "dateutil",
+    "itertools",
+    "datetime",
+    "warnings"
 ]

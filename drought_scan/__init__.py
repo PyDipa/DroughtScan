@@ -42,8 +42,7 @@ __all__ = [
     "Streamflow",
     "Pet",
     "Balance",
-    "utils",        # lazy 
-    "scenarios",    # lazy 
+    "utils",        # lazy
     "__version__",
 ]
 
