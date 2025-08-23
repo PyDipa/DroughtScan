@@ -12,7 +12,7 @@ The methodology is described in the article:
 - Calculation of standardized drought indices (e.g., SPI, SQI, SPEI,etc).
 - Integration of precipitation and streamflow data for basin-level analysis.
 - Multi-temporal scales for flexibility in drought assessment.
-- Possibility of generating synthetic graphs and seasonal trend scenarios (What-If scenarios).
+- Possibility of generating synthetic graphs and seasonal trend analysis.
 
     See **tests/user_guide.md** and **tests/visualization_guide.md** for usage notes and examples
 ---
