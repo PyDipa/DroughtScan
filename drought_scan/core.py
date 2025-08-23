@@ -19,14 +19,11 @@ os.environ['USE_PYGEOS'] = '0'
 from matplotlib.colors import ListedColormap
 import json
 
-
-
-from utils.data_io import *
-from utils.drought_indices import *
-from utils.visualization import *
-from utils.hydrology import *
-from utils.statistics import *
-
+from drought_scan.utils.drought_indices import *
+from drought_scan.utils.data_io import *
+from drought_scan.utils.hydrology import *
+from drought_scan.utils.visualization import *
+from drought_scan.utils.statistics import *
 class BaseDroughtAnalysis:
     def __init__(self, ts, m_cal, K, start_baseline_year, end_baseline_year,basin_name,
                  calculation_method,threshold,index_name='SPI'):
@@ -265,12 +262,12 @@ class BaseDroughtAnalysis:
 
         return cdn
 
-    def plot_scan(self, optimal_k=None, weight_index=None,xlim=None,name=None,reverse_color=False,saveplot=False):
+    def plot_scan(self, optimal_k=None, weight_index=None,year_ext=None,reverse_color=False,saveplot=False):
         """
             Plot the drought scan visualization, including CDN, SPI-like heatmap, and SIDI.
 
             Args:
-                xlim (tuple, optional): Years defining X-axis limits.
+                year_ext (tuple, optional): Years defining X-axis limits.
                 optimal_k (int, optional): Optimal K scale.
                 weight_index (int, optional): Weighting scheme index.
                 name (str, optional): Name of the basin.
@@ -278,9 +275,9 @@ class BaseDroughtAnalysis:
                 reverse_color (bool, optional): If True, reverse color maps and highlight upper anomalies (suggested for PET).
 
             """
-        plot_overview(self, optimal_k=optimal_k, weight_index=weight_index,xlim=xlim,name=name,reverse_color=reverse_color)
+        plot_overview(self, optimal_k=optimal_k, weight_index=weight_index,year_ext=year_ext,reverse_color=reverse_color)
         if saveplot==True:
-            self._savedsplot()
+            self._saveplot()
     def normal_values(self):
         """
           Compute the "normal" values of the variable using the inverse function of the SPI-like index.
@@ -343,7 +340,7 @@ class BaseDroughtAnalysis:
         results = rolling_trend_analysis(Y, window=window, significance=0.05)
         return results
 
-    def plot_trends(self, windows=[12, 36, 60, 120],ax=None,xlim=None):
+    def plot_trends(self, windows=[12, 36, 60, 120],ax=None,year_ext=None):
         """
         Wrapper method to plot trend bars on the CDN time series for a DroughtScan-compatible object.
 
@@ -354,7 +351,7 @@ class BaseDroughtAnalysis:
         Returns:
             None. Displays a plot.
         """
-        plot_cdn_trends(self, windows,ax=ax,xlim=xlim)
+        plot_cdn_trends(self, windows,ax=ax,year_ext=year_ext)
 
     import numpy as np
     import matplotlib.pyplot as plt
@@ -465,7 +462,7 @@ class BaseDroughtAnalysis:
         plt.tight_layout()
         plt.show()
 
-    def plot_monthly_profile(self, var=None, cumulate=False, highlight_years=None, name=None):
+    def plot_monthly_profile(self, var=None, cumulate=False, highlight_years=None,two_year=False):
         """
         Plot a 24-month profile of a time series, with percentile bands and optional highlighted years.
 
@@ -489,95 +486,8 @@ class BaseDroughtAnalysis:
         None
             Displays the plot.
         """
-        if var is None:
-            x = self.ts.copy()
-        else:
-            x = var
 
-        if len(x) != len(self.m_cal):
-            raise ValueError("Input variable and m_cal must have the same length.")
-
-        months = self.m_cal[:, 0]
-        years = self.m_cal[:, 1]
-        unique_years = np.unique(years)
-
-        monthly_means = np.zeros(12)
-        perc_25 = np.zeros(12)
-        perc_75 = np.zeros(12)
-        perc_10 = np.zeros(12)
-        perc_90 = np.zeros(12)
-
-        if not cumulate:
-            for month in range(1, 13):
-                monthly_data = x[months == month]
-                monthly_means[month - 1] = np.mean(monthly_data)
-                perc_25[month - 1] = np.percentile(monthly_data, 25)
-                perc_75[month - 1] = np.percentile(monthly_data, 75)
-                perc_10[month - 1] = np.percentile(monthly_data, 10)
-                perc_90[month - 1] = np.percentile(monthly_data, 90)
-        else:
-            annual_cumsum = {year: np.zeros(12) for year in unique_years}
-            for year in unique_years:
-                for month in range(1, 13):
-                    monthly_data = x[(years == year) & (months == month)]
-                    cumulative = np.sum(monthly_data)
-                    annual_cumsum[year][month - 1] = (
-                        cumulative + annual_cumsum[year][month - 2] if month > 1 else cumulative
-                    )
-
-            for month in range(12):
-                values = [annual_cumsum[year][month] for year in unique_years]
-                monthly_means[month] = np.mean(values)
-                perc_25[month] = np.percentile(values, 25)
-                perc_75[month] = np.percentile(values, 75)
-                perc_10[month] = np.percentile(values, 10)
-                perc_90[month] = np.percentile(values, 90)
-
-        # Extend the monthly stats to 24 months by repeating the cycle
-        months_24 = np.arange(1, 25)
-        mean_24 = np.tile(monthly_means, 2)
-        p25_24 = np.tile(perc_25, 2)
-        p75_24 = np.tile(perc_75, 2)
-        p10_24 = np.tile(perc_10, 2)
-        p90_24 = np.tile(perc_90, 2)
-
-        # Plotting
-        plt.figure(figsize=(12, 6))
-        plt.plot(months_24, mean_24, color='darkgray', label='Monthly Mean', linewidth=2)
-        plt.fill_between(months_24, p25_24, p75_24, color='gray', alpha=0.5, label='25–75 Percentile')
-        plt.fill_between(months_24, p10_24, p90_24, color='lightgray', alpha=0.5, label='10–90 Percentile')
-
-        # Highlight years if specified
-        if highlight_years is not None:
-            if isinstance(highlight_years, int):
-                highlight_years = [highlight_years]
-            elif not isinstance(highlight_years, list):
-                raise TypeError("highlight_years must be an int, a list of ints, or None.")
-
-            colors = ['orange', 'cyan', 'green']
-            for i, year in enumerate(highlight_years[:3]):
-                if year in unique_years and (year - 1) in unique_years:
-                    # Build 24-month series from year-1 and year
-                    if cumulate:
-                        data_prev = annual_cumsum[year - 1]
-                        data_curr = annual_cumsum[year]
-                    else:
-                        data_prev = [np.mean(x[(months == month) & (years == year - 1)]) for month in range(1, 13)]
-                        data_curr = [np.mean(x[(months == month) & (years == year)]) for month in range(1, 13)]
-                    full_series = np.concatenate([data_prev, data_curr])
-                    plt.plot(months_24, full_series, color=colors[i], linewidth=2, label=f'{year - 1}-{year}')
-                else:
-                    print(f"Warning: Cannot plot 24-month profile for year {year} (missing previous year).")
-
-        plt.xlabel('Month')
-        plt.ylabel('Cumulative Value' if cumulate else 'Mean Value')
-        title = '24-Month Profile' if name is None else f'24-Month Profile - {name}'
-        plt.title(title)
-        plt.legend()
-        plt.grid(True)
-        plt.xticks(months_24,np.tile(np.arange(1,13),2))
-        plt.tight_layout()
-        plt.show()
+        monthly_profile(self, var=var, cumulate=cumulate, highlight_years=highlight_years, two_year=two_year)
 
     def export_for_r_plot(self, weight_index=2, optimal_k=None, name=None, out_dir="exports"):
         """
@@ -641,7 +551,7 @@ class BaseDroughtAnalysis:
 
         print(f"Dati esportati con successo in {out_dir}/ con prefisso '{prefix}'")
     # ----------------------------------------------------------
-    def _savedsplot(self):
+    def _saveplot(self):
 
         k = self.K if not hasattr(self, 'optimal_k') or self.optimal_k is None else self.optimal_k
         w = self.weight_index if not hasattr(self, 'optimal_weight_index') or self.optimal_weight_index is None else self.optimal_weight_index
@@ -1275,7 +1185,7 @@ class Streamflow(BaseDroughtAnalysis):
 
     def gap_filling(self, precipitation, K=None, weight_index=2, alpha=0.1,X2=None):
         """
-        Fill missing values (NaN) in streamflow SPI[0] and streamflow time series using SIDI from Precipitation.
+        Fill missing values (NaN) in streamflow SQI[0] and streamflow time series using SIDI from Precipitation.
 
         Args:
             precipitation (BaseDroughtAnalysis): Precipitation instance to extract SPI and SIDI.
@@ -1400,7 +1310,9 @@ class Pet(BaseDroughtAnalysis):
         elif data_path is not None and self.shape is not None:
             self.data_path = data_path
             self.ts, self.m_cal, self.PETgrid = import_netcdf_for_cumulative_variable(data_path,
-                                                ['e', 'ET','PET','pet','et','evaporation', 'evapotranspiration','potential evapotranspiration','reference evapotranspiration','swe'],
+                                                ['e', 'ET','PET','pet','et','evaporation',
+                                                 'evapotranspiration','potential evapotranspiration',
+                                                 'reference evapotranspiration','swe','pev'],
                                                 self.shape,self.verbose)
         else:
             raise ValueError("Provide either ts and m_cal directly or specify data_path for gridded PET data in NetCDF format along with the path of the river shapefile.")
@@ -1514,7 +1426,7 @@ class Balance(BaseDroughtAnalysis):
         # import preciptiation data
         prec_ts, prec_cal, Pgrid = import_netcdf_for_cumulative_variable(
             self.prec_path,
-            possible_names=['tp','rr','precipitation','prec'],  # Possibili nomi della variabile
+            possible_names=['tp','rr','precipitation','prec','LAPrec1871','pre','swe','SWE','sd','SD','sf','SF'],  # Possibili nomi della variabile
             shape=self.shape,
             verbose=self.verbose
         )
@@ -1522,7 +1434,9 @@ class Balance(BaseDroughtAnalysis):
         # import PET data
         pet_ts, pet_cal, ETgrid = import_netcdf_for_cumulative_variable(
             self.pet_path,
-            possible_names=['e', 'ET','PET','pet','et','evaporation', 'evapotranspiration','potential evapotranspiration','reference evapotranspiration'],
+            possible_names=['e', 'ET','PET','pet','et','evaporation',
+                                                 'evapotranspiration','potential evapotranspiration',
+                                                 'reference evapotranspiration','swe','pev'],
             shape=self.shape,
             verbose=self.verbose
         )

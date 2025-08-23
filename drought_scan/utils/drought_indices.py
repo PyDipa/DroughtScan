@@ -205,7 +205,14 @@ def f_spi(prec,stride,m,m_cal, tb1,tb2,gamma_params=None):
         try:
             idmesi_all = get_month_indices(m, t1, t2, m_cal)
         except (IndexError, ValueError):
-            idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
+            try:
+                idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
+            except (IndexError, ValueError):
+                try:
+                    idmesi_all = get_month_indices(m, t1+1, t2, m_cal)
+                except (IndexError, ValueError):
+                    idmesi_all = get_month_indices(m, t1 + 1, t2-1, m_cal)
+
 
         x = prec[idmesi_all]  # Precipitation for the entire period
 
@@ -218,10 +225,17 @@ def f_spi(prec,stride,m,m_cal, tb1,tb2,gamma_params=None):
         xbase = np.array([np.sum(prec[row]) if np.all(row >= 0) else np.nan for row in a])
 
         # WHOLE PERIOD ----------------------------------------------
+        # Get all months for the entire time period
         try:
             idmesi_all = get_month_indices(m, t1, t2, m_cal)
         except (IndexError, ValueError):
-            idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
+            try:
+                idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
+            except (IndexError, ValueError):
+                try:
+                    idmesi_all = get_month_indices(m, t1+1, t2, m_cal)
+                except (IndexError, ValueError):
+                    idmesi_all = get_month_indices(m, t1 + 1, t2-1, m_cal)
 
         a = np.array([idmesi_all - j for j in np.flip(np.arange(0, stride))]).T  # Create the matrix of months to select
         x = np.array(
@@ -317,7 +331,14 @@ def f_spei(balance, stride, m, m_cal, tb1, tb2,gamma_params= None):
         try:
             idmesi_all = get_month_indices(m, t1, t2, m_cal)
         except (IndexError, ValueError):
-            idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
+            try:
+                idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
+            except (IndexError, ValueError):
+                try:
+                    idmesi_all = get_month_indices(m, t1+1, t2, m_cal)
+                except (IndexError, ValueError):
+                    idmesi_all = get_month_indices(m, t1 + 1, t2-1, m_cal)
+
 
         x = balance[idmesi_all]  # Precipitation for the entire period
 
@@ -330,10 +351,17 @@ def f_spei(balance, stride, m, m_cal, tb1, tb2,gamma_params= None):
         xbase = np.array([np.sum(balance[row]) if np.all(row >= 0) else np.nan for row in a])
 
         # WHOLE PERIOD ----------------------------------------------
+        # Get all months for the entire time period
         try:
             idmesi_all = get_month_indices(m, t1, t2, m_cal)
         except (IndexError, ValueError):
-            idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
+            try:
+                idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
+            except (IndexError, ValueError):
+                try:
+                    idmesi_all = get_month_indices(m, t1+1, t2, m_cal)
+                except (IndexError, ValueError):
+                    idmesi_all = get_month_indices(m, t1 + 1, t2-1, m_cal)
 
         a = np.array([idmesi_all - j for j in np.flip(np.arange(0, stride))]).T  # Create the matrix of months to select
         x = np.array(
@@ -436,7 +464,13 @@ def f_zscore(data, stride, m, m_cal, tb1, tb2):
         try:
             idmesi_all = get_month_indices(m, t1, t2, m_cal)
         except (IndexError, ValueError):
-            idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
+            try:
+                idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
+            except (IndexError, ValueError):
+                try:
+                    idmesi_all = get_month_indices(m, t1 + 1, t2, m_cal)
+                except (IndexError, ValueError):
+                    idmesi_all = get_month_indices(m, t1 + 1, t2 - 1, m_cal)
 
         x = data[idmesi_all]  # Data for the entire period
 
@@ -449,10 +483,17 @@ def f_zscore(data, stride, m, m_cal, tb1, tb2):
         xbase = np.array([np.sum(data[row]) if np.all(row >= 0) else np.nan for row in a])
 
         # WHOLE PERIOD ----------------------------------------------
+        # Get all months for the entire time period
         try:
             idmesi_all = get_month_indices(m, t1, t2, m_cal)
         except (IndexError, ValueError):
-            idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
+            try:
+                idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
+            except (IndexError, ValueError):
+                try:
+                    idmesi_all = get_month_indices(m, t1+1, t2, m_cal)
+                except (IndexError, ValueError):
+                    idmesi_all = get_month_indices(m, t1 + 1, t2-1, m_cal)
 
         a = np.array([idmesi_all - j for j in np.flip(np.arange(0, stride))]).T  # Create the matrix of months to select
         x = np.array([np.sum(data[row]) if np.all(row >= 0) else np.nan for row in a])  # Data for the entire period

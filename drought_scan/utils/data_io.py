@@ -252,11 +252,12 @@ def import_netcdf_for_cumulative_variable(file_path, possible_names,shape,verbos
                 raise ValueError("Failed to create regional mask.")
             if mask.shape != LAT.shape:
                 raise ValueError(
-                    f"Mismatch between mask shape {mask.shape} and Pgrid spatial shape {Pgrid.shape[1:]}.")
+                    f"Mismatch between mask shape {mask.shape} and grid spatial shape {Pgrid.shape[1:]}.")
 
             if verbose==True:
-                print(f'Regional mask created: mask shape {mask.shape}, Pgrid shape {Pgrid.shape}')
+                print(f'Regional mask created: mask shape {mask.shape}, grid shape {Pgrid.shape}')
                 check = Pgrid[1, :, :] if len(np.shape(Pgrid))==3 else Pgrid[0,0,:,:]
+                plt.figure()
                 plt.imshow(check, cmap='viridis')
                 plt.imshow(mask, cmap='jet_r')
                 plt.title('Overlay of data field and river basin mask')
