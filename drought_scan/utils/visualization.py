@@ -7,7 +7,12 @@ from matplotlib.colors import Normalize
 mpl.rcParams['font.family'] = 'Helvetica'
 import os
 
-import cmcrameri.cm as cmc
+
+try:
+    import cmcrameri.cm as cmc
+except Exception:
+    cmc = None
+
 
 def savefig(fname):
     plt.savefig(fname,
@@ -25,20 +30,35 @@ def savefig(fname):
                 metadata=None)
     print(f'fig. saved in {os.getcwd()}')
 
+def heatmap_cmap():
+    """
+    Creates a custom colormap used for SIDI/CDN plots.
+    """
+    xmap = plt.get_cmap('RdYlGn', 13)
+    cmap = np.array([xmap(i) for i in range(xmap.N)])
+    cmap[5, :] = (0.8, 0.8, 0.8, 1)  # Gray for near-neutral SPI
+    cmap[6, :] = (0.6, 0.6, 0.6, 1)  # Gray for near-neutral SPI
+
+    return mpl.colors.LinearSegmentedColormap.from_list('Custom cmap', cmap, xmap.N)
+
+
 def spi_cmap(n_levels=13):
-    """Create a red-2-green palette using the coulors by Crimeri"""
-	# take part of colors by lajolla (red) bamako (green)
-    n_half = (n_levels - 2) // 2  # esempio: 5 su 13
-    # ROSSI puri: prendiamo solo da index 0.40 a 0.75
-    reds = cmc.lajolla(np.linspace(0.3, 0.8, n_half))
-    # VERDI saturi: solo da 0.30 a 0.70 e invertiti
-    # greens = cmc.bamako(np.linspace(0.30, 0.70, n_half))[::-1]
-    # greens = cmc.cork(np.linspace(0.40, 0.75, n_half))[::-1]
-    greens = cmc.bam(np.linspace(0.75,1, n_half))
-    grays = np.array([[0.9, 0.9, 0.9, 1.0],
-                      [0.9, 0.9, 0.9, 1.0]])
-    colors = np.vstack([reds, grays, greens])
-    return ListedColormap(colors)
+    if cmc is not None:
+        """Create a red-2-green palette using the coulors by Crimeri"""
+        # take part of colors by lajolla (red) bamako (green)
+        n_half = (n_levels - 2) // 2  # esempio: 5 su 13
+        # ROSSI puri: prendiamo solo da index 0.40 a 0.75
+        reds = cmc.lajolla(np.linspace(0.3, 0.8, n_half))
+        # VERDI saturi: solo da 0.30 a 0.70 e invertiti
+        # greens = cmc.bamako(np.linspace(0.30, 0.70, n_half))[::-1]
+        # greens = cmc.cork(np.linspace(0.40, 0.75, n_half))[::-1]
+        greens = cmc.bam(np.linspace(0.75,1, n_half))
+        grays = np.array([[0.9, 0.9, 0.9, 1.0],
+                          [0.9, 0.9, 0.9, 1.0]])
+        colors = np.vstack([reds, grays, greens])
+        return ListedColormap(colors)
+    else:
+        return heatmap_cmap()
 
 def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None,reverse_color=False):
     """
@@ -170,7 +190,10 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None,reverse_
     ax[0].axhline(y=0, c='k', linestyle=':', alpha=0.5)
     ax[0].set_xticks([])
     ax[0].set_ylabel('CDN', fontsize=12)
-    ax[0].set_ylim(-30, 30)
+    def round_up(x, base=10):
+        return int(-(-x // base) * base)
+    ymax = np.max(abs(DSO.CDN))
+    ax[0].set_ylim(-round_up(ymax), round_up(ymax))
     plt.setp(ax[0].get_yticklabels(), fontsize=12)
 
     # ----------------------------------------------------
@@ -532,17 +555,6 @@ def monthly_profile(DSO, var=None, cumulate=False, highlight_years=None,two_year
         plt.tight_layout()
         plt.show()
 
-
-def heatmap_cmap():
-    """
-    Creates a custom colormap used for SIDI/CDN plots.
-    """
-    xmap = mpl.cm.get_cmap('RdYlGn', 13)
-    cmap = np.array([xmap(i) for i in range(xmap.N)])
-    cmap[5, :] = (0.8, 0.8, 0.8, 1)  # Gray for near-neutral SPI
-    cmap[6, :] = (0.6, 0.6, 0.6, 1)  # Gray for near-neutral SPI
-
-    return mpl.colors.LinearSegmentedColormap.from_list('Custom cmap', cmap, xmap.N)
 
 
 
