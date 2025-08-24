@@ -14,13 +14,16 @@ The methodology is described in the article:
 - Multi-temporal scales for flexibility in drought assessment.
 - Possibility of generating synthetic graphs and seasonal trend analysis.
 
-    See **Tests/user_guide.md** and **Tests/visualization_guide.md** for usage notes and examples
+for examples and usage notes see: 
+- [User Guide](tests/docs/user_guide.md)→ Demonstrates how to initialize a Drough-Scan Object
+- [Visualization Guide](tests/docs/visualization_guide.md) → Demonstrates how to use some visualization methods.
+
 ---
 
 ## Note on Installation
 **Drought Scan** will soon be available on PyPI. 
 
-To use Drought-Scan, you can install it directly from GitHub:
+To use Drought Scan, you can install it directly from GitHub:
 
 ```bash
 git clone https://github.com/PyDipa/DroughtScan.git
@@ -30,7 +33,7 @@ pip install .
 Alternatively, you can use the following command to install directly from the repository:
 
 ```bash
-pip install git+https://github.com/PyDipa/Drought-Scan.git
+pip install git+https://github.com/PyDipa/DroughtScan.git
 ```
 
 Ensure that all dependencies listed in the repository are installed in your Python environment. Refer to the requirements.txt file for more details.

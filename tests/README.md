@@ -9,8 +9,6 @@ This directory contains **unit tests and example usage** for Drought Scan.
 - the Potential Evapotranspiration from ERA5
 - `test/docs/` → Contains **user guides**:
 
-- [User Guide](docs/user_guide.md)→ Demonstrates how to initialize a Drough-Scan Object
-- [Visualization Guide](docs/visualization_guide.md) → Demonstrates how to use some visualization methods.
 
 
 ### 📄 Quick Start:
