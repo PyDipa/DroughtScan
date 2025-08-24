@@ -6,7 +6,7 @@ This directory contains **unit tests and example usage** for Drought Scan.
 - `data/` → Contains **test datasets**:
   the shapefile of the Po basin; 
 - the precipitation dataset LAPrec
-- the Potential Evapotraspiration from ERA5
+- the Potential Evapotranspiration from ERA5
 
 ### 📄 Files:
 - `user_guide.md` → Demonstrates how to use the library.
