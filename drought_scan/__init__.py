@@ -34,7 +34,7 @@ else:
 
 # --- Public API (leggera) ----------------------------------------------------
 # Import diretti delle classi core: devono essere leggeri e senza side-effect.
-from .core import BaseDroughtAnalysis, Precipitation, Streamflow, Pet, Balance
+from .core import BaseDroughtAnalysis, Precipitation, Streamflow, Pet, Balance, Teleindex
 
 __all__ = [
     "BaseDroughtAnalysis",
@@ -42,6 +42,7 @@ __all__ = [
     "Streamflow",
     "Pet",
     "Balance",
+   "Teleindex",
     "utils",        # lazy
     "__version__",
 ]
