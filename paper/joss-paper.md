@@ -31,7 +31,7 @@ affiliations:
 ## Summary
 
 **DroughtScan** is a Python package for multiscale drought diagnosis based on standardized indices derived from climate and hydrological variables such as precipitation (P), streamflow (Q), or potential evapotranspiration (PET). The system relies on the joint analysis of monthly precipitation and, where available, mean river flow at the basin closure section, interpreted respectively as the input and output of the hydrological balance.
-The library enables computation, visualization, and analysis of drought metrics at the basin scale, with particular emphasis on multi-temporal indices and their integration. Each input variable is standardized into a continuous set of monthly timescales (e.g. from P to the Standardized Precipitation Index, SPI1–36), producing a family of SPI or **SPI-like** indices. From this ensemble the library derives two key indicators: the **SIDI** (Standardized Integrated Drought Index), defined as a weighted mean across all scales to facilitate drought monitoring, communication, and climate services; and the **CDN** (Cumulative Deviation from Normal), computed from the shortest timescale (e.g. SPI1) to track the cumulative persistence of anomalies and the long-term memory of the system. Together, these indices provide a comprehensive overview of drought severity, duration, and memory effects
+The library enables computation, visualization, and analysis of drought metrics at the basin scale, with particular emphasis on multi-temporal indices and their integration. Each input variable is standardized into a continuous set of monthly timescales (e.g. from P to the Standardized Precipitation Index, SPI1–36), producing a family of SPI or **SPI-like** indices. From this ensemble the library derives two key indicators: the **SIDI** (Standardized Integrated Drought Index), defined as a weighted mean across all scales to facilitate drought monitoring, communication, and climate services; and the **CDN** (Cumulative Deviation from Normal), computed from the shortest timescale (e.g. SPI1) to track the cumulative persistence of anomalies and the long-term memory of the system. Together, these indices provide a comprehensive overview of drought severity, duration, and memory effects. Methodological and scientific details are provided by @DiPaola2025.
 
 The software supports gridded **NetCDF** input for atmospheric variables such as P and PET, as well as **CSV** or **Excel** formats for tabular data such as Q. Input data are spatially aggregated over the selected hydrographic basin (provided in **GeoJSON** or **Shapefile** format) and, when gridded, are further aggregated into monthly time series. The package allows flexible selection of standardization methods based on well-established distributions (**Gamma, Pearson III, Gaussian**) and includes ready-to-use visualization tools such as **SPI heatmaps**, **SIDI–CDN plots**, **trend detection**, and intra-annual precipitation profiles. Additional methods enable direct correlation between precipitation-based and streamflow-based indices, supporting hydrological consistency checks and gap-filling procedures
 
@@ -62,11 +62,11 @@ From an operational and climate-service perspective, DroughtScan is designed to:
 - Reconstruct monthly streamflow in the absence of recent observations, provided a historical series is available for calibration
 - Distinguish between streamflow deficits caused by meteorological drought and those of anthropogenic origin
 
-For methodological details, see @DiPaola2025.
+
 
 ## Acknowledgments
 
-This software was developed in the context of the **DroughtCentral** project, which provided the scientific framework for the SIDI index and the multiscale drought analysis methodology. The implementation was led by Arianna Di Paola, with contributions and technical guidance from members of the DroughtCentral team. For methodological details, see the reference paper below.
+This software was developed in the context of the **DroughtCentral** framework (www.droughtcentral.it), which provided the scientific basis for the SIDI index and the multiscale drought analysis methodology. The implementation was led by Arianna Di Paola, with contributions and technical guidance from members of the DroughtCentral team. For methodological details, see the reference paper below.
 
 ## References
 
