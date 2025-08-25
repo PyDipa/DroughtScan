@@ -1,5 +1,7 @@
 """
 author: PyDipa
+# © 2025 Arianna Di Paola
+# License: GNU General Public License v3.0 (GPLv3)
 
 Data Input/Output Utilities.
 
@@ -18,7 +20,7 @@ Main functions:
 - `detect_delimiter()`: Detects delimiters in CSV files.
 - `extract_variable()`: Extracts a variable from a NetCDF dataset.
 
-Used by: `core.py`, `ESM_scenarios.py`, `drought_indices.py`.
+Used by: `core.py`, `drought_indices.py`.
 """
 
 import re
@@ -310,27 +312,6 @@ def load_shape(shape_path):
         return shape
     except Exception as e:
         raise ValueError(f"Error loading shapefile: {e}")
-
-def get_teleindex_info(data_path):
-    data = nc.Dataset(data_path)
-    var_name  = []
-    for v in data.variables:
-        v.append(var_name)
-        var = data.variables[var_name]
-
-        unit = getattr(var, "units", "N/A")
-        shape = var.shape
-
-        if var_name == "time":
-            time_units = getattr(var, "units", "N/A")  # Es: "months since 1900-01-01"
-            if "months since" in time_units:
-                #get info about the timespan
-                base_date_str = time_units.split("since")[1].strip()  # "1900-01-01"
-                base_date = datetime.strptime(base_date_str[0:10], "%Y-%m-%d")
-
-                time_values = [base_date + relativedelta(months=int(t)) for t in var[:]]
-                starting_date, ending_date = time_values[0], time_values[-1]
-    return var_name,starting_date, ending_date
 def import_timeseries(data_path):
     var_name, starting_date, ending_date = get_teleindex_info(data_path)
     data = nc.Dataset(data_path)

@@ -1,5 +1,8 @@
 """
 author: PyDipa
+# © 2025 Arianna Di Paola
+# License: GNU General Public License v3.0 (GPLv3)
+
 Statistical functions for drought analysis.
 
 Provides helper functions for:
@@ -7,7 +10,7 @@ Provides helper functions for:
 - **Probability distributions** (Gamma fitting, percentiles).
 - **Monte Carlo simulations** for uncertainty quantification.
 
-Used by `ESM_scenarios.py` and core classes.
+Used by  and 'core.py'
 """
 
 from scipy import stats

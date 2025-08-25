@@ -4,7 +4,8 @@
 **Drought Scan** is a Python library implementing a multi-temporal and basin-scale approach for drought analysis. It is designed to provide advanced tools for evaluating drought severity and trends at the river basin scale by integrating meteorological and hydrological data.
 
 The methodology is described in the article:  
-*"A novel framework for multi-temporal and basin-scale drought analysis"* ([Read the article](https://www.sciencedirect.com/science/article/pii/S0048969724081063?via%3Dihub)).
+*"A novel framework for multi-temporal and basin-scale drought analysis"* ([Read the article](https://www.sciencedirect.com/science/article/pii/S0048969724081063)).
+and is continuously developed within the activities of Drought Central ([DroughtCentral](https://droughtcentral.it)).
 
 ---
 
@@ -36,7 +37,7 @@ Option 2: Install directly from GitHub (no local clone)
 pip install git+https://github.com/PyDipa/DroughtScan.git
 ```
 
-Ensure that all dependencies listed in the repository are installed in your Python environment. Refer to the pyproject.toml file for more details.
+Ensure that all dependencies listed in the repository are installed in your Python environment. Refer to the pyproject.toml.txt file for more details.
 
 ## What Drought-Scan Does
 
@@ -56,3 +57,9 @@ It combines **statistical drought indices**, **quantitative analysis**  and **vi
   3. CDN as a long-memory diagnostic.
 - **precipitation to streamflow analysis**: Allows joint analysis of precipitation- and streamflow-based indices (e.g., SIDI vs SQI) to measure the strength and the responding time of the hydrographic basin to drought events. 
 
+## Authors
+
+- **Arianna Di Paola** CNR-IBE, Italy — Lead developer and maintainer; arianna.dipaola@cnr.it
+- **Massimiliano Pasqui** CNR-IBE, Italy — Feedback,   scientific guidance, methodological validation and review.
+- **Ramona Magno** CNR-IBE, Italy — Feedback, scientific guidance, methodological validation and review.
+- **Leando Rocchi** CNR-IBE, Italy — technical support

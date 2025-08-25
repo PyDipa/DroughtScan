@@ -1,5 +1,7 @@
 """
 author: PyDipa
+# © 2025 Arianna Di Paola
+# License: GNU General Public License v3.0 (GPLv3)
 
 Drought Indices Computation.
 
@@ -13,7 +15,7 @@ Main functions:
 - `_calculate_SIDI()`: Computes SIDI using weighted drought indicators.
 - `_calculate_CDN()`: Computes CDN for hydrological drought monitoring.
 
-Used by: `core.py`, `ESM_scenarios.py`, `hydrology.py`.
+Used by: `core.py`, `hydrology.py`.
 """
 
 

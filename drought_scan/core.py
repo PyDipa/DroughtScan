@@ -1,5 +1,8 @@
 """
 author: PyDipa
+# © 2025 Arianna Di Paola
+
+
 Core module for Drought Scan.
 
 This file defines the **main base classes** for drought analysis:
@@ -8,8 +11,12 @@ This file defines the **main base classes** for drought analysis:
 - `Streamflow`: Manages streamflow data.
 - `PET`: Computes potential evapotranspiration (PET).
 - `Balance`: Integrates water balance computations.
+- 'Teleindex': a general purpose class base on BaseDroughtAnalysis to handles timeseries of Teleconnections (i.e. timeseries
+not linked to any hydrografic basin (no shapefile required)
 
 These classes serve as the **foundation** for the entire library.
+
+# License: GNU General Public License v3.0 (GPLv3)
 """
 
 
@@ -353,115 +360,6 @@ class BaseDroughtAnalysis:
         """
         plot_cdn_trends(self, windows,ax=ax,year_ext=year_ext)
 
-    import numpy as np
-    import matplotlib.pyplot as plt
-
-    def old1_lot_monthly_profile(self, var=None, cumulate=False, highlight_years=None, name=None):
-        """
-        Plot the monthly mean profile of a time series, with optional cumulative mode and highlighted years.
-
-        This method computes and plots the average monthly values of the given time series (`var`)
-        along with shaded areas representing the 25–75 and 10–90 percentile ranges. Optionally, it can also overlay
-        the monthly profiles of specific years.
-
-        Parameters
-        ----------
-        var : np.ndarray or None, optional
-            The time series to analyze. If None, `self.ts` will be used as default.
-            Must be a 1D array with the same length as `self.m_cal`.
-
-        cumulate : bool, default=False
-            If True, compute and display the cumulative sum per month for each year before calculating the statistics.
-
-        highlight_years : list of int or int or None, optional
-            One or more years to be highlighted in the plot.
-
-        name : str or None, optional
-            Optional label to include in the plot title.
-
-        Returns
-        -------
-        None
-            Displays the plot.
-        """
-        if var is None:
-            x = self.ts.copy()
-        else:
-            x = var
-
-        if len(x) != len(self.m_cal):
-            raise ValueError("Input variable and m_cal must have the same length.")
-
-        months = self.m_cal[:, 0]
-        years = self.m_cal[:, 1]
-        unique_years = np.unique(years)
-
-        monthly_means = np.zeros(12)
-        perc_25 = np.zeros(12)
-        perc_75 = np.zeros(12)
-        perc_10 = np.zeros(12)
-        perc_90 = np.zeros(12)
-
-        if not cumulate:
-            for month in range(1, 13):
-                monthly_data = x[months == month]
-                monthly_means[month - 1] = np.mean(monthly_data)
-                perc_25[month - 1] = np.percentile(monthly_data, 25)
-                perc_75[month - 1] = np.percentile(monthly_data, 75)
-                perc_10[month - 1] = np.percentile(monthly_data, 10)
-                perc_90[month - 1] = np.percentile(monthly_data, 90)
-        else:
-            annual_cumsum = {year: np.zeros(12) for year in unique_years}
-            for year in unique_years:
-                for month in range(1, 13):
-                    monthly_data = x[(years == year) & (months == month)]
-                    cumulative = np.sum(monthly_data)
-                    annual_cumsum[year][month - 1] = (
-                        cumulative + annual_cumsum[year][month - 2] if month > 1 else cumulative
-                    )
-
-            for month in range(12):
-                values = [annual_cumsum[year][month] for year in unique_years]
-                monthly_means[month] = np.mean(values)
-                perc_25[month] = np.percentile(values, 25)
-                perc_75[month] = np.percentile(values, 75)
-                perc_10[month] = np.percentile(values, 10)
-                perc_90[month] = np.percentile(values, 90)
-
-        # Plotting
-        plt.figure(figsize=(10, 6))
-        plt.plot(range(1, 13), monthly_means, color='darkgray', label='Monthly Mean', linewidth=2)
-        plt.fill_between(range(1, 13), perc_25, perc_75, color='gray', alpha=0.5, label='25–75 Percentile')
-        plt.fill_between(range(1, 13), perc_10, perc_90, color='lightgray', alpha=0.5, label='10–90 Percentile')
-
-        # Highlight years if specified
-        if highlight_years is not None:
-            if isinstance(highlight_years, int):
-                highlight_years = [highlight_years]
-            elif not isinstance(highlight_years, list):
-                raise TypeError("highlight_years must be an int, a list of ints, or None.")
-
-            colors = ['orange', 'cyan', 'green']
-            for i, year in enumerate(highlight_years[:3]):  # up to 3 highlighted years
-                if year in unique_years:
-                    if cumulate:
-                        data = annual_cumsum[year]
-                    else:
-                        data = [np.mean(x[(months == month) & (years == year)]) for month in range(1, 13)]
-                    plt.plot(range(1, 13), data, color=colors[i], linewidth=2, label=f'Year {year}')
-                else:
-                    print(f"Warning: Year {year} not in the dataset.")
-
-        plt.xlabel('Month')
-        plt.ylabel('Cumulative Value' if cumulate else 'Mean Value')
-        title = 'Monthly Profile' if name is None else f'Monthly Profile - {name}'
-        plt.title(title)
-        plt.legend()
-        plt.grid(True)
-        plt.xticks(range(1, 13))
-        plt.tight_layout()
-        plt.show()
-
     def plot_monthly_profile(self, var=None, cumulate=False, highlight_years=None,two_year=False):
         """
         Plot a 24-month profile of a time series, with percentile bands and optional highlighted years.
@@ -656,64 +554,6 @@ class Precipitation(BaseDroughtAnalysis):
             print(
                 "*************** Alternatively, you can access to: \n >>> precipitation.ts (P timeseries), \n >>> precipitation.spi_like_set (SPI (1:K) timeseries) \n >>> precipitation.SIDI (D_{SPI}) \n to visualize the data your way or proceed with further analyses!")
 
-    def import_forecast(self, forecast_path,clima_path = None):
-        """
-            Imports forecast data from a NetCDF file and, if a climatology file is provided,
-            computes forecast anomalies relative to the climatology.
-
-            Args:
-                forecast_path (str): Path to the NetCDF file containing forecast data.
-                clima_path (str, optional): Path to the NetCDF file containing climatology data.
-
-            Raises:
-                ValueError: If `forecast_path` is not provided.
-                ValueError: If the climatology timestamps are not a multiple of the forecast period.
-
-            Sets:
-                self.forecast_ts (np.ndarray): 2D array (N_members, N_forecast) containing forecast timeseries.
-                self.forecast_m_cal (np.ndarray): Array with forecast timestamps.
-            """
-        # Check if paths are provided
-        if not forecast_path:
-            print("No forecast paths provided. Skipping forecast import.")
-            self.forecast_ts = None
-            self.forecast_m_cal = None
-            return  # Exit early if no forecast data is available
-
-        forecast_ts,m_cal,_ = import_netcdf_for_cumulative_variable(forecast_path,['tp','rr','precipitation','prec','LAPrec1871'],self.shape,self.verbose)
-        n_forecasts,n_members  = np.shape(forecast_ts) # Number of forecast time steps
-        self.forecast_m_cal = m_cal
-        print(f'Forecast cover the time span form {m_cal[0,0]}/{m_cal[0,1]} to {m_cal[-1,0]}/{m_cal[-1,1]}')
-
-        if clima_path is not None:
-            print("Relativizing forecasts to the climatology...")
-            # Import climatology data
-            clima_ts, clima_m_cal,_ =  import_netcdf_for_cumulative_variable(clima_path, ['tp','rr','precipitation','prec','LAPrec1871'],self.shape,self.verbose)
-            try:
-                n_months, n_clima_members = np.shape(clima_ts)
-                if n_forecasts != n_months:
-                    raise ValueError('the number of months in the forecasts window are different from those in the climatological window')
-                n_years = int(n_months/  n_forecasts)
-                # Ensure climatology data is a multiple of forecast period
-                if n_months %  n_forecasts !=0:
-                    raise ValueError("The timestamp of the climatology is not a multiple of the forecast period.")
-                # chekced! -------------------------------
-                mat = clima_ts.reshape(n_years, n_forecasts,n_clima_members)
-                climatology = np.mean(np.mean(mat, axis=0),axis=1)
-                anomalies_ts =  np.array([(forecast_ts[:,m] - climatology)/climatology for m in range(n_members)])
-            except ValueError:
-                climatology = np.array(clima_ts,copy=True)
-                anomalies_ts =  np.array([(forecast_ts[:,m] - climatology)/climatology for m in range(n_members)])
-              # in case of a unique timeseries
-
-
-            # Assign results to class attributes
-            self.forecast_ts = anomalies_ts.copy()
-        else:
-            print('No climatology provided, store raw forecast in .forecast_ts')
-            self.forecast_ts = forecast_ts
-        print('Forecasts imported successfully!')
-
     def analyze_correlation(self, streamflow,plot=True):
         """
         Analyze correlations between Precipitation SIDI and Streamflow SPI for different weightings and K values.
@@ -907,178 +747,6 @@ class Streamflow(BaseDroughtAnalysis):
         super().__init__(self.ts, self.m_cal, self.K,
                          self.start_baseline_year, self.end_baseline_year,self.basin_name,
                          self.calculation_method, self.threshold, self.index_name)
-
-
-    def old_load_streamflow_from_csv(self, file_path, date_col=None, value_col=None):
-        """
-        Load and process streamflow data from a csv file.
-
-        This method automatically detects the file format, delimiter, and column structure,
-        then processes the data to create a usable streamflow time series. If the data is
-        daily, it aggregates it to monthly averages.
-
-        Args:
-            file_path (str): Path to the streamflow data file.
-            date_col (str, optional): Name of the column containing date values. If None, it is auto-detected.
-            value_col (str, optional): Name of the column containing streamflow values. If None, it is auto-detected.
-
-        Returns:
-            None: Updates `self.ts` and `self.m_cal` attributes, and recalculates derived attributes.
-
-        """
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"The file '{file_path}' does not exist.")
-
-        skip_rows = 0  # Contatore righe da saltare
-
-        with open(file_path, "r", encoding="utf-8", errors="replace") as file:
-            lines = file.readlines()  # Legge tutte le righe del file
-
-
-        while skip_rows < len(lines):
-
-            # explore data getting the first 5 rows starting from skip_rows
-            test_block = lines[skip_rows:skip_rows + 5]
-
-            # Try separating columns using a space, comma or semicolon.
-            split_lines = [line.strip().replace(",", ".").split() for line in test_block]
-
-            # Convert the first two columns to numeric arrays
-            split_lines = np.array(split_lines,dtype=object)
-            # print(f'skip_rows = {skip_rows}')
-            if split_lines.ndim>1:
-                if (skip_rows==0) | (skip_rows==1):
-                    skip_rows=0
-                delimiter = detect_delimiter(lines[skip_rows + 1])
-                break
-            else:
-                skip_rows += 1
-
-        # !tail -n 20 file_path
-
-        end_row = 1 if skip_rows==0 else skip_rows
-        while end_row < len(lines):
-
-            # explore data getting the first 5 rows starting from skip_rows
-            test_block = lines[end_row:end_row + 5]
-
-            # Try separating columns using a space, comma or semicolon.
-            split_lines = [line.strip().replace(",", ".").split() for line in test_block]
-
-            # Convert the first two columns to numeric arrays
-            split_lines = np.array(split_lines,dtype=object)
-            # print(f'skip_rows = {skip_rows}')
-            if split_lines.ndim==1:
-                break
-            else:
-                end_row += 1
-
-        if len(lines)-end_row==0: #no skipfooter
-            skip_footer = 0
-        elif len(lines)-end_row>0:
-            skip_footer = len(lines)-end_row-skip_rows
-        else:
-            print('check the footer of the csv file')
-
-        df = pd.read_csv(
-            file_path,encoding="utf-8",
-            encoding_errors="ignore",
-            delimiter=delimiter,
-            skiprows=skip_rows,
-            skipfooter=skip_footer,
-            na_values=['-9999', '-999.000', '@'],
-            engine='python'
-        )
-
-        # Remove extra spaces from column names
-        # df.columns = df.columns.str.strip()
-        df_example =  df.iloc[0].to_numpy()
-
-        # Auto-detect date and value columns if not provided
-        for col in range(3):
-            try:
-                check = check_datetime(df_example[col][0:10])
-                if date_col is None and (check == True or ":" in df_example[col]):
-                    date_column = df_example[col]
-
-            except IndexError:
-                pass
-
-        # for col in range(5):
-        #     try:
-        #         check = check_datetime(df_example[col][0:10])
-        #         if value_col is None and (check ==False and ":" not in df_example[col]):
-        #             value_column = df_example[col]
-        #     except IndexError:
-        #         pass
-        for col in range(5):
-            try:
-                check = check_datetime(df_example[col][0:10])
-                pass
-            except IndexError:
-                try:
-                    df_example[col]
-                    if value_col is None:
-                        value_column = df_example[col]
-                except IndexError:
-                    pass
-
-        if value_col is None:
-            value_col = [col for col in df.columns if df[col].eq(float(value_column)).any()][0]
-        if date_col is None:
-            date_col = [col for col in df.columns if df[col].eq(date_column).any()][0]
-
-        try:
-            df[value_col].mean()
-        except TypeError:
-            decimal = ','
-            df = pd.read_csv(
-                file_path, encoding="utf-8", encoding_errors="ignore",
-                delimiter=delimiter,
-                skiprows=skip_rows,
-                na_values=['-9999', '-999.000', '@'],
-                engine='python',
-                decimal=decimal,
-            )
-
-        # Convert date column to datetime
-        df[date_col] = pd.to_datetime(df[date_col])
-        df = df.dropna(subset=[date_col, value_col])
-
-        # Aggregate daily data to monthly averages if needed
-        if df[date_col].dt.day.unique().size > 1:
-            print("Risoluzione giornaliera rilevata: aggrego a medie mensili.")
-            # -------------------------------------------------------
-            # # Here to counts the number of monthly observations
-            # grouped = df.set_index(date_col).resample('ME')[value_col]
-            # count_valid = grouped.count()
-            # count_total = df.set_index(date_col).resample('ME')[value_col].size()
-            # ratio = count_valid / count_total
-            # monthly_mean = grouped.mean()
-            # # choosign at least 70% of availabel days
-            # monthly_mean[ratio >= 0.7].reset_index()
-            # -------------------------------------------------------------
-
-            df = df.resample('ME', on=date_col)[value_col].mean().reset_index()
-
-        # Update class attributes
-
-        self.ts = df[value_col].values
-        self.m_cal = np.column_stack((df[date_col].dt.month, df[date_col].dt.year))
-        # Forza il ricalcolo degli attributi derivati
-        self.spi_like_set, self.c2r_index = self._calculate_spi_like_set()
-        self.SIDI = self._calculate_SIDI()
-        self.CDN = self._calculate_CDN()
-        # self.CDN = np.cumsum(self.spi_like_set[0])
-
-        # Welcome and guidance messages
-        print("#########################################################################")
-        print("streamflow data has been imported successfully.")
-        print(f"data starts from {self.m_cal[0]} and ends on {self.m_cal[-1]}.")
-        print("#########################################################################")
-        print("Run the following class methods to access key functionalities:\n")
-        print(" >>> ._plot_scan(): to plot the sqiset heatmap and D_{SPI} \n ")
-        print("*************** Alternatively, you can access to: \n >>> streamflow.ts (Q timeseries), \n >>> streamflow.spi_like_set (SQI (1:K) timeseries) \n >>> streamflow.SIDI (D_{SQI}) \n to visualize the data your way or proceed with further analyses!")
 
     def load_streamflow_from_csv(self, file_path, date_col=None, value_col=None, verbose=True):
         """
@@ -1600,23 +1268,6 @@ class Teleindex(BaseDroughtAnalysis):
 
 
 
-##
-import signal
-import sys
-
-def handle_interrupt(signum, frame):
-    print("\nInterruzione richiesta. Uscita dalla funzione in corso...")
-    raise KeyboardInterrupt  # Solleva un'eccezione ma non termina il kernel
-
-# Imposta un gestore per SIGINT (Ctrl+C)
-signal.signal(signal.SIGINT, handle_interrupt)
-
 if __name__ == "__main__":
-    try:
-        # Qui esegui i tuoi calcoli o lanci le tue classi
-        print("Eseguo il programma... Premi Ctrl+C per interrompere.")
-        while True:
-            pass  # Sostituiscilo con il tuo codice effettivo
-
-    except KeyboardInterrupt:
-        print("\n Calcolo interrotto. Il kernel è ancora attivo.")
+    print("This module contains the main classes for computing SPI, SIDI, and CDN indices.")
+    print("Import the classes into an external script to use them in your project.")

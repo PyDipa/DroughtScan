@@ -1,5 +1,7 @@
 """
 author: PyDipa
+# © 2025 Arianna Di Paola
+# License: GNU General Public License v3.0 (GPLv3)
 
 Function decorators for logging and performance monitoring.
 
@@ -12,7 +14,7 @@ This module provides decorators to:
 Main decorators:
 - `@requires_forecast_data`: Ensures forecast data are available before executing a method.
 
-Used by: `core.py`, `ESM_scenarios.py`, `statistics.py`.
+Used by: `core.py`, `statistics.py`.
 """
 
 

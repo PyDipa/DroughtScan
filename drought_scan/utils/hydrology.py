@@ -1,5 +1,7 @@
 """
 author: PyDipa
+# © 2025 Arianna Di Paola
+# License: GNU General Public License v3.0 (GPLv3)
 
 Hydrological Computations.
 
@@ -13,7 +15,7 @@ Main functions:
 - `streamflow_anomalies()`: Detects anomalies in streamflow data.
 - `compute_water_balance()`: Estimates basin-level water balance.
 
-Used by: `core.py`, `ESM_scenarios.py`, `drought_indices.py`.
+Used by: `core.py`, `drought_indices.py`.
 """
 
 import numpy as np
