@@ -114,6 +114,29 @@ Below are the most impactful options, with defaults and when you might want to c
 
 - **`verbose` (bool)** — print initialization details (default `True`).
 
+**Defaults**
+
+- **Baseline**: a stable and representative climatological period of at least 30-years is recommended. 50-years in good.  
+Using the same baseline across precipitation and streamflow analyses ensures comparability of results.
+
+- **Threshold**: a good starting point is **–1**, corresponding to one standard deviation below the mean of the standardized index.
+This level is widely used in drought monitoring (e.g. to flag *severe drought*).  
+You can easily adjust the threshold (e.g. –1.5 for stricter detection) and test the impact on event identification.
+
+- These defaults are directly used by the method:
+
+```python
+ds.severe_events()
+```
+and can be visualized through:
+
+```python
+ds.plot_scan()
+ds.plot_trends()
+```
+
+which show how baseline and threshold affect the scan of SPI/SIDI/CDN time series and the detection of drought episodes.
+
 ---
 
 ## 4) Using different index families
@@ -235,7 +258,7 @@ Precipitation and streamflow are intrinsically linked as part of the hydrologica
 ## 8.1) Reproducibility tips
 
 - Fix your **baseline** and stick to it across runs for fair comparisons between Precipitation and Streamflow.  
-- Streamflow data format acceped are CSV or EXCELL
+- Streamflow data format acceped are CSV or Excel
 - run the Precipitation method "analyze_correlation";
 - recompute the optimal SIDI
 
