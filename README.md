@@ -19,24 +19,24 @@ for examples and usage notes see:
 - [Visualization Guide](tests/docs/visualization_guide.md) → Demonstrates how to use some visualization methods.
 
 ---
+## Installation
 
-## Note on Installation
-**Drought Scan** will soon be available on PyPI. 
+> **Note:** DroughtScan will soon be available on PyPI.  
+> Until then, it can be installed directly from this repository.
 
-To use Drought Scan, you can install it directly from GitHub:
-
+### Option 1: Clone and install locally
 ```bash
 git clone https://github.com/PyDipa/DroughtScan.git
 cd DroughtScan
 pip install .
 ```
-Alternatively, you can use the following command to install directly from the repository:
 
+Option 2: Install directly from GitHub (no local clone)
 ```bash
 pip install git+https://github.com/PyDipa/DroughtScan.git
 ```
 
-Ensure that all dependencies listed in the repository are installed in your Python environment. Refer to the requirements.txt file for more details.
+Ensure that all dependencies listed in the repository are installed in your Python environment. Refer to the pyproject.toml file for more details.
 
 ## What Drought-Scan Does
 
