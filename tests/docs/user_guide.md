@@ -136,6 +136,8 @@ ds.plot_trends()
 ```
 
 which show how baseline and threshold affect the scan of SPI/SIDI/CDN time series and the detection of drought episodes.
+ 
+Please see the *visualization_guide.md* for further details about plotting methods
 
 ---
 
@@ -160,7 +162,7 @@ ds = DS.Precipitation(
     index_name='SPI (Pearson3)'
 )
 
-ds = DS.Precipitation(
+ds2 = DS.Precipitation(
     prec_path=prec_path,
     shape_path=shape_path,
     start_baseline_year=1981,
@@ -222,11 +224,42 @@ fig.colorbar(im, ax=ax, label='SPI')
 plt.tight_layout()
 ```
 
+Please see the *visualization_guide.md* for further details about plotting methods
+
 ---
 
 
 ## 7) Streamflow (SQI), Pet and Balance (SPEI) classes
 For drought analysis based on other standardiezed indices like  SQI, SPEI or SPETI you can use the corresponding  `Streamflow`, `Balance ` and `Pet`  classes. They shares the same initialization philosophy; provide `ts/m_cal` **or** file paths, set `K`, `baseline`, `calculation_method` (`f_spi` on positive flows as Streamflow, f_spei for the P-PET balance and f_zscore for PET), and optionally a `threshold` aligned with your risk definition. Outputs include **SQI/SPEI/SPETI** (SPI-like arrays), **SIDI**, and **CDN** computed by using the 1-month scale of the obtained index.
+
+
+The **substantial differences** are limited to:
+
+- **Data source and I/O**  
+  - *Precipitation*, *Pet* and *Balance*: typically read **NetCDF** variables, with possible names defined internally.  
+  - *Streamflow*: accepts **CSV/Excel** point series, with utilities for gap-filling and direct reassignment of `ts/m_cal`.  
+
+Note: If daily data are detected in Streamflow, they are **averaged** to monthly means. In contrast, `Precipitation`, `Pet`, and `Balance` are **accumulated** over the month.
+
+
+- **Domain of values and defaults**  
+  - *Precipitation*: strictly positive, strongly skewed → default `Gamma` (`f_spi`).  
+  - *Streamflow*: strictly positive, strongly skewed, with possible zeros/missing → default `Gamma` (`f_spi`), with special handling for gaps.  
+  - *Pet*: positive but less skewed → defaults often `z-score` (`f_zscore`) or `Pearson III`.  
+  - *Balance (P–PET)*: can be negative as well as positive → default `Pearson III` (`f_spei`), i.e. the usual SPEI transform.  
+
+- **Interpretation**  
+  - *Precipitation*: meteorological drought (SPI/SIDI/CDN).  
+  - *Streamflow*: hydrological drought (SQI/SIDI/CDN), directly comparable to precipitation through correlation.  
+  - *Pet*: climatic driver that can be used on its own or combined with precipitation.  
+  - *Balance*: meteorological drought using the input for SPEI-like indices.  
+
+In practice this means that, aside from the different input format and sensible defaults,
+all classes are **symmetric**: once initialized they provide the same workflow and
+diagnostic outputs, allowing the user to compare meteorological, hydrological and climatic
+drought signals under a unified framework.
+
+
 
 ```python
 import drought_scan as DS
@@ -240,14 +273,7 @@ streamflow = DS.Streamflow(data_path = river_path,
                         end_baseline_year=tb2,
                         basin_name = 'Po')
 
-# Note:  in Streamflow it is possible to assign or update the time series (ts) and calendar (m_cal) if provided by user.  SPI and SIDI are recomputed acordingly. 
-
-# EXEMPLE
-# ts = np.random.gamma(shape=2.0, scale=30.0, size=600)          # (T,)
-# years = np.repeat(np.arange(1975, 2025), 12)[:600]
-# months = np.tile(np.arange(1, 13), 50)[:600]
-# m_cal = np.column_stack([months, years])  
-# streamflow.assign_streamflow_data(ts=ts,m_cal=m_cal)
+ 
 ```
 
 
@@ -305,12 +331,17 @@ streamflow = DS.Streamflow(data_path = river_path,
 
 # let's look to the SIDI vs SQI1 correlation:
 A = ds.analyze_correlation(streamflow,plot=True)
+# NB: dots can be coloured by season (April-October and November-March):
+A = ds.analyze_correlation(streamflow,plot=True,yellow=False,seasonal=True)
+# or by month
+A = ds.analyze_correlation(streamflow,plot=True,yellow=False,seasonal=False)
 
 
 # if desiderd, SIDI can be recompiuted with optimal K and weight_index and became a proxy for SQI1
 ds.recalculate_SIDI(K=A['best_k'],weight_index=A['col_best_weight'],overwrite=True)
-
 ```
+
+
 ## 8.2) Streamflow Gap Filling
 Observed streamflow time series may contain **missing values** due to monitoring gaps or sensor errors.  
 The method `gap_filling` of the `Streamflow` class allows you to fill short gaps and preserve continuity in index calculation.
@@ -320,7 +351,7 @@ You must first **optimize the SIDI configuration** against the streamflow with `
 
 ```python
 # we have previously run A = ds.analyze_correlation(streamflow,plot=True)
-# So A holds the results from the optimitation method:
+# So A holds the results from the optimization method:
 print("Best K:", A['best_k'], "Best weight index (SIDI):", A['col_best_weight'])
 
 # 4) Gap filling (SIDI-guided) — uses the precipitation object and the optimal settings
@@ -328,7 +359,6 @@ streamflow.gap_filling(ds, K=A['best_k'], weight_index=A['col_best_weight'])
 
 ```
 ---
-
 
 
 ## 9) Pet and Balance  utilities 
@@ -342,7 +372,8 @@ An example NetCDF file is provided in `tests/ERA5_monthly_pev.nc`. The workflow 
 import drought_scan as DS
 shape_path = 'tests/data/bacino_pontelagoscuro.shp'
 pet_path = 'tests/data/ERA5_monthly_pev.nc'
-
+tb1 = 1953
+tb2 = 2003
 pet = DS.Pet(
     data_path=pet_path,
     shape_path=shape_path,
@@ -354,17 +385,22 @@ pet = DS.Pet(
 print("PET time series shape:", pet.ts.shape)
 print("SPI-like PET indices:", pet.spi_like_set.shape)
 print("SIDI from PET:", pet.SIDI.shape)
+
 ```
+
 
 Use PET as an independent climatic driver or combine it with precipitation to build water balance indicators
 
 ---
 
-## 3) Balance (P–PET) > SPEI
+## 9.2) Balance (P–PET) > SPEI
 
-The `Balance` class computes the **monthly climatic water balance** (precipitation minus PET).  
+The `Balance` class computes the **monthly climatic water balance** (precipitation (P) minus potential evapotranspirtion (PET).  
 This is the standard input for SPEI index, which capture drought as a function of both supply (P) and virtual water demand (PET).
 
+NOTE 1: using gridded data for P and PET with different spatial resolutions is not a problem: data are first imported, aggregated spatially over the basin and then, when single monthly timeseries are ready for P and PET, derive the P-PET  timeseries used to initialize the instance of *Balance*.
+
+NOTE 2: using input data for P and PET covering a different time-span is not a problem: the script select only data on a common timestamp wich is reported in *.m_cal*. 
 ```python
 import drought_scan as DS
 prec_path = 'tests/data/LAPrec1871.v1.1.nc'
@@ -381,16 +417,103 @@ spei = DS.Balance(
     basin_name='Po',
 )
 
-print("Balance time series (P–PET):", balance.ts.shape)
-print("SPEI-like indices (1–K months):", balance.spi_like_set.shape)
-
+print("length of spei timeseries (P–PET):", spei.ts.shape)
+print("shape of the SPEI-like indices (1–K months):", spei.spi_like_set.shape)
+print(f"time-span: {spei.m_cal}")
 ```
 
 This setup is particularly useful in climate change studies, where increasing PET may exacerbate drought even under stable precipitation.
 
 
 
+## 10 Temperature class
 
+The `Temperature` class extends the same philosophy used for `Precipitation`, `Pet`, `Balance`, and `Streamflow`, 
+but is specialized for temperature datasets.
 
+- **Input handling**  
+  - Accepts **NetCDF** temperature datasets (daily or monthly).  
+
+- **Defaults**  
+  - Since temperature is generally close to Gaussian and can take both positive and negative values, 
+    the default `calculation_method` is the **z-score** (`f_zscore`).  
+  - Alternative methods (`f_spei`, `f_spi`) can still be assigned if desired, but are less common.  
+
+- **Interpretation**  
+  - Provides standardized indices of temperature variability, which can be used as an independent drought driver 
+    (e.g., heat stress episodes) or in conjunction with other classes.  
+  - Outputs include the usual **SPI-like set** (in this case, temperature indices), **SIDI**, and **CDN** 
+    computed from the 1-month scale.
+  - 
+```python
+import drought_scan as DS
+shape_path = 'tests/data/bacino_pontelagoscuro.shp'
+temp_path = 'tests/data/ERA5_monthly_t2m.nc'
+tb1 = 1953
+tb2 = 2024
+Temp = DS.Temperature(
+    data_path=temp_path,
+    shape_path=shape_path,
+    start_baseline_year=tb1,
+    end_baseline_year=tb2,
+    basin_name='Po'
+)
+
+print("T time series shape:", Temp.ts.shape)
+print("SPI-like T indices:", Temp.spi_like_set.shape)
+print("SIDI from T:", Temp.SIDI.shape)
+```
 ---
 
+### Teleindex class
+
+The `Teleindex` class is meant for **large-scale climate drivers** (e.g., Niño3.4, NAO, AO, IOD), provided as a
+single time series with a calendar. It reuses the common pipeline (SPI-like multi-scale set, **SIDI**, **CDN**),
+but differs from the hydro-meteorological classes in a few key ways.
+
+- **Input handling**
+  - Accepts `ts` + `m_cal` directly **or** `data_path` via `import_timeseries(...)`.
+  - No shapefile or spatial aggregation: teleconnections are basin-agnostic, exogenous drivers.
+  - If **daily** data are detected, values are **averaged to monthly means** (not summed).
+    This mirrors `Temperature` (monthly mean), while `Precipitation`, `Pet` and `Balance` are monthly **sums**.
+
+- **Defaults and normalization**
+  - Default `calculation_method` is **Pearson III** (`f_spei`) to accommodate signed, potentially skewed indices.
+    You can switch to `f_zscore` if the series is close to Gaussian, or keep `f_spei` for robustness.
+  - Set `index_name` to the specific driver (e.g., `"Niño3.4"`, `"NAO"`) for clear labeling in plots.
+
+- **Purpose and interpretation**
+  - Produces a **SPI-like multi-scale set** of the teleconnection, its **SIDI** (weighted multi-scale integration),
+    and **CDN** (from the 1-month scale).
+  - Intended for **diagnostics and coupling** with basin indicators (e.g., correlation/lag analysis with SIDI from
+    precipitation or SQI1 from streamflow) and for **predictor design** in ML workflows.
+
+- **Practical notes**
+  - Prefer **raw (non-standardized)** teleconnection series as input; the class will standardize them using the
+    selected method over your chosen baseline.
+  - Keep **baseline years** consistent with other classes when you plan cross-comparisons.
+  - The helper method `assign_streamflow_data(...)` updates the internal series and recomputes indices; despite the
+    name, it simply assigns a generic teleconnection time series (daily or monthly) and aggregates to monthly if needed.
+
+
+```python
+import numpy as np
+import drought_scan as DS
+from drought_scan.utils import f_zscore
+
+# Example: 600 months of synthetic precipitation (positive) and a matching calendar
+ts = np.random.gamma(shape=2.0, scale=30.0, size=600)          # 
+
+years = np.repeat(np.arange(1975, 2025), 12)[:600]
+months = np.tile(np.arange(1, 13), 50)[:600]
+m_cal = np.column_stack([months, years])                        # 
+
+tb1 = 1975
+tb2 = 2024
+
+
+index = DS.Teleindex(ts=ts, m_cal = m_cal,start_baseline_year=tb1,
+                        end_baseline_year=tb2,calculation_method=f_zscore,
+                     index_name='my_index',
+                   verbose = False)
+```

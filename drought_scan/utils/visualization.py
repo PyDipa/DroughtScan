@@ -68,7 +68,63 @@ def spi_cmap(n_levels=13):
     else:
         return heatmap_cmap()
 
-def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None,reverse_color=False):
+def highlight_drought(ax, series, color='brown' ,offset=None, threshold=None):
+    """
+      Shade vertical bands over contiguous intervals where the series is below a threshold.
+
+      The function detects runs where ``series < threshold`` and draws semi-transparent
+      vertical spans on the given Axes to highlight drought periods. Horizontal positions
+      are interpreted as integer sample indices (0, 1, 2, ...). If your plotted x-values
+      are shifted relative to these indices, use ``offset`` to align the bands.
+
+      Parameters
+      ----------
+      ax : matplotlib.axes.Axes
+          Axes to draw on.
+      series : array-like of shape (n,)
+          1D numeric sequence (e.g., NumPy array or pandas Series). NaNs are treated
+          as non-drought and break contiguous intervals.
+      color : str or tuple, default: 'brown'
+          Color of the shaded bands.
+      offset : int or float, optional
+          Horizontal shift added to band positions. Useful when the plot’s x-axis
+          does not directly match indices 0..n-1. If None, no shift is applied.
+      threshold : float, optional
+          Drought threshold; values strictly less than this are highlighted. If None,
+          a default of -1 is used.
+
+      Returns
+      -------
+      None
+          Draws on ``ax`` and returns nothing.
+
+      Notes
+      -----
+      - The Bands are used in the plot_scan() method which recall the plot_overview() functiont to highlight drought in the CDN curve
+
+    """
+
+    if threshold is None:
+        threshold = -1
+
+    if threshold <0:
+        below = series < threshold
+    else: #for Pet and Temperature indices or for classes where the stress condiction are above the threshold
+        below = series > threshold
+
+    starts = np.where((~below[:-1]) & below[1:])[0] + 1
+    ends = np.where(below[:-1] & (~below[1:]))[0] + 1
+    if below[0]:
+        starts = np.insert(starts, 0, 0)
+    if below[-1]:
+        ends = np.append(ends, len(series))
+    for start, end in zip(starts, ends):
+        if offset is None:
+            ax.axvspan(start-0.5, end-0.5, color=color, alpha=0.1)
+        else:
+            ax.axvspan(start +offset-0.5, end +offset-0.5, color=color, alpha=0.1)
+
+def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None):
     """
     Plot the drought scan visualization, including CDN, SPI, and SIDI metrics.
 
@@ -112,7 +168,7 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None,reverse_
     # cmap[6, :] = (0.6, 0.6, 0.6, 1)
     # cmap = mpl.colors.LinearSegmentedColormap.from_list('Custom cmap', cmap, xmap.N)
     # USING CRIMERI
-    cmap = spi_cmap().reversed() if reverse_color else spi_cmap()
+    cmap = spi_cmap().reversed() if DSO.threshold>0 else spi_cmap()
 
 
     bounds = np.array([-3, -2.5, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 2.5, 3])
@@ -166,35 +222,11 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None,reverse_
 
     # ----------------------------------------------------
     # PLOT 1: Cumulative Deviation of SPI-1 (CDN)
-    # Calcola differenza su una finestra mobile di 6
-    window = 36
-    xx = np.arange(len(DSO.CDN))
-    trend = np.convolve(DSO.CDN, np.ones(window) / window, mode='same')
-    diff = np.diff(trend, prepend=trend[0])  # Derivata discreta del trend == trend[1::]-trend[0:-1]
-    norm_diff = Normalize(vmin=-np.max(np.abs(diff)), vmax=np.max(np.abs(diff)))
-
-    # Interpola le dimensioni per allineare con x e y
-    # trend_start = window // 2
-    # x_plot = xx[trend_start:len(xx) - trend_start]
-    # y_plot = DSO.CDN[trend_start:len(xx) - trend_start]
-    # diff_plot = diff[trend_start:len(xx) - trend_start]
 
     ax[0].plot(np.arange(0,len(DSO.CDN)), DSO.CDN, linewidth=1, color='k')
-    # Plot colorato - altra versione
-    # for i in range(len(xx) - 1):
-    #     ax[0].plot(xx[i:i + 2], DSO.CDN[i:i + 2], linewidth=2, color=cdnmap(norm_diff(diff[i])))
-    #     # ax[0].plot(x_plot[i:i + 2], y_plot[i:i + 2], linewidth=2,color=cdnmap(norm_diff(diff_plot[i])))
 
+    highlight_drought(ax[0], SIDI, threshold=DSO.threshold)
 
-    # # OLD VERSION
-    # bal = DSO.CDN  # Compute cumulative deviation
-    # xx = np.arange(len(bal))
-    # normalize = mpl.colors.Normalize(vmin=-20, vmax=20)
-    # ax[0].plot(bal, 'k', label='CDN', linewidth=1, alpha=0.3)
-    # for i in range(len(xx) - 1):
-    # 	ax[0].fill_between([xx[i], xx[i + 1]],
-    # 	                   [bal[i], bal[i + 1]],
-    # 	                   color=cdnmap(normalize(bal[i])), alpha=0.6)
     ax[0].axhline(y=0, c='k', linestyle=':', alpha=0.5)
     ax[0].set_xticks([])
     ax[0].set_ylabel('CDN', fontsize=12)
@@ -230,13 +262,14 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None,reverse_
     # ----------------------------------------------------
     # PLOT 3: SIDI Time Series
     RedArea = np.array(SIDI, copy=True)
-    if reverse_color:
+    # for Pet, Temeprature and istances where the positive anomalies are stressful condiction
+    # we have to reverse the palette and the shaded areas
+    if DSO.threshold>=0:
         RedArea[RedArea < DSO.threshold] = np.nan  # Highlight anomalies ABOVE threshold
         dot = 0.7
     else:
         RedArea[RedArea > DSO.threshold] = np.nan  # Highlight anomalies BELOW threshold
         dot = 0.3
-
     ax[2].plot(np.arange(0, len(SIDI)), SIDI, color='k', linewidth=1, label='D', alpha=0.8)
     ax[2].axhline(y=DSO.threshold, c='k', linestyle=':', alpha=0.5)
     ax[2].fill_between(np.arange(0, len(SIDI)), RedArea, DSO.threshold,
@@ -370,13 +403,14 @@ def plot_cdn_trends(DSO, windows, ax=None,year_ext=None):
         ax = ax.ravel()
     else:
         if len(windows) == 1:
-            ax = [ax]  # singolo asse -> metti in lista
+            ax = [ax]  # singole axis
         else:
-            ax = np.asarray(ax).ravel()  # assicura che sia indicizzabile
+            ax = np.asarray(ax).ravel()  # make it iterable
+        fig = ax[0].figure
 
     normal_values = DSO.normal_values()
     coeff = DSO.c2r_index
-    # Coefficiente medio per convertire delta standardizzato in mm
+    # average std, used to move from delta changes into mm
     std_to_mm = np.mean([np.polyval(coeff[0, m, :], 1) - normal_values[m] for m in range(12)])
     anni = np.unique(DSO.m_cal[:, 1])
 
@@ -384,7 +418,7 @@ def plot_cdn_trends(DSO, windows, ax=None,year_ext=None):
     for i, window in enumerate(windows):
         R = DSO.find_trends(window=window)
         val = R["delta"] * std_to_mm
-        val[R['trend'] == 0] = 0  # annulla dove non c'è trend significativo
+        val[R['trend'] == 0] = 0
         line1,=ax[i].plot(DSO.CDN, '-k',label='CDN')
         ax[i].set_ylabel('CDN', fontsize=12)
         # ax[i].legend(loc=2)
@@ -397,32 +431,29 @@ def plot_cdn_trends(DSO, windows, ax=None,year_ext=None):
         ax2.axhline(y=0,color='lightgrey')
         ax2.set_ylabel('Change [mm]', fontsize=12)
         ax2.set_xlim(36, len(val))
-        # Trova massimo assoluto del valore da rappresentare
+
+        # ----------------------------------------------------
+        # ylim domain for ax2:
         ymax = np.nanmax(np.abs(val))
+        n_levels = 11
+        step = np.ceil(ymax / ((n_levels - 1) // 2))
+        base = 10 ** np.floor(np.log10(step))
+        for mult in [1, 2, 5, 10]:
+            if step <= mult * base:
+                step = mult * base
+                break
+        # make it symmetric
+        ymax_rounded = int(np.ceil(ymax / step) * step)
+        yticks = np.arange(-ymax_rounded, ymax_rounded + step, step)
+        # ----------------------------------------------------
 
-        # Arrotonda al multiplo di 100 superiore
-        ymax_rounded = int(np.ceil(ymax / 100.0)) * 100
-
-        # Espandi se non bastano 7 tick (devono andare da –N a +N)
-        if ((2 * ymax_rounded // 100 + 1) < 7):
-            ymax_rounded = 300  # minimo range da –300 a 300 → 7 tick
-
-        # Crea i tick: es. da –300 a 300 con passo 100
-        if ymax_rounded<1000:
-            yticks = np.arange(-ymax_rounded, ymax_rounded + 1,250)
-        else:
-            yticks = np.arange(-ymax_rounded, ymax_rounded + 1, 300)
-
-
-        # Applica a ax2
         ax2.set_yticks(yticks)
         ax2.set_ylim(yticks[0], yticks[-1])
 
-        # ax2.legend(loc=2,bbox_to_anchor=(0,0.80))
-        # Combina le due curve per una legenda unica
+        # combine the curves to work with a single label
         lines = [line1, line2[0]] #take only a proxy for the barharty
-        labels = ['CDN' , f'Trend {window} mesi']
-        # Aggiungi la legenda a uno degli assi (es. ax1)
+        labels = ['CDN' , f'trend over {window} months (moving window)']
+
         ax[i].legend(lines, labels, loc='upper left')
 
         if year_ext is None:
@@ -443,124 +474,148 @@ def plot_cdn_trends(DSO, windows, ax=None,year_ext=None):
 
             ax[i].set_xlim(x1[0], x2)
 
+
+    fig.suptitle(DSO.basin_name)
     fig.tight_layout()
 
-def monthly_profile(DSO, var=None, cumulate=False, highlight_years=None,two_year=False):
-        """
-        Plot a 24-month profile of a time series, with percentile bands and optional highlighted years.
+def monthly_profile(DSO,var=None, var_name=None,cumulate=False, ax=None,highlight_years=None, season_shift=False):
+    """
+    Plot a monthly profile of a time series, with percentile bands and optional highlighted years.
 
-        Parameters
-        ----------
-        var : np.ndarray or None, optional
-            The time series to analyze. If None, `self.ts` will be used as default.
-            Must be a 1D array with the same length as `self.m_cal`.
+    Parameters
+    ----------
+    var : a DSO timeseries to be profiled. If None, `self.ts` will be used as default.
+        Must be a 1D array with the same length as `self.m_cal`.
 
-        cumulate : bool, default=False
-            If True, compute and display the cumulative sum per month for each year.
+    var_name : str or None, optional
+        Optional label to include in the plot title.
 
-        highlight_years : list of int or int or None, optional
-            One or more years to be highlighted in the plot.
+    cumulate : bool, default=False
+        If True, compute and display the cumulative sum per month for each year.
 
-        name : str or None, optional
-            Optional label to include in the plot title.
+    highlight_years : list of int or int or None, optional
+        One or more years to be highlighted in the plot.
 
-        Returns
-        -------
-        None
-            Displays the plot.
-        """
-        if var is None:
-            x = DSO.ts.copy()
-        else:
-            x = var
+    season_shift : bool, default=False
+        If True, display the monthly profile centred on the winter season otherwise on the summer.
 
-        if len(x) != len(DSO.m_cal):
-            raise ValueError("Input variable and m_cal must have the same length.")
+    Returns
+    -------
+    None
+        Displays the plot.
+    """
+    if ax is None:
+        plt.figure(figsize=(8, 6))
+        ax=plt.gca()
+    else:
+        ax = ax
+        fig = ax.figure
 
-        months = DSO.m_cal[:, 0]
-        years = DSO.m_cal[:, 1]
-        unique_years = np.unique(years)
+    if var is None:
+        x = DSO.ts.copy()
+    else:
+        x = var
 
-        monthly_means = np.zeros(12)
-        perc_25 = np.zeros(12)
-        perc_75 = np.zeros(12)
-        perc_10 = np.zeros(12)
-        perc_90 = np.zeros(12)
 
-        if not cumulate:
+    if len(x) != len(DSO.m_cal):
+        raise ValueError("Input variable and m_cal must have the same length.")
+
+    months = DSO.m_cal[:, 0]
+    years = DSO.m_cal[:, 1]
+    unique_years = np.unique(years)
+
+    yb0 = int(DSO.start_baseline_year)
+    yb1 = int(DSO.end_baseline_year)
+    baseline_mask = (years >= yb0) & (years <= yb1)
+    baseline_years = np.unique(years[baseline_mask])
+
+    monthly_means = np.zeros(12)
+    perc_25 = np.zeros(12)
+    perc_75 = np.zeros(12)
+    perc_10 = np.zeros(12)
+    perc_90 = np.zeros(12)
+
+    if not cumulate:
+        for month in range(1, 13):
+            monthly_data = x[(months == month) & baseline_mask]
+            monthly_means[month - 1] = np.mean(monthly_data)
+            perc_25[month - 1] = np.percentile(monthly_data, 25)
+            perc_75[month - 1] = np.percentile(monthly_data, 75)
+            perc_10[month - 1] = np.percentile(monthly_data, 10)
+            perc_90[month - 1] = np.percentile(monthly_data, 90)
+    else:
+        annual_cumsum = {year: np.zeros(12) for year in unique_years}
+        for year in unique_years:
             for month in range(1, 13):
-                monthly_data = x[months == month]
-                monthly_means[month - 1] = np.mean(monthly_data)
-                perc_25[month - 1] = np.percentile(monthly_data, 25)
-                perc_75[month - 1] = np.percentile(monthly_data, 75)
-                perc_10[month - 1] = np.percentile(monthly_data, 10)
-                perc_90[month - 1] = np.percentile(monthly_data, 90)
-        else:
-            annual_cumsum = {year: np.zeros(12) for year in unique_years}
-            for year in unique_years:
-                for month in range(1, 13):
-                    monthly_data = x[(years == year) & (months == month)]
-                    cumulative = np.sum(monthly_data)
-                    annual_cumsum[year][month - 1] = (
-                        cumulative + annual_cumsum[year][month - 2] if month > 1 else cumulative
-                    )
+                monthly_data = x[(years == year) & (months == month)]
+                cumulative = np.sum(monthly_data)
+                annual_cumsum[year][month - 1] = (
+                    cumulative + annual_cumsum[year][month - 2] if month > 1 else cumulative
+                )
 
-            for month in range(12):
-                values = [annual_cumsum[year][month] for year in unique_years]
-                monthly_means[month] = np.mean(values)
-                perc_25[month] = np.percentile(values, 25)
-                perc_75[month] = np.percentile(values, 75)
-                perc_10[month] = np.percentile(values, 10)
-                perc_90[month] = np.percentile(values, 90)
+        for month in range(12):
+            values = [annual_cumsum[year][month] for year in baseline_years]
+            monthly_means[month] = np.mean(values)
+            perc_25[month] = np.percentile(values, 25)
+            perc_75[month] = np.percentile(values, 75)
+            perc_10[month] = np.percentile(values, 10)
+            perc_90[month] = np.percentile(values, 90)
 
-        # Extend the monthly stats to 24 months by repeating the cycle
-        months_n = np.arange(1, 25) if two_year else np.arange(1, 13)
-        nyears=2 if two_year else 1
-        mean_n = np.tile(monthly_means, nyears)
-        x_ticks = np.tile(np.arange(1,13),nyears)
-        p25_24 = np.tile(perc_25, nyears)
-        p75_24 = np.tile(perc_75, nyears)
-        p10_24 = np.tile(perc_10, nyears)
-        p90_24 = np.tile(perc_90, nyears)
+    # Extend the monthly stats to 24 months by repeating the cycle
+    months_n = np.arange(1, 25) if season_shift else np.arange(1, 13)
+    nyears = 2 if season_shift else 1
+    mean_n = np.tile(monthly_means, nyears)
+    x_ticks = np.tile(np.arange(1, 13), nyears)
+    p25_24 = np.tile(perc_25, nyears)
+    p75_24 = np.tile(perc_75, nyears)
+    p10_24 = np.tile(perc_10, nyears)
+    p90_24 = np.tile(perc_90, nyears)
 
-        # Plotting
-        plt.figure(figsize=(12, 6))
-        plt.plot(months_n, mean_n, color='darkgray', label='Monthly Mean', linewidth=2)
-        plt.fill_between(months_n, p25_24, p75_24, color='gray', alpha=0.5, label='25–75 Percentile')
-        plt.fill_between(months_n, p10_24, p90_24, color='lightgray', alpha=0.5, label='10–90 Percentile')
+    # Plotting
+    # plt.figure(figsize=(12, 6))
 
-        # Highlight years if specified
-        if highlight_years is not None:
-            if isinstance(highlight_years, int):
-                highlight_years = [highlight_years]
-            elif not isinstance(highlight_years, list):
-                raise TypeError("highlight_years must be an int, a list of ints, or None.")
+    ax.plot(months_n, mean_n, color='darkgray', label='Monthly Mean (baseline)', linewidth=3)
+    ax.fill_between(months_n, p25_24, p75_24, color='gray', alpha=0.5, label='25–75 Percentile')
+    ax.fill_between(months_n, p10_24, p90_24, color='lightgray', alpha=0.5, label='10–90 Percentile')
 
-            colors = ['orange', 'cyan', 'green']
-            for i, year in enumerate(highlight_years[:3]):
-                if year in unique_years and (year - 1) in unique_years:
-                    # Build 24-month series from year-1 and year
-                    if cumulate:
-                        data_prev = annual_cumsum[year - 1]
-                        data_curr = annual_cumsum[year]
-                    else:
-                        data_prev = [np.mean(x[(months == month) & (years == year - 1)]) for month in range(1, 13)]
-                        data_curr = [np.mean(x[(months == month) & (years == year)]) for month in range(1, 13)]
+    # Highlight years if specified
+    if highlight_years is not None:
+        if isinstance(highlight_years, int):
+            highlight_years = [highlight_years]
+        elif not isinstance(highlight_years, list):
+            raise TypeError("highlight_years must be an int, a list of ints, or None.")
 
-                    full_series = np.concatenate([data_prev, data_curr]) if two_year else data_curr
-                    label = f'{year - 1}-{year}' if two_year else f'{year}'
-                    plt.plot(months_n, full_series, color=colors[i], linewidth=2, label=label)
+        colors = ['tab:orange', 'tab:cyan', 'tab:purple']
+        for i, year in enumerate(highlight_years[:3]):
+            if year in unique_years and (year - 1) in unique_years:
+                # Build 24-month series from year-1 and year
+                if cumulate:
+                    data_prev = annual_cumsum[year - 1]
+                    data_curr = annual_cumsum[year]
                 else:
-                    print(f"Warning: Cannot plot N-months profile for year {year} (missing previous year).")
+                    data_prev = [np.mean(x[(months == month) & (years == year - 1)]) for month in range(1, 13)]
+                    data_curr = [np.mean(x[(months == month) & (years == year)]) for month in range(1, 13)]
 
-        plt.xlabel('Month')
-        plt.ylabel('Cumulative Value' if cumulate else 'Mean Value')
-        title = f'DS.ts Monthly Profile - {DSO.basin_name}'
-        plt.title(title)
-        plt.legend()
-        plt.grid(True)
-        plt.xticks(months_n,x_ticks)
-        plt.tight_layout()
-        plt.show()
+                full_series = np.concatenate([data_prev, data_curr]) if season_shift else data_curr
+                label = f'{year - 1}-{year}' if season_shift else f'{year}'
+                ax.plot(months_n, full_series, color=colors[i], linewidth=2, label=label)
+            else:
+                print(f"Warning: Cannot plot N-months profile for year {year} (missing previous year).")
+
+
+    ax.set_xticks(months_n)
+    ax.set_xticklabels(x_ticks)
+    ax.set_xlabel('Month')
+    ax.set_ylabel(f'{var_name} Cumulative Value' if cumulate else f'{var_name} Mean Value')
+    title = f'{DSO.basin_name}'
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True)
+    if season_shift:
+        ax.set_xlim(8,19)
+    else:
+        ax.set_xlim(1,12)
+    plt.tight_layout()
+    plt.show()
 
 

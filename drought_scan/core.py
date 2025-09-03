@@ -19,6 +19,10 @@ These classes serve as the **foundation** for the entire library.
 # License: GNU General Public License v3.0 (GPLv3)
 """
 
+try:
+    import cmcrameri.cm as cmc
+except Exception:
+    cmc = None
 
 import numpy as np
 import os
@@ -269,7 +273,7 @@ class BaseDroughtAnalysis:
 
         return cdn
 
-    def plot_scan(self, optimal_k=None, weight_index=None,year_ext=None,reverse_color=False,saveplot=False):
+    def plot_scan(self, optimal_k=None, weight_index=None,year_ext=None,saveplot=False):
         """
             Plot the drought scan visualization, including CDN, SPI-like heatmap, and SIDI.
 
@@ -279,10 +283,9 @@ class BaseDroughtAnalysis:
                 weight_index (int, optional): Weighting scheme index.
                 name (str, optional): Name of the basin.
                 index_name (str, optional): Name of the drought index (SPI, SPEI, Z-Score).
-                reverse_color (bool, optional): If True, reverse color maps and highlight upper anomalies (suggested for PET).
 
             """
-        plot_overview(self, optimal_k=optimal_k, weight_index=weight_index,year_ext=year_ext,reverse_color=reverse_color)
+        plot_overview(self, optimal_k=optimal_k, weight_index=weight_index,year_ext=year_ext)
         if saveplot==True:
             self._saveplot()
     def normal_values(self):
@@ -322,7 +325,7 @@ class BaseDroughtAnalysis:
                                name=name)
         return tstartid, tendid, duration, deficit
 
-    def find_trends(self, Y=None, window=None):
+    def find_trends(self, var=None, window=None):
         """
         Analyze trends in self.CDN using rolling windows and linear regression.
 
@@ -342,9 +345,9 @@ class BaseDroughtAnalysis:
         # Default to a window size of 60 if none is provided
         if window is None:
             window = 60
-        if Y is None:
-            Y = self.CDN
-        results = rolling_trend_analysis(Y, window=window, significance=0.05)
+        if var is None:
+            var = self.CDN
+        results = rolling_trend_analysis(var=var, window=window, significance=0.05)
         return results
 
     def plot_trends(self, windows=[12, 36, 60, 120],ax=None,year_ext=None):
@@ -360,15 +363,17 @@ class BaseDroughtAnalysis:
         """
         plot_cdn_trends(self, windows,ax=ax,year_ext=year_ext)
 
-    def plot_monthly_profile(self, var=None, cumulate=False, highlight_years=None,two_year=False):
+    def plot_monthly_profile(self, var=None, var_name=None, cumulate=False, ax=None,highlight_years=None,season_shift=False):
         """
         Plot a 24-month profile of a time series, with percentile bands and optional highlighted years.
 
         Parameters
         ----------
-        var : np.ndarray or None, optional
-            The time series to analyze. If None, `self.ts` will be used as default.
+        var : a DSO timeseries to be profiled. If None, `self.ts` will be used as default.
             Must be a 1D array with the same length as `self.m_cal`.
+
+        var_name : str or None, optional
+            Optional label to include in the plot title.
 
         cumulate : bool, default=False
             If True, compute and display the cumulative sum per month for each year.
@@ -376,8 +381,12 @@ class BaseDroughtAnalysis:
         highlight_years : list of int or int or None, optional
             One or more years to be highlighted in the plot.
 
-        name : str or None, optional
-            Optional label to include in the plot title.
+        season_shift : bool, default=False
+            If True, display the monthly profile centred on the winter season otherwise on the summer.
+
+
+    season_shift : bool, default=False
+        If True, display the monthly profile centred on the winter season otherwise on the summer.
 
         Returns
         -------
@@ -385,7 +394,7 @@ class BaseDroughtAnalysis:
             Displays the plot.
         """
 
-        monthly_profile(self, var=var, cumulate=cumulate, highlight_years=highlight_years, two_year=two_year)
+        monthly_profile(self, var=var,var_name=var_name, cumulate=cumulate,ax=ax, highlight_years=highlight_years, season_shift=season_shift)
 
     def export_for_r_plot(self, weight_index=2, optimal_k=None, name=None, out_dir="exports"):
         """
@@ -518,7 +527,9 @@ class Precipitation(BaseDroughtAnalysis):
             # Load data from file
             self.prec_path = prec_path
             # self.Pgrid, self.m_cal, self.ts = self._import_data()
-            self.ts, self.m_cal, self.Pgrid = import_netcdf_for_cumulative_variable(prec_path,['tp','rr','precipitation','prec','LAPrec1871','pre','swe','SWE','sd','SD','sf','SF'],self.shape,self.verbose)
+            self.ts, self.m_cal, self.Pgrid = import_netcdf_for_cumulative_variable(prec_path,['tp','rr','precipitation','prec','LAPrec1871',
+                                                                                               'pre','swe','SWE','sd','SD','sf','SF',
+                                                                                               'sde','smlt'],self.shape,self.verbose)
         else:
             raise ValueError("Provide either ts and m_cal directly or specify data_path for a gridded precipitation data in NetCDF format along with the path of the river shapefile.")
 
@@ -554,7 +565,7 @@ class Precipitation(BaseDroughtAnalysis):
             print(
                 "*************** Alternatively, you can access to: \n >>> precipitation.ts (P timeseries), \n >>> precipitation.spi_like_set (SPI (1:K) timeseries) \n >>> precipitation.SIDI (D_{SPI}) \n to visualize the data your way or proceed with further analyses!")
 
-    def analyze_correlation(self, streamflow,plot=True):
+    def analyze_correlation(self, streamflow, plot=True, yellow=True, seasonal=False):
         """
         Analyze correlations between Precipitation SIDI and Streamflow SPI for different weightings and K values.
 
@@ -576,14 +587,13 @@ class Precipitation(BaseDroughtAnalysis):
             raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
 
         # find the temporal overlap between Precipitation and Streamflow
-        self_indices, streamflow_indices = find_overlap(self.m_cal,streamflow.m_cal)
+        self_indices, streamflow_indices = find_overlap(self.m_cal, streamflow.m_cal)
         if len(self_indices) == 0 or len(streamflow_indices) == 0:
             raise ValueError("No overlapping data found between Precipitation and Streamflow.")
 
         # Subset di dati per l'overlapping time
         y = streamflow.spi_like_set[0, streamflow_indices]  # SPI-1 dello streamflow
-        spi_like_set = self.spi_like_set[:,self_indices]  # Tutte le configurazioni SIDI
-
+        spi_like_set = self.spi_like_set[:, self_indices]  # Tutte le configurazioni SIDI
 
         K_range = np.arange(1, self.K + 1)
         MatCorr = []
@@ -593,7 +603,8 @@ class Precipitation(BaseDroughtAnalysis):
             W = generate_weights(k)
             # print("Calculating Ensemble Weighted Mean for each weighting function...")
             sidis = []  # SPI ensemble mean for each day
-            for doy in range(len(spi_like_set[0])):#in range(self._baseline_indices()[0], self._baseline_indices()[1] + 1):
+            for doy in range(
+                    len(spi_like_set[0])):  # in range(self._baseline_indices()[0], self._baseline_indices()[1] + 1):
                 vec = spi_like_set[:k, doy]
                 sidis.append([weighted_metrics(vec, w)[0] for w in W.T])
             sidis = np.array(sidis)
@@ -609,26 +620,26 @@ class Precipitation(BaseDroughtAnalysis):
             MatCorr.append(rr)
         # looking to the single SQI - SPI correlation
         rr_spi = []
-        for j,spi in enumerate(spi_like_set):
+        for j, spi in enumerate(spi_like_set):
             valid_mask = np.isfinite(y) & np.isfinite(spi)
             r = stats.pearsonr(spi[valid_mask], y[valid_mask])[0]
             rr_spi.append(r ** 2)
         rr_spi = np.array(rr_spi)
         ii = np.argsort(rr_spi)[::-1]
-        R2_spi = np.array([np.arange(1,self.K+1)[ii],rr_spi[ii]]).T
+        R2_spi = np.array([np.arange(1, self.K + 1)[ii], rr_spi[ii]]).T
 
         MatCorr = np.array(MatCorr)
         # Find the best K and weight index
         max_corr = np.max(MatCorr)
         best_k, best_weight = np.unravel_index(np.argmax(MatCorr), MatCorr.shape)
 
-
         print(f"Best correlation: R^2 = {max_corr:.3f} (K={K_range[best_k]}, Weight={wlabel[best_weight]})")
         W = generate_weights(K_range[best_k])
         sidi = []  # SPI ensemble mean for each day
-        for doy in range(len(spi_like_set[0])):  # in range(self._baseline_indices()[0], self._baseline_indices()[1] + 1):
+        for doy in range(
+                len(spi_like_set[0])):  # in range(self._baseline_indices()[0], self._baseline_indices()[1] + 1):
             vec = spi_like_set[:K_range[best_k], doy]
-            sidi.append(weighted_metrics(vec, W[:,best_weight])[0])
+            sidi.append(weighted_metrics(vec, W[:, best_weight])[0])
         sidi = np.array(sidi)
 
         SIDI = (sidi - np.nanmean(sidi)) / np.nanstd(sidi)
@@ -648,27 +659,63 @@ class Precipitation(BaseDroughtAnalysis):
             plt.title("Correlation Analysis: D{spi} (namely SIDI)  vs. SQI1 ", fontsize=14, fontweight="bold")
             plt.tight_layout()
             plt.show()
+
         # ---------------------------------------------------------------
         # Imposta automaticamente parametri ottimali ---------------------
         # self.set_optimal_parameters(K_range[best_k], best_weight)
         # streamflow.set_optimal_parameters(K_range[best_k], best_weight)
         # ---------------------------------------------------------------
         if plot == True:
-        # Prompt per rilanciare _plot_scan con best_k
+            # Prompt per rilanciare _plot_scan con best_k
             self.plot_scan(optimal_k=K_range[best_k], weight_index=best_weight)
 
         if plot == True:
             plt.figure(figsize=(7, 7))
-            plt.plot(SIDI,y,'ok',markerfacecolor='yellow', linewidth=2)
-            plt.plot(np.arange(-3,4),np.arange(-3,4),'--',color='grey')
+            if yellow == True:
+                plt.plot(SIDI, y, 'ok', markerfacecolor='yellow', linewidth=2)
+            elif seasonal == True:
+                g1 = [4, 5, 6, 7, 8, 9, 10]
+                g2 = [11, 12, 1, 2, 3]
+                # summer ------------------------------------------------------
+                m1summer = np.isin(self.m_cal[self_indices, 0], g1)
+                m2summer = np.isin(streamflow.m_cal[streamflow_indices, 0], g1)
+                f = np.isfinite(SIDI[m1summer]) & np.isfinite(y[m2summer])
+                rho, pval = stats.pearsonr(SIDI[m1summer][f], y[m2summer][f])
+                rho = 0 if pval > 0.5 else rho
+                plt.plot(SIDI[m1summer], y[m2summer], 'o', color='tab:olive', alpha=0.4,
+                         label=f'Apr-Oct; R2={np.round(rho ** 2, 2)}')
+                # winter ------------------------------------------------------
+                m1winter = np.isin(self.m_cal[self_indices, 0], g2)
+                m2winter = np.isin(streamflow.m_cal[streamflow_indices, 0], g2)
+                f = np.isfinite(SIDI[m1winter]) & np.isfinite(y[m2winter])
+                rho, pval = stats.pearsonr(SIDI[m1winter][f], y[m2winter][f])
+                rho = 0 if pval > 0.5 else rho
+                plt.plot(SIDI[m1winter], y[m2winter], 'o', color='tab:blue', alpha=0.4,
+                         label=f'Nov-Mar; R2={np.round(rho ** 2, 2)}')
+            else:
+                if cmc is not None:
+                    c = plt.get_cmap(cmc.romaO, 12)
+                else:
+                    c = plt.get_cmap('twilight_shifted', 12)
+
+                for month in range(1, 13):
+                    m1 = np.where(self.m_cal[self_indices, 0] == month)[0]
+                    m2 = np.where(streamflow.m_cal[streamflow_indices, 0] == month)[0]
+                    plt.plot(SIDI[m1], y[m2], 'o', color=c(month / 12), label=f'month {month}')
+
+            plt.plot(np.arange(-3, 4), np.arange(-3, 4), '--', color='grey')
             plt.grid()
             plt.ylabel(r"SQI1", fontweight="bold", fontsize=12)
             plt.xlabel("D{spi}", fontweight="bold", fontsize=12)
-            plt.title(f"D(spi) vs. SQI1. K={best_k} - weights function n- {best_weight}:", fontsize=14, fontweight="bold")
+            plt.title(f"D(spi) vs. SQI1. K={best_k} - weighting function n. {best_weight}; R^2 = {max_corr:.2f}",
+                      fontsize=14, fontweight="bold")
+            plt.legend(fontsize=12)
             plt.tight_layout()
             plt.show()
 
-        return {"best_k": K_range[best_k], "col_best_weight": best_weight, "max_correlation": max_corr,'spi_corr':R2_spi}
+        return {"best_k": K_range[best_k], "col_best_weight": best_weight, "max_correlation": max_corr,
+                'spi_corr': R2_spi}
+
 
 class Streamflow(BaseDroughtAnalysis):
     def __init__(self, start_baseline_year, end_baseline_year,basin_name,
@@ -791,65 +838,6 @@ class Streamflow(BaseDroughtAnalysis):
         self.SIDI = self._calculate_SIDI()
         self.CDN = self._calculate_CDN()
         self.is_placeholder = False
-    def assign_streamflow_data(self, ts, m_cal):
-        """
-        Assign or update the time series (ts) and calendar (m_cal) if provided by user.
-        When the user has a timeseries ready to be assigned, then this method allows to easly assign it
-        to the self istance
-        Args:
-            ts (ndarray): New time series of streamflow values.
-            m_cal (ndarray): New calendar array (month, year) matching `ts`.
-
-        Updates:
-            - Recomputes SIDI and SPI-related attributes based on the new data.
-            - Relies on the BaseDroughtAnalysis class for validation.
-
-        """
-        # Update only if new data is provided
-
-        if (m_cal is not None) and (ts is not None):
-            # check for temporal resolution:
-            years = np.unique(m_cal[:,1])
-            if len(m_cal) >  (len(years)-1)*365:
-                print("Data appears to have daily resolution. Aggregating to monthly.")
-                q = []
-                cal =[]
-                # potrebbero mancare degli anni per cui enumero da year 0 year end
-                for i, year in enumerate(np.arange(years[0],years[-1]+1)):
-                    for month in range(1, 13):
-                        cal.append([month, year])
-                        month_indices = np.where((m_cal[:, 1] == year) & (m_cal[:, 0] == month))[0]
-                        if len(month_indices) > 27:
-                            monthly_val = np.nanmean(ts[month_indices])
-                            # if np.isnan(monthly_val):
-                            #     print(month,year)
-                            q.append(monthly_val)
-                        else:
-                            q.append(np.nan)
-
-                q = np.array(q)
-                cal = np.array(cal)
-
-                self.m_cal = cal
-                self.ts =  q
-            else:
-                self.m_cal = m_cal
-                self.ts = ts
-
-        # Check if both ts and m_cal are set
-        if self.ts is None or self.m_cal is None:
-            print("Incomplete data provided. Please ensure both `ts` and `m_cal` are set.")
-            return
-
-        # Recompute SPI and SIDI
-        self.spi_like_set, self.c2r_index = self._calculate_spi_like_set()
-        self.SIDI = self._calculate_SIDI()
-        # self.CDN = np.cumsum(self.spi_like_set[0])
-        self.CDN = self._calculate_CDN()
-
-        # Provide feedback
-        print("Streamflow data updated successfully.")
-        print(f"Data range: {self.m_cal[0]} to {self.m_cal[-1]}.")
 
     def gap_filling(self, precipitation, K=None, weight_index=2, alpha=0.1,X2=None):
         """
@@ -978,9 +966,10 @@ class Pet(BaseDroughtAnalysis):
         elif data_path is not None and self.shape is not None:
             self.data_path = data_path
             self.ts, self.m_cal, self.PETgrid = import_netcdf_for_cumulative_variable(data_path,
-                                                ['e', 'ET','PET','pet','et','evaporation',
+                                                ['e', 'E','ET','PET','pet','et','evaporation',
                                                  'evapotranspiration','potential evapotranspiration',
-                                                 'reference evapotranspiration','swe','pev'],
+                                                 'reference evapotranspiration','swe','pev','Ep',
+                                                 ],
                                                 self.shape,self.verbose)
         else:
             raise ValueError("Provide either ts and m_cal directly or specify data_path for gridded PET data in NetCDF format along with the path of the river shapefile.")
@@ -1123,6 +1112,89 @@ class Balance(BaseDroughtAnalysis):
         ts = prec_ts[p_id] - pet_ts[pet_id]
         return Pgrid, ETgrid, m_cal, ts
 
+
+class Temperature(BaseDroughtAnalysis):
+    def __init__(self, start_baseline_year, end_baseline_year, basin_name, ts=None, m_cal=None, data_path=None,
+                 shape_path=None, shape=None, K=None, weight_index=None,
+                 calculation_method =f_zscore,threshold=None, index_name = 'STI',verbose=True):
+        """
+        Initialize the Pet class.
+
+        Args:
+            start_baseline_year (int): Starting year for baseline period.
+            end_baseline_year (int): Ending year for baseline period.
+            ts (ndarray, optional): Aggregated basin-level PET timeseries.
+            m_cal (ndarray, optional): Calendar array (month, year) matching `ts`.
+            data_path (str, optional): Path to the NetCDF file containing PET data.
+            shape_path (str, optional): Path to the shapefile defining the basin.
+            shape (object, optional): Shapefile geometry (if already loaded).
+            K (int, optional): Maximum temporal scale for calculations. Default is 36.
+            weight_index (int, optional): Index of the weighting scheme to use for calculations.
+                - weight_index = 0: Equal weights
+                - weight_index = 1: Linear decreasing weights
+                - weight_index = 2: Logarithmically decreasing weights (default)
+                - weight_index = 3: Linear increasing weights
+                - weight_index = 4: Logarithmically increasing weights
+
+            threshold (int, optional): Threshold to define severe events, Default is -1.
+            calculation_method (callable, optional): Method to use for drought calculations. Default is f_zscore.
+                Available methods (in utils.py) are:
+                f_spi:   FOR  POSITIVE & RIGHT-SKEWED DATA (uses a Gamma Function) but works fine also for positive normal distribuited sample
+                f_spei:  FOR REAL VALUES & RIGHT-SKEWED (uses a Pearson III function)
+                f_zscore FOR REAL VALUES NORMAL DISTRIBUTED
+            threshold (float, optional): Threshold for severe events. Defaults to -1.
+            verbose (bool, optional): Whether to print initialization messages. Default is True.
+        """
+        self.start_baseline_year = start_baseline_year
+        self.end_baseline_year = end_baseline_year
+        self.verbose = verbose
+        self.basin_name=basin_name
+
+        if shape is not None:
+            self.shape = shape
+        elif shape_path is not None:
+            self.shape = load_shape(shape_path)
+        elif data_path is not None and (shape_path is None or shape is None):
+            self.shape = None
+            raise ValueError("Provide a shapefile (`shape_path` or `shape`) to select gridded PET data.")
+
+        if ts is not None and m_cal is not None:  # User provided data
+            self.ts = ts
+            self.m_cal = m_cal
+        elif data_path is not None and self.shape is not None:
+            self.data_path = data_path
+            self.ts, self.m_cal, self.Tgrid = import_netcdf_for_cumulative_variable(data_path,
+                                                ['deg0l','tg','tm','tx','t2m','d2m','mn2t'],
+                                                self.shape,self.verbose,cumulate=False)
+        else:
+            raise ValueError("Provide either ts and m_cal directly or specify data_path for gridded PET data in NetCDF format along with the path of the river shapefile.")
+
+        if K is None:
+            self.K = 36
+
+        self.threshold = 1 if threshold is None else threshold
+
+        if weight_index is None:
+            self.weight_index = 2
+
+        if not callable(calculation_method):
+            raise ValueError("`calculation_method` must be a callable function.")
+        self.calculation_method = calculation_method
+        self.index_name = index_name
+
+        super().__init__(self.ts, self.m_cal, self.K, self.start_baseline_year, self.end_baseline_year,
+                         self.basin_name, self.calculation_method, self.threshold, self.index_name)
+
+        if verbose:
+            print("#########################################################################")
+            print("Welcome to Drought Scan! \n")
+            print("The PET data has been imported successfully.")
+            print(f"Your data starts from {self.m_cal[0]} and ends on {self.m_cal[-1]}.")
+            print("#########################################################################")
+            print("Run the following class methods to access key functionalities:\n")
+            print(" >>> ._plot_scan(): to plot the CDN, zscore heatmap, and D_{zscore} \n")
+
+
 class Teleindex(BaseDroughtAnalysis):
     def __init__(self, start_baseline_year, end_baseline_year, basin_name=None,ts=None, m_cal=None, data_path=None,
                  K=None, weight_index=None,
@@ -1205,66 +1277,6 @@ class Teleindex(BaseDroughtAnalysis):
                 " >>> ._analyze_correlation(): to estimate the best K and weighting function (only if streamflow data are available) \n")
             print(
                 "*************** Alternatively, you can access to: \n >>> precipitation.ts (P timeseries), \n >>> precipitation.spi_like_set (SPI (1:K) timeseries) \n >>> precipitation.SIDI (D_{SPI}) \n to visualize the data your way or proceed with further analyses!")
-
-    def assign_streamflow_data(self, ts, m_cal):
-        """
-        Assign or update the time series (ts) and calendar (m_cal) if provided by user.
-        When the user has a timeseries ready to be assigned, then this method allows to easly assign it
-        to the self istance
-        Args:
-            ts (ndarray): New time series of streamflow values.
-            m_cal (ndarray): New calendar array (month, year) matching `ts`.
-
-        Updates:
-            - Recomputes SIDI and SPI-related attributes based on the new data.
-            - Relies on the BaseDroughtAnalysis class for validation.
-
-        """
-        # Update only if new data is provided
-
-        if (m_cal is not None) and (ts is not None):
-            # check for temporal resolution:
-            years = np.unique(m_cal[:,1])
-            if len(m_cal) >  (len(years)-1)*365:
-                print("Data appears to have daily resolution. Aggregating to monthly.")
-                q = []
-                cal =[]
-                # potrebbero mancare degli anni per cui enumero da year 0 year end
-                for i, year in enumerate(np.arange(years[0],years[-1]+1)):
-                    for month in range(1, 13):
-                        cal.append([month, year])
-                        month_indices = np.where((m_cal[:, 1] == year) & (m_cal[:, 0] == month))[0]
-                        if len(month_indices) > 27:
-                            monthly_val = np.nanmean(ts[month_indices])
-                            # if np.isnan(monthly_val):
-                            #     print(month,year)
-                            q.append(monthly_val)
-                        else:
-                            q.append(np.nan)
-
-                q = np.array(q)
-                cal = np.array(cal)
-
-                self.m_cal = cal
-                self.ts =  q
-            else:
-                self.m_cal = m_cal
-                self.ts = ts
-
-        # Check if both ts and m_cal are set
-        if self.ts is None or self.m_cal is None:
-            print("Incomplete data provided. Please ensure both `ts` and `m_cal` are set.")
-            return
-
-        # Recompute SPI and SIDI
-        self.spi_like_set, self.c2r_index = self._calculate_spi_like_set()
-        self.SIDI = self._calculate_SIDI()
-        # self.CDN = np.cumsum(self.spi_like_set[0])
-        self.CDN = self._calculate_CDN()
-
-        # Provide feedback
-        print("teleconnection index data updated successfully.")
-        print(f"Data range: {self.m_cal[0]} to {self.m_cal[-1]}.")
 
 
 

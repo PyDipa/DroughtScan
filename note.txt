@@ -1,0 +1,32 @@
+La versione pubblica online + 1.0.0 Initial release
+
+rinominato argomento plot_scan "xlim" in "year_ext". (Questo introduce una major changes nel versioning?)
+
+introdotta la possibilin di plottare lo scatter plot SIDI ottimizzato vs SQI1 distinguendo i 12 mesi.
+Inoltre, lo script prova ad importare una palette di Crameri, altrimenti vira su una colormap ciclica di pyplot
+
+aggiunta documentazione su errori comuni in cui l'utente può incappare e proposte delle soluzioni
+
+tradotto in inglese i labels della funzione plot_trends(), aggiunto il nome del bacino e reso gli yticks regolari. l'aggiunta del nome del bacino è forse un minor change per il versioning?
+
+
+migliorato il metodo Precipitation.analyze_correlation (e aggiornato file user_guide.md) per poter associare i colori allo scatter plot
+in base a 2 stagioni o in base al mese. (questo vuol dire aver introdotte delle nuove features?)
+
+modificato il metodo monthly_profile. sistemato il metodo monthly_profile in modo da usare solo gli anni nella baseline per calcolare mediana e percetili; inoltre non esiste più two_years ed è stato introdotto season-shift per centrare il grafico sui mesi invernali.
+(PER QUESTO breaking change LA VERSIONE HA UN MAJOR change nella versione?).
+aggiornata la documentazione su plot_monthly_profile
+
+aggiornata la documentazione sui metodi find_ e plot_trends()
+
+improve the user guide about the difference between the classes defined in core.py
+
+add a new class Temperature (new features, than a minor increase in the versioning must follow) e di conseguenza aggiornato il file __init__. (questo comporta un minor increase della versione?) anche la funzione import_netcdf_for_cumuative_variable ha un nuovo argomento (cumulate=True) che permette, if False, di mediare i dati su scala giornalieri (se presenti) con media e non cumularli come in Precipitation,Pet e Balance.
+
+other minor bugs resolved e rivisto tutto il file di user_guide and visualitation_guide.md
+
+add new features in plot_scan() namely the vertical band for highlithing drought throughe a new def "highlight_drougth" in utils.visualization.
+
+removed "assign_streamflow_data" method in Streamflow and Teleindex classes;
+
+tolto "reverse_color" dagli argomenti di plot_scan() method e quindi plot_overview() function in visualization. La scelta del reverse color avviente in automatico in base al DSO.threshold. Modificato di conseguenza anche highlight_drought (che era una funzione nuova)

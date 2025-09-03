@@ -49,9 +49,8 @@ ds.plot_scan()
 ```python
 ds.plot_scan(optimal_k=10)           # Highlight an optimal integration timescale
 ds.plot_scan(weight_index=4)         # Use logarithmically increasing weights for SIDI
-ds.plot_scan(xlim=(2000,2010))       # Zoom in on a specific period
-ds.plot_scan(reverse_color=True)     # Reverse colormap (useful for SPEI-like indices)
-ds.plot_scan(reverse_color=True, xlim=(2000,2012))
+ds.plot_scan(year_ext=(2000,2010))       # Zoom in on a specific period
+
 ds.plot_scan(saveplot=False)          # Automatically save in working directory
 ```
 
@@ -59,7 +58,9 @@ Figures can also be saved manually:
 
 ```python
 from drought_scan.utils.visualization import savefig
-savefig('test.png')
+
+ds.plot_scan(year_ext=(2000,2010)) 
+savefig('PATH/my_figure.png')
 ```
 
 ---
@@ -91,6 +92,7 @@ ds.severe_events(max_events=10, labels=True)
 Use regression coefficients (`c2r_index`) to convert an SPI value to precipitation.
 
 ```python
+import numpy as np
 print("Normal precipitation values:", ds.normal_values())
 
 coeff = ds.c2r_index
@@ -126,27 +128,82 @@ std_to_mm = np.mean([np.polyval(coeff[0, m, :], 1) - ds.normal_values()[m] for m
 print(f'in Nov 2017 there was a trend over the last {window} months for a total of {delta_unit*std_to_mm} mm gain/lost')
 ```
 
+**Using external variables**
+
+By default, find_trends operates on CDN, but it can also be applied to any external time series aligned with the same calendar:
+
+```python
+import numpy as np
+n = 600
+rng = np.random.default_rng(0)
+
+t = np.arange(n)  # indici 0..599
+# serie: due sinusoidi + rumore gaussiano
+my_timeseries = 0.5*np.sin(2*np.pi*t/50) + 0.3*np.sin(2*np.pi*t/200) + rng.normal(0, 0.2, n)
+
+ 
+R = ds.find_trends(var=my_timeseries, window=48)
+```
+
 ### Plot trends
 
 ```python
 ds.plot_trends()                        # default window
 ds.plot_trends(windows=[50, 120])       # custom multiple windows
 ```
+
+When plotting multiple trend analyses, you can provide an external axis (e.g., subplot):
+```python
+import matplotlib.pyplot as plt
+fig, axs = plt.subplots(2, 1, figsize=(8, 6))
+ds.plot_trends(windows=[36], ax=axs[0])
+ds.plot_trends(windows=[60], ax=axs[1])
+```
+Note: in plot_trends the variable cannot be changed (always based on CDN).
+
 ---
+
 
 ## 6) Monthly profiles of input data
 
-Visualize intra-annual cycle of precipitation:
+Visualize the intra-annual cycle of the variable through monthly profiles (by default: precipitation if the instance is initialized with Precipitation, snowfall is initialized with Snowfall etc).
+The method shows the mean and interquartile range (IQR) for each month over the available years.
 
 ```python
 ds.plot_monthly_profile()
 ds.plot_monthly_profile(highlight_years=[2017,2018])
+
+
 ```
 
-Cumulative profiles are useful for snow-dominated (nival) regimes or multi-year analysis:
+Cumulative profiles are useful for snow-dominated (nival) regimes or for highlighting multi-year accumulation.
+```python
+ds.plot_monthly_profile(cumulate=True, highlight_years=[2017, 2018])
+```
+
+For winter-relevant variables, the plot can be shifted and centered on the hydrological year (from August to July) using the seasonal_shift=True option: 
+```python
+ds.plot_monthly_profile(season_shift=True, highlight_years=[2017, 2018])
+```
+
+User can choose other variables from the DSO to be plotted such asfor exemple `ds.spi_like_set[0]` (that is SPI)
+ 
+```python
+
+ds.plot_monthly_profile(var=ds.spi_like_set[0], season_shift=True, highlight_years=[2000])
+```
+
+**Advanced options**
+
+- Assign an external axis for multiple plots (e.g., in subplots):
 
 ```python
-ds.plot_monthly_profile(cumulate=True, two_year=True, highlight_years=[2017,2018])
+fig, axs = plt.subplots(2, 1, figsize=(8, 6))
+ds.plot_monthly_profile(ax=axs[0])
+ds.plot_monthly_profile(season_shift=True, ax=axs[1])
 ```
 
+
+
+ 
 ---
