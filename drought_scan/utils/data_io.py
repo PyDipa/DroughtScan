@@ -176,7 +176,7 @@ def create_mask(shape,LAT, LON):
     mask = regionmask.mask_geopandas(shape, lon_grid, lat_grid)
     return np.flipud(mask)
 
-def import_netcdf_for_cumulative_variable(file_path, possible_names,shape,verbose):
+def import_netcdf_for_cumulative_variable(file_path, possible_names,shape,verbose,cumulate=True):
     """
     Loads precipitation oe PET data from a NetCDF file and applies spatial aggregation.
 
@@ -237,8 +237,12 @@ def import_netcdf_for_cumulative_variable(file_path, possible_names,shape,verbos
                     for month in range(1, 13):
                         month_indices = np.where((m_cal[:, 1] == year) & (m_cal[:, 0] == month))[0]
                         if len(month_indices) > 0:
-                            monthly_sum = np.nansum(Pgrid[month_indices, :, :], axis=0)
-                            Pgrid_m[yr_idx * 12 + month - 1, :, :] = monthly_sum
+                            if cumulate:
+                                monthly_sum = np.nansum(Pgrid[month_indices, :, :], axis=0)
+                                Pgrid_m[yr_idx * 12 + month - 1, :, :] = monthly_sum
+                            else:
+                                monthly_mean = np.nanmean(Pgrid[month_indices, :, :], axis=0)
+                                Pgrid_m[yr_idx * 12 + month - 1, :, :] = monthly_mean
 
                 Pgrid = Pgrid_m
                 m_cal = np.array([[m, y] for y in years for m in range(1, 13)])

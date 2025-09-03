@@ -197,7 +197,7 @@ def test_standardization(data):
 # ===================================================================
 #  Rolling Trend Analysis
 # ===================================================================
-def rolling_trend_analysis(Y, window=60, significance=0.05):
+def rolling_trend_analysis(var, window=60, significance=0.05):
     """
     Perform rolling trend analysis on a given time series.
     Args:
@@ -209,7 +209,7 @@ def rolling_trend_analysis(Y, window=60, significance=0.05):
         dict: Dictionary containing arrays of trend direction, slopes, p-values, and deltas.
     """
 
-    n = len(Y)
+    n = len(var)
 
     # Arrays for storing results
     trends = np.zeros(n, dtype=int)
@@ -218,7 +218,7 @@ def rolling_trend_analysis(Y, window=60, significance=0.05):
     deltas = np.full(n, np.nan, dtype=float)
 
     for i in range(n - window + 1):
-        y_window = Y[i:i + window]
+        y_window = var[i:i + window]
         x = np.arange(window)
 
         slope, intercept, r_value, p_value, std_err = stats.linregress(x, y_window)

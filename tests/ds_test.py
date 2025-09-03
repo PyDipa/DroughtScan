@@ -9,6 +9,7 @@ def test_import():
     assert hasattr(DS, "Streamflow")
     assert hasattr(DS, "Pet")
     assert hasattr(DS, "Balance")
+    assert hasattr(DS, "Temperature")
     assert hasattr(DS, "Teleindex")
 
 
