@@ -26,7 +26,7 @@ dependencies = [
     "geopandas",
     "regionmask",
     "netCDF4",
-    "dateutil",
+    "python-dateutil",
     "itertools",
     "datetime",
     "warnings"
