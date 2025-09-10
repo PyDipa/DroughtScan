@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "drought-scan"
+name = "droughtscan"
 version = "2.0.0"
 description = "Drought monitoring and seasonal prediction toolkit"
 authors = [
@@ -27,9 +27,6 @@ dependencies = [
     "regionmask",
     "netCDF4",
     "python-dateutil",
-    "itertools",
-    "datetime",
-    "warnings"
 ]
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "ruff", "black", "mypy", "pre-commit"]
