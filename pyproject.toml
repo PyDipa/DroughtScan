@@ -10,7 +10,6 @@ authors = [
   { name="Arianna Di Paola"},
   { name="Leandro Rocchi"},
   { name="Massimiliano Pasqui"},
-    {team_webpage="https://droughtcentral.it/team/"}
 ]
 maintainers = [
   { name="Arianna Di Paola",email="arianna.dipaola@cnr.it" }
@@ -34,3 +33,7 @@ dependencies = [
 ]
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "ruff", "black", "mypy", "pre-commit"]
+
+[project.urls]
+Homepage = "https://droughtcentral.it/"
+Team = "https://droughtcentral.it/team/"
