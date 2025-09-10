@@ -16,7 +16,7 @@ maintainers = [
 ]
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "GNU 3" }
+license =  "GPL-3.0-or-later"
 dependencies = [
     "numpy",
     "pandas",
@@ -37,3 +37,8 @@ dev = ["pytest", "pytest-cov", "ruff", "black", "mypy", "pre-commit"]
 [project.urls]
 Homepage = "https://droughtcentral.it/"
 Team = "https://droughtcentral.it/team/"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["drought_scan*"]
+exclude = ["paper*", "docs*", "tests*", "examples*"]
