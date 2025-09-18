@@ -276,6 +276,9 @@ def import_netcdf_for_cumulative_variable(file_path, possible_names,shape,verbos
             elif len(np.shape(Pgrid))==3:
                 # ts = np.array([np.nanmean(Pgrid[i, mask >= 0]) for i in range(Pgrid.shape[0])])
                 ts = np.nanmean(Pgrid[:, mask >= 0], axis=1)
+                for t, p in enumerate(Pgrid):
+                    p[np.isnan(mask)] = np.nan
+                    Pgrid[t, :, :] = p
 
     except FileNotFoundError:
         raise FileNotFoundError(f"NetCDF file not found at: {file_path}")
