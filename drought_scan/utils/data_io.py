@@ -267,7 +267,7 @@ def import_netcdf_for_cumulative_variable(file_path, possible_names,shape,verbos
                 plt.imshow(check, cmap='viridis')
                 plt.imshow(mask, cmap='jet_r')
                 plt.title('Overlay of data field and river basin mask')
-                plt.show()
+                plt.show(block=False)
 
             # Aggregate precipitation timeseries over the basin
             if len(np.shape(Pgrid))>3: #forecast/multi members dataset
