@@ -290,7 +290,7 @@ class BaseDroughtAnalysis:
             self._saveplot()
     def normal_values(self):
         """
-          Compute the "normal" values of the variable using the inverse function of the SPI-like index.
+          Compute the "normal" values of the  climatology  using the inverse function of the SPI-like index.
 
           This method calculates the "normal" values for the variable of interest based on the
           inverse of the SPI-like index at scale 1 (SPI_like_index_1 == 0). It uses the coefficients
@@ -567,7 +567,8 @@ class Precipitation(BaseDroughtAnalysis):
 
     def analyze_correlation(self, streamflow, plot=True, yellow=True, seasonal=False):
         """
-        Analyze correlations between Precipitation SIDI and Streamflow SPI for different weightings and K values.
+        Analyze correlations between Precipitation.SIDI and Streamflow SQI1 for different weight configuration and K values
+        in order to find the combination of month-scales and weights that maximize the correlaiotn between SIDI and SQI1
 
         Args:
             streamflow (Streamflow): Instance of the Streamflow class.
@@ -658,7 +659,7 @@ class Precipitation(BaseDroughtAnalysis):
             plt.xlabel("Month-scale (K)", fontweight="bold", fontsize=12)
             plt.title("Correlation Analysis: D{spi} (namely SIDI)  vs. SQI1 ", fontsize=14, fontweight="bold")
             plt.tight_layout()
-            plt.show()
+            plt.show(block=False)
 
         # ---------------------------------------------------------------
         # Imposta automaticamente parametri ottimali ---------------------
@@ -711,7 +712,7 @@ class Precipitation(BaseDroughtAnalysis):
                       fontsize=14, fontweight="bold")
             plt.legend(fontsize=12)
             plt.tight_layout()
-            plt.show()
+            plt.show(block=False)
 
         return {"best_k": K_range[best_k], "col_best_weight": best_weight, "max_correlation": max_corr,
                 'spi_corr': R2_spi}

@@ -2,11 +2,28 @@
 
 This section shows how to initialize a **Drought-Scan** analysis object (DSO), with practical notes on the most important options and how they change the behavior compared to defaults.
 
+> **IMPORTANT NOTE**  
+> Make sure you are running **the same Python interpreter** where DroughtScan and its dependencies have been installed.  
+> 
+> For example, if you installed with:
+> ```bash
+> python3.10 -m pip install .
+> ```
+> then you must also start your session with :
+> ```bash
+> python3.10
+> ```
+> or set the proper interpreter `python3.10` on your IDE and not  other version Python version  
+ 
+
+
 ## 1) Minimal setup (from files)
 
 To run Drought-Scan you need at least:
 - A **precipitation dataset** in NetCDF format.  
 - A **shapefile** delimiting the hydrographic basin of interest.  
+
+Note: In `test/data` you will find some dataset for running the following examples
 
 The tool will automatically:
 1. Select the gridded data that fall within the shapefile.  
@@ -36,6 +53,11 @@ print("CDN (cumulative SPI1 from the starting baseline year):", ds.CDN.shape)
 
 What happens here:
 - The library reads the NetCDF precipitation, clips/aggregates it over the basin shapefile, builds a monthly calendar (`m_cal`), and computes SPI (1–K), SIDI, and CDN over the **baseline** `start_baseline_year:end_baseline_year`.
+
+You can access to the data as shown in the prints. For examples, ds.ts is the monhtly precipation time series imported and aggregated at the river basin scale, while ds.CDN is the Cumulative Deviation from Normal. 
+For the full list of variables and methods explore examples and usage notes below. You can also find 
+a full list in the [README](https://github.com/PyDipa/DroughtScan/blob/main/README.md) file 
+
 
 ---
 
@@ -300,6 +322,7 @@ How R² varies with K across weighting schemes.
 The relationship between the optimized SIDI and SQI1.
 A diagnostic scan plot with the optimal configuration.
 
+NOTE: This optimization task does not require that the SIDI and SQI1 time series cover the same time interval, thus facilitating analyses even for situations where the streamflow data are shorter or only partially temporally overlapped with the precipitation data.
 
 ```python
 import drought_scan as DS

@@ -22,8 +22,20 @@ for examples and usage notes see:
 ---
 ## Installation
 
-> **Note:** DroughtScan will soon be available on PyPI.  
-> Until then, it can be installed directly from this repository.
+**Note**: DroughtScan will soon be available on PyPI.  
+Until then, it can be installed directly from this repository.
+
+Python version & environment
+DroughtScan requires Python ≥3.9.
+If multiple Python versions are installed (e.g. 3.10 and 3.12), make sure pip and python refer to the same interpreter. You can check it by running
+
+```bash
+python --version
+pip --version
+```
+
+The following instructions will download the package to your working directory (`pwd`). If you wish to download the package to a specific path, first navigate to the desired location with the terminus.+
+
 
 ### Option 1: Clone and install locally
 ```bash
@@ -36,8 +48,18 @@ Option 2: Install directly from GitHub (no local clone)
 ```bash
 pip install git+https://github.com/PyDipa/DroughtScan.git
 ```
+To use a specific  python interpreter for option1, say for example Python 3.10, use: 
 
-Ensure that all dependencies listed in the repository are installed in your Python environment. Refer to the pyproject.toml.txt file for more details.
+```bash
+python3.10 -m pip install . 
+```
+for option 2:
+```bash
+python3.10 -m pip install git+https://github.com/PyDipa/DroughtScan.git
+```
+
+Dependencies listed in the repository will be installed automatically in your Python environment during the installation process. 
+Refer to the pyproject.toml file for more details about the DroughtScan package.
 
 ## What Drought-Scan Does
 
@@ -56,6 +78,42 @@ It combines **statistical drought indices**, **quantitative analysis**  and **vi
   2. SIDI as a compact synthesis across scales.
   3. CDN as a long-memory diagnostic.
 - **precipitation to streamflow analysis**: Allows joint analysis of precipitation- and streamflow-based indices (e.g., SIDI vs SQI) to measure the strength and the responding time of the hydrographic basin to drought events. 
+
+## The `DroughtScan` Object
+
+When you initialize a `DroughtScan` object, it stores both the **input data** and the **derived drought indicators**.  
+It acts as the main container of the framework, holding attributes and methods for analysis, visualization, and forecasting.
+
+### Core Attributes
+- **`ts`**: monthly precipitation (or streamflow) time series.  
+- **`m_cal`**: calendar aligned with the time series.  
+- **`spi_like_set`**: set of SPI1–K series (default K=36).  
+- **`SIDI`**: Standardized Integrated Drought Index (weighted ensemble of SPI1–K).  
+- **`CDN`**: Cumulative Deviation from Normal (cumulative sum of SPI1).  
+- **`basin_name`**: name of the basin under analysis.  
+- **`shape`**: basin geometry.  
+- **`K`**: maximum SPI scale (default 36).  
+- **`threshold`**: default threshold for severe drought (−1).  
+
+
+### Main Methods
+- **`plot_scan()`**: full DS overview (heatmap, SIDI, CDN).  
+- **`monthly_profile()`**:climatology plot (monthly profile) of the input variable
+- **`normal_values()`**: Compute the "normal" values of the climatology using the inverse function of the SPI-like index.
+- **`find_trends()`** Analyze trends in the CDN using rolling windows and linear regression (without any plot)
+- **`plot_trends()`**: serach, quantoify and plot trends in specific mowing window of the CDN curve
+- **`severe_events()`**: list and plot severe drought events, ordered by magnitude or duration
+
+ONLY FOR PRECIPITATION WITH AVAILABLE STREAMFLOW DATA:
+- **`analyze_correlation()`**: find the combination of month-scales and weights that maximize the correlaiotn between SIDI and SQI1
+- **`recalculate_SIDI()`**: recompute SIDI with new optimal weights and month-scales as provied by `analyze_correlation() .  
+  
+
+> **Note**: internal methods (prefixed with `_`) are used for calculations and should not be called directly by the user.  
+> For a detailed reference and usage examples, see the for examples and usage notes see the 
+[User Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/user_guide.md) and  [Visualization Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/visualization_guide.md)
+
+
 
 ## Authors
 

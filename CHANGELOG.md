@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.0.1] - 2025-09-18
+### Fixed
+- Visualization: x-axis limits now use `DSO.K` instead of the hard-coded `36` in `visualization.py`.
+- Matplotlib calls adjusted to avoid blocking behavior in non-interactive environments.
+
+### Docs
+- README and `user_guide.md`: improved installation steps and troubleshooting to avoid common errors.
+- `common_errors.md`: added two new sections —
+  - **Inconsistent baseline years or timestamp gaps**  
+  - **Too few data points for fitting distributions**
+
+### Chore
+- Updated `pyproject.toml` with project URLs and refined dependencies.
+
+
 ## [2.0.0] - 2025-09-03
 ### Added
 - New `Temperature` class and public export in `__init__`.
@@ -26,3 +41,4 @@
 - Removal of `reverse_color` in `plot_scan` and dependent functions.
 - Behavior change and signature changes in `monthly_profile` (removed `two_years`, introduced `season_shift`).
 - Removal of `assign_streamflow_data` methods.
+

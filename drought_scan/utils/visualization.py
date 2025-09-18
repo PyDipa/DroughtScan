@@ -284,7 +284,7 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None):
     # Set x-axis limits if specified
     for i in range(3):
         if year_ext is None:
-            ax[i].set_xlim(36, len(SIDI))
+            ax[i].set_xlim(DSO.K, len(SIDI))
         else:
             try:
                 x1 = np.where(DSO.m_cal[:, 1] == year_ext[0])[0][0]
@@ -302,6 +302,7 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None):
 
     title = f'Drought Scan for {DSO.basin_name}, Area kmq: {int(np.round(area_kmq))}. Baseline: {DSO.start_baseline_year} - {DSO.end_baseline_year}'
     fig.suptitle(title, fontsize=14)
+    plt.show(block=False)
 # plt.tight_layout()
 
 def plot_severe_events(DSO, tstartid, duration, deficit, max_events=None, labels=False, unit=None, name=None):
@@ -369,6 +370,7 @@ def plot_severe_events(DSO, tstartid, duration, deficit, max_events=None, labels
 
         title = f'Drought Scan, severe events profile for {name}, Area kmq: {int(np.round(area_kmq))}. Baseline: {DSO.start_baseline_year} - {DSO.end_baseline_year}'
     fig.suptitle(title, fontsize=10)
+    plt.show(block=False)
 
 def plot_cdn_trends(DSO, windows, ax=None,year_ext=None):
     """
@@ -477,6 +479,7 @@ def plot_cdn_trends(DSO, windows, ax=None,year_ext=None):
 
     fig.suptitle(DSO.basin_name)
     fig.tight_layout()
+    plt.show(block=False)
 
 def monthly_profile(DSO,var=None, var_name=None,cumulate=False, ax=None,highlight_years=None, season_shift=False):
     """
@@ -616,6 +619,6 @@ def monthly_profile(DSO,var=None, var_name=None,cumulate=False, ax=None,highligh
     else:
         ax.set_xlim(1,12)
     plt.tight_layout()
-    plt.show()
+    plt.show(block=False)
 
 

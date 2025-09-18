@@ -130,7 +130,7 @@ def get_month_indices(month, start_year, end_year, m_cal):
             for year in range(start_year, end_year + 1)
         ])
     except IndexError:
-        raise ValueError(f"Inconsistent baseline years: define a period within the data temporal domain: {m_cal[0]} - {m_cal[-1]}.")
+        raise ValueError(f"Inconsistent baseline years: define a period within the data temporal domain: {m_cal[0]} - {m_cal[-1]}. Otherwise check that the original data have not gaps in the timestamp")
         # print(f"************ BASELINE WARNING **********')")
         # print(f"Inconsistent baseline years: baseline must be whitin the  {m_cal[0]} - {m_cal[-1]} domain.")
     return idx

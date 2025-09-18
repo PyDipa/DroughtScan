@@ -23,7 +23,7 @@ ValueError: The function value at x=nan is NaN; solver cannot continue
 
 ```python
 from drought_scan.utils import f_spei
-ds = DS.Precipitation(ts=my_ts, m_cal=my_mcal, calculation_method=f_spei)
+ds = DS.Precipitation(ts=my_ts, m_cal=my_mcal,shape=my_shape,  calculation_method=f_spei)
 ```
 
 ---
@@ -62,9 +62,40 @@ ISO8601           (e.g., 1960-12-31T23:59:59Z)
 **Example**: if your file has `31-12-1960`, it will be recognized as `DD-MM-YYYY`.  
 
 ---
+## 3. Inconsistent baseline years or timestamp gaps
 
-## 3. General advice
+**Context**:  
+When initializing a class (e.g., `Precipitation`, `Streamflow`, or `DroughtScan`), you may encounter:  
+
+```text
+ValueError: Inconsistent baseline years: define a period within the data temporal domain: [  m yyyy] - [  m yyyy].
+```
+**Possible causes**:
+The baseline years you specified are not fully included in your data.
+The original file contains missing or malformed timestamps (e.g., empty cells or missing months/years), which breaks the alignment between ts and m_cal.
+
+**Solution**:
+Double-check that your baseline period falls entirely within the data range.
+Carefully inspect your input file to ensure that all months/years are present and that there are no missing rows or invalid date entries.
+If you find gaps, correct the file (e.g., add the missing dates with NaN values or interpolate) before reloading it.
+
+---
+## 4. Too few data points for fitting distributions
+Context:
+Some methods (e.g., f_spi with a Gamma distribution) require a sufficiently large dataset to fit the probability distribution.
+If you provide only a very short series (say, 10 years >> 10 values per month), the fit of the monthly distribution may fail to converge.
+Solution:
+Use more data whenever possible (ideally several decades of monthly values).
+If you have a short record and still want to test the system, switch to a simpler method such as f_zscore, which does not require fitting a Gamma distribution.
+
+```python
+from drought_scan.utils import z_score
+ds = DS.Precipitation(ts=my_ts, m_cal=my_mcal,shape=my_shape, calculation_method=f_zscore)
+```
+
+
+## 5. General advice
 
 - Always verify that your **baseline years** are included in the data (otherwise index computation may fail).  
-- Ensure that `ts` (time series) and `m_cal` (calendar) arrays have the same length.  
+- Ensure that `ts` (time series) and `m_cal` (calendar) arrays have the same length and no gaps in the timestamp.  
 - When possible, **visualize the raw data** (before computing indices) to catch unexpected values.  
