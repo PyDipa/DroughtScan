@@ -495,6 +495,19 @@ def load_streamflow_from_csv(file_path, date_col=None, value_col=None):
             # -------------------------------------------------------------
 
             df = df.resample('ME', on=date_col)[value_col].mean().reset_index()
+            min_days = 20
+
+            monthly = (
+                df.resample('ME', on=date_col)[value_col]
+                .agg(['mean', 'count'])  # mean = nanmean, count = non-NaN
+                .rename(columns={'mean': value_col, 'count': 'valid_days'})
+                .reset_index()
+            )
+
+            monthly.loc[monthly['valid_days'] < min_days, value_col] = pd.NA
+
+            # df = df.resample('ME', on=date_col)[value_col].mean().reset_index()
+            df = monthly.copy()
 
         # Update class attributes
 
@@ -561,6 +574,20 @@ def load_streamflow_from_excel(file_path, date_col=None, value_col=None):
     if df[date_col].dt.day.nunique() > 1:
         print("Risoluzione giornaliera rilevata: aggrego a medie mensili.")
         df = df.resample('ME', on=date_col)[value_col].mean().reset_index()
+        min_days = 20
+        df = df.resample('ME', on=date_col)[value_col].mean().reset_index()
+        monthly = (
+            df.resample('ME', on=date_col)[value_col]
+            .agg(['mean', 'count'])  # mean = nanmean, count = non-NaN
+            .rename(columns={'mean': value_col, 'count': 'valid_days'})
+            .reset_index()
+        )
+        # Update class attributes
+        monthly.loc[monthly['valid_days'] < min_days, value_col] = pd.NA
+
+        # df = df.resample('ME', on=date_col)[value_col].mean().reset_index()
+        df = monthly.copy()
+        # Update class attributes
 
     # Estrai ts e m_cal
     ts = df[value_col].values
