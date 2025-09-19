@@ -210,6 +210,8 @@ def import_netcdf_for_cumulative_variable(file_path, possible_names,shape,verbos
             Pgrid = extract_variable(data,possible_names)
             # Pgrid = np.array(data['tp'][:], dtype=float)
             Pgrid[Pgrid < 0] = 0  # Mask invalid values
+            Pgrid = Pgrid.astype(float)
+
 
             # Create time metadata
             try:
