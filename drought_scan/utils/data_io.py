@@ -488,20 +488,9 @@ def load_streamflow_from_csv(file_path, date_col=None, value_col=None):
         # Aggregate daily data to monthly averages if needed
         if df[date_col].dt.day.unique().size > 1:
             print("Risoluzione giornaliera rilevata: aggrego a medie mensili.")
-            # -------------------------------------------------------
-            # # Here to counts the number of monthly observations
-            # grouped = df.set_index(date_col).resample('ME')[value_col]
-            # count_valid = grouped.count()
-            # count_total = df.set_index(date_col).resample('ME')[value_col].size()
-            # ratio = count_valid / count_total
-            # monthly_mean = grouped.mean()
-            # # choosign at least 70% of availabel days
-            # monthly_mean[ratio >= 0.7].reset_index()
-            # -------------------------------------------------------------
+            # df = df.resample('ME', on=date_col)[value_col].mean().reset_index()
 
-            df = df.resample('ME', on=date_col)[value_col].mean().reset_index()
             min_days = 20
-
             monthly = (
                 df.resample('ME', on=date_col)[value_col]
                 .agg(['mean', 'count'])  # mean = nanmean, count = non-NaN
@@ -511,7 +500,6 @@ def load_streamflow_from_csv(file_path, date_col=None, value_col=None):
 
             monthly.loc[monthly['valid_days'] < min_days, value_col] = pd.NA
 
-            # df = df.resample('ME', on=date_col)[value_col].mean().reset_index()
             df = monthly.copy()
 
         # Update class attributes
@@ -530,7 +518,174 @@ def load_streamflow_from_csv(file_path, date_col=None, value_col=None):
 
         return ts,m_cal
 
-def load_streamflow_from_excel(file_path, date_col=None, value_col=None):
+def load_streamflow_from_excel(file_path, date_col=None, value_col= None):
+    """
+    Load and process streamflow data from an Excel file in a robust way.
+    If data have daily resolition the average monthly mean is computed only if  a minum number of 20 days are finite real values
+
+    - Detects dates either in a single column (including datetime types) or in split columns (day/month/year).
+    - Accepts Italian/English column names, case-insensitive.
+    - Cleans values (decimal commas, sentinel values, negatives) and aggregates daily data to monthly means.
+    - Applies a minimum valid-days rule for monthly means (hard minimum = 20 days).
+
+    Args:
+        file_path: Path to the .xlsx/.xls file. Data must be in the first sheet
+        date_col: Name of the date column; if None, it will be auto-detected.
+        value_col: Name of the value (discharge/flow) column; if None, it will be auto-detected.
+
+
+    Returns:
+        (ts, m_cal)
+        ts: numpy array of monthly values (float, NaN allowed).
+        m_cal: numpy array with shape (n, 2) containing [month, year] per row.
+    """
+    df = pd.read_excel(file_path)
+
+    # Normalize column names for robust matching
+    lower2orig = {str(c).strip().lower(): c for c in df.columns}
+
+    def pick_col(candidates):
+        """Return the first existing column (original name) matching any lower-cased candidate."""
+        for k in candidates:
+            if k in lower2orig:
+                return lower2orig[k]
+        return None
+
+    # --- Date detection ---
+    # If date_col is provided, try case-insensitive matching; else try single or split columns.
+    date_col_orig = None
+    if date_col is not None:
+        date_col_orig = lower2orig.get(str(date_col).strip().lower(), date_col if date_col in df.columns else None)
+
+    # Split columns candidates (IT/EN, short forms included)
+    day_col   = pick_col(['giorno', 'gg', 'day', 'd'])
+    month_col = pick_col(['mese', 'mm', 'month', 'm'])
+    year_col  = pick_col(['anno', 'aaaa', 'yy', 'yyyy', 'year', 'y'])
+
+    # Single date column candidates (IT/EN)
+    single_date_candidates = ['data', 'date', 'timestamp', 'datetime', 'time', 'data/ora', 'data ora']
+    if date_col_orig is None:
+        date_col_orig = pick_col(single_date_candidates)
+
+    # Build the _date column
+    if date_col_orig is not None:
+        # Direct parsing from a single date column
+        df['_date'] = pd.to_datetime(df[date_col_orig], errors='coerce', utc=False, dayfirst=True)
+        if df['_date'].isna().mean() > 0.5:
+            # Retry with dayfirst=False if too many NaT
+            df['_date'] = pd.to_datetime(df[date_col_orig], errors='coerce', utc=False, dayfirst=False)
+    elif all(c is not None for c in (day_col, month_col, year_col)):
+        # Combine split columns into a proper datetime
+        dd = pd.to_numeric(df[day_col], errors='coerce')
+        mm = pd.to_numeric(df[month_col], errors='coerce')
+        yy = pd.to_numeric(df[year_col], errors='coerce')
+
+        df['_date'] = pd.to_datetime({'year': yy, 'month': mm, 'day': dd}, errors='coerce')
+        # If the day is missing but month and year exist, default to day=1
+        mask_day_missing = dd.isna() & mm.notna() & yy.notna()
+        if mask_day_missing.any():
+            df.loc[mask_day_missing, '_date'] = pd.to_datetime(
+                {'year': yy[mask_day_missing], 'month': mm[mask_day_missing], 'day': 1},
+                errors='coerce'
+            )
+    else:
+        # Fallback: try to_datetime on every column and pick the best candidate
+        best_col, best_valid = None, 0.0
+        for c in df.columns:
+            s = pd.to_datetime(df[c], errors='coerce', utc=False, dayfirst=True)
+            valid = s.notna().mean()
+            if valid > best_valid and valid > 0.5:
+                best_col, best_valid = c, valid
+                df['_date'] = s
+        if best_col is None:
+            raise ValueError("Unable to determine a date column (single or split).")
+
+    # --- Value detection ---
+    value_col_orig = None
+    if value_col is not None:
+        value_col_orig = lower2orig.get(str(value_col).strip().lower(), value_col if value_col in df.columns else None)
+
+    if value_col_orig is None:
+        # Name-based heuristics (IT/EN)
+        value_name_candidates = [
+            'portata', 'q', 'discharge', 'flow', 'flows', 'streamflow', 'm3/s', 'mc/s',
+            'valore', 'value', 'values', 'qt', 'q_mean', 'qmean', 'portata_media'
+        ]
+        # Match by inclusion (e.g., "Q (m3/s)" contains "m3/s")
+        matches = []
+        for key in value_name_candidates:
+            matches += [c for c in df.columns if key in str(c).lower()]
+        if matches:
+            value_col_orig = matches[0]
+
+    if value_col_orig is None:
+        # Type-based fallback: pick the column that converts best to numeric
+        candidates = []
+        for c in df.columns:
+            if c == '_date' or c in {day_col, month_col, year_col}:
+                continue
+            s = pd.to_numeric(df[c], errors='coerce')
+            if s.notna().mean() > 0.8:
+                candidates.append((c, s.notna().mean()))
+        if not candidates:
+            # As a last resort, take the first non-date column
+            candidates = [(c, 0.0) for c in df.columns if c != '_date']
+        value_col_orig = sorted(candidates, key=lambda x: x[1], reverse=True)[0][0]
+
+    # --- Value cleaning ---
+    # Convert to string for normalization, handle decimal commas and sentinels
+    na_values = ['-9999', '-999.000', '@', '-', '- ', '', ' ', '--', 'NA', 'NaN', 'nan']
+    s = df[value_col_orig].astype(str).str.strip()
+    s = s.replace(na_values, np.nan)
+    s = s.str.replace(',', '.', regex=False)
+    s = pd.to_numeric(s, errors='coerce')
+    # Disallow negative values for streamflow
+    s = s.mask(s < 0, np.nan)
+    df['_value'] = s
+
+    # Drop colums of only nan
+    df = df.dropna(axis=1, how='all')
+    # Remove timezone if present
+    if hasattr(df['_date'].dt, 'tz'):
+        try:
+            df['_date'] = df['_date'].dt.tz_localize(None)
+        except Exception:
+            pass
+
+    # --- Monthly aggregation ---
+    # If multiple distinct days exist, we consider it daily and aggregate to monthly means
+    is_daily = df['_date'].dt.day.nunique() > 1
+
+    if is_daily:
+        min_valid_days = 20
+        print(f"Daily resolution detected: aggregating to monthly means (min_valid_days={min_valid_days}).")
+        grouped = df.set_index('_date')['_value']
+        monthly_mean = grouped.resample('ME').mean()
+        valid_days = grouped.resample('ME').count()
+        monthly = pd.DataFrame({'_value': monthly_mean, 'valid_days': valid_days}).reset_index()
+        monthly.loc[monthly['valid_days'] < min_valid_days, '_value'] = pd.NA
+        out_dates = monthly['_date']
+        out_values = monthly['_value'].astype(float).to_numpy()
+    else:
+        # Already monthly (or coarser): align to month-end timestamps for consistency
+        out_dates = df['_date'].dt.to_period('M').dt.to_timestamp('M')
+        out_values = df['_value'].astype(float).to_numpy()
+
+    # --- Build m_cal and return
+    m_month = out_dates.dt.month.to_numpy()
+    m_year = out_dates.dt.year.to_numpy()
+    m_cal = np.column_stack((m_month, m_year))
+
+    print("#########################################################################")
+    print("streamflow data has been imported successfully (Excel).")
+    print(f"data starts from [{m_cal[0,0]:02d} {m_cal[0,1]}] and ends on [{m_cal[-1,0]:02d} {m_cal[-1,1]}].")
+    print("#########################################################################")
+    print(" >>> ._plot_scan(): to plot the sqiset heatmap and D_{SPI}")
+    print(" >>> streamflow.ts (Q timeseries), streamflow.spi_like_set, streamflow.SIDI")
+
+    return out_values, m_cal
+
+def load_streamflow_from_excel_old(file_path, date_col=None, value_col=None):
     df = pd.read_excel(file_path)
 
 
