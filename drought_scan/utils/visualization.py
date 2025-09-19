@@ -361,15 +361,8 @@ def plot_severe_events(DSO, tstartid, duration, deficit, max_events=None, labels
             ax[0].text(v - 1, i, f"{v:.1f}", va='center', ha='right')
 
     # Set the title and layout
-    basin = DSO.shape.to_crs(epsg=32632)
-    # Calcola l'area in metri quadrati
-    area_kmq = basin.geometry.area.iloc[0] / 1e6
-    if name is None:
-        title = f'Drought Scan, severe events profile. baseline: {DSO.start_baseline_year} - {DSO.end_baseline_year}'
-    else:
-
-        title = f'Drought Scan, severe events profile for {name}, Area kmq: {int(np.round(area_kmq))}. Baseline: {DSO.start_baseline_year} - {DSO.end_baseline_year}'
-    fig.suptitle(title, fontsize=10)
+    title = f'Drought Scan, severe events profile for {DSO.basin_name}. Baseline: {DSO.start_baseline_year} - {DSO.end_baseline_year}'
+    fig.suptitle(title, fontsize=12)
     plt.show(block=False)
 
 def plot_cdn_trends(DSO, windows, ax=None,year_ext=None):
