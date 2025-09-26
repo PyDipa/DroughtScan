@@ -49,9 +49,10 @@ ds.plot_scan()
 ```python
 ds.plot_scan(optimal_k=10)           # Highlight an optimal integration timescale
 ds.plot_scan(weight_index=4)         # Use logarithmically increasing weights for SIDI
-ds.plot_scan(year_ext=(2000,2010))       # Zoom in on a specific period
-
-ds.plot_scan(saveplot=False)          # Automatically save in working directory
+ds.plot_scan(year_ext=(2000,2010))   # Zoom in on a specific period
+ds.plot_scan(plot_order='HSC')       # set the order of the subplots: H > heatmap; S = SIDI ==(D(SPI)); C=CDN
+ds.plot_scan(split_plot=True)        # plot Heatmpa, SIDI and CND in signle plots 
+ds.plot_scan(saveplot=False)         # Use TRUE to automatically save the figure in working directory
 ```
 
 Figures can also be saved manually:
@@ -103,7 +104,25 @@ scale_index = 18  # SPI18
 equivalent_precipitation = np.polyval(coeff[scale_index-1, month_index-1, :], spi_value)
 print(f"Equivalent precipitation for SPI18=-1.5 in March: {equivalent_precipitation}")
 ```
+**Visual inspection with `plot_spi_fit()`** 
 
+For exploratory purposes, the method plot_spi_fit(K, month) provides a graphical representation of the regression curves used to link SPI values to raw data (precipitation, PET, or balance).
+It plots the fitted relationship for a given month-scale K and reference month, with SPI values on the vertical axis and equivalent raw values on the horizontal axis. The color scale reflects the SPI domain (–3 to +3).
+```python
+# Example: plot the fitted curve for SPI-3 in March
+
+ds.plot_spi_fit(K=3, month=6) 
+ 
+# Optionally, the method can return the full 3D matrix of equivalent values used for plotting (K × SPI domain × months). Assign the result to a variable to access it:
+K = 12
+month = 6
+mm = ds.plot_spi_fit(K=K, month=month,return_data=True)
+# This allows extracting equivalent raw values for specific month and scale, e.g.:
+spi_target = -1.5
+idx = np.where(spi_target<=np.arange(-3, 3.2, 0.2))[0][0]
+equivalent_precipitation = mm[K-1, idx, month-1]  # SPI-3, March
+print(equivalent_precipitation)
+```
 ---
 
 ## 5) Trend detection in CDN

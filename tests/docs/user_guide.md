@@ -75,10 +75,12 @@ years = np.repeat(np.arange(1975, 2025), 12)[:600]
 months = np.tile(np.arange(1, 13), 50)[:600]
 m_cal = np.column_stack([months, years])                        # (T,2) -> [month, year]
 
+
 ds = DS.Precipitation(
     ts=ts,
     m_cal=m_cal,
-    basin_name='My Basin',
+    shape_path=shape_path,
+    basin_name='Po_fantasy',
     start_baseline_year=1981,
     end_baseline_year=2010
 )
@@ -355,13 +357,22 @@ streamflow = DS.Streamflow(data_path = river_path,
 # let's look to the SIDI vs SQI1 correlation:
 A = ds.analyze_correlation(streamflow,plot=True)
 # NB: dots can be coloured by season (April-October and November-March):
-A = ds.analyze_correlation(streamflow,plot=True,yellow=False,seasonal=True)
+A = ds.analyze_correlation(streamflow,plot=True,plot_mode='seasonal')
 # or by month
-A = ds.analyze_correlation(streamflow,plot=True,yellow=False,seasonal=False)
+A = ds.analyze_correlation(streamflow,plot=True,plot_mode='monthly')
+
 
 
 # if desiderd, SIDI can be recompiuted with optimal K and weight_index and became a proxy for SQI1
-ds.recalculate_SIDI(K=A['best_k'],weight_index=A['col_best_weight'],overwrite=True)
+ds.set_optimal_SIDI(
+    optimal_k=A['best_k'],
+    optimal_weight_index=A['col_best_weight'],
+    overwrite=True
+)
+
+# Option 2 (no overwrite): get the full SIDI matrix for K=best_k and pick a column
+SIDI_matrix = ds.recalculate_SIDI(K=A['best_k'])              # shape: (time, n_weightings)
+sidi_opt    = SIDI_matrix[:, A['col_best_weight']]            # 1D vector (time,)
 ```
 
 
@@ -370,15 +381,19 @@ Observed streamflow time series may contain **missing values** due to monitoring
 The method `gap_filling` of the `Streamflow` class allows you to fill short gaps and preserve continuity in index calculation.
 
 **Concept.** Gaps in the streamflow record are reconstructed **using the precipitation‑based SIDI** that best explains SQI1.  
-You must first **optimize the SIDI configuration** against the streamflow with `analyze_correlation`, then pass those settings to `gap_filling`.
+You must first **optimize the SIDI configuration** against the streamflow with `Precipitation.analyze_correlation(Streamflow)`, then pass those settings to `Streamflow.gap_filling`.
 
 ```python
-# we have previously run A = ds.analyze_correlation(streamflow,plot=True)
+# we have previously inizialized ds and streamflow as Precipitation and Streamflow classes; then run A = ds.analyze_correlation(streamflow,plot=True)
 # So A holds the results from the optimization method:
 print("Best K:", A['best_k'], "Best weight index (SIDI):", A['col_best_weight'])
 
 # 4) Gap filling (SIDI-guided) — uses the precipitation object and the optimal settings
-streamflow.gap_filling(ds, K=A['best_k'], weight_index=A['col_best_weight'])
+streamflow.gap_filling(
+    ds,
+    optimal_k=A['best_k'],
+    optimal_weight_index=A['col_best_weight']
+)
 
 ```
 ---

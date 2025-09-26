@@ -70,7 +70,7 @@ It combines **statistical drought indices**, **quantitative analysis**  and **vi
 - **Data handling**: Organizes meteorological and hydrological time series (precipitation, streamflow, external predictors) into a consistent calendar (`m_cal`) and spatial framework (shapefiles of provinces/basins).
 - **Drought indices**:
   - **SPI (Standardized Precipitation Index)** from 1 to K months (default K=36).
-  - **SIDI or gotic D (Standardized Integrated Drought Index)**: a weighted multi-scale index, standardized to mean 0 and variance 1.
+  - **SIDI (Standardized Integrated Drought Index)**: a weighted multi-scale index, standardized to mean 0 and variance 1.
   - **CDN (Cumulative Deviation from Normal)**: integrates long-term memory of anomalies by cumulating the standard index at 1-month scale.
   - **SQI (Standardized Streamflow Index)**: SPI-like indicator based on river discharge.
 - **Visualization**: Provides the three “pillars” of drought monitoring:
@@ -101,13 +101,17 @@ It acts as the main container of the framework, holding attributes and methods f
 - **`monthly_profile()`**:climatology plot (monthly profile) of the input variable
 - **`normal_values()`**: Compute the "normal" values of the climatology using the inverse function of the SPI-like index.
 - **`find_trends()`** Analyze trends in the CDN using rolling windows and linear regression (without any plot)
-- **`plot_trends()`**: serach, quantoify and plot trends in specific mowing window of the CDN curve
+- **`plot_trends()`**: search, quantify, and plot trends in specific moving windows of the CDN curve
 - **`severe_events()`**: list and plot severe drought events, ordered by magnitude or duration
+
 
 ONLY FOR PRECIPITATION WITH AVAILABLE STREAMFLOW DATA:
 - **`analyze_correlation()`**: find the combination of month-scales and weights that maximize the correlaiotn between SIDI and SQI1
-- **`recalculate_SIDI()`**: recompute SIDI with new optimal weights and month-scales as provied by `analyze_correlation() .  
-  
+- **`recalculate_SIDI()`**: recompute SIDI with new optimal weights and month-scales as provied by `analyze_correlation().
+
+ONLY FOR STREAMFLOW:
+
+-**`gap_filling()`**:Reconstruct monthly streamflow gaps thanks to the best correlation with precipitation data found out in `analyze_correlation()`.
 
 > **Note**: internal methods (prefixed with `_`) are used for calculations and should not be called directly by the user.  
 > For a detailed reference and usage examples, see the for examples and usage notes see the 
