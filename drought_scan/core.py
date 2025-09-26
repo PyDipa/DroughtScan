@@ -70,11 +70,28 @@ class BaseDroughtAnalysis:
         self.calculation_method = calculation_method
         self.index_name = index_name
         self.basin_name = basin_name
+        self.SIDI_name = rf"$\mathrm{{D}}_{{\mathrm{{({self.index_name})}}}}$"
 
         # SPI-related attributes
         self.spi_like_set, self.c2r_index = self._calculate_spi_like_set()
         self.SIDI = self._calculate_SIDI()
         self.CDN = self._calculate_CDN()
+        self.area_kmq = self._area()
+
+    def _area(self):
+        if isinstance(self, Teleindex):
+            # opzionale: None, 0, o raise esplicito
+            return -1
+        if self.shape.crs is None:
+            self.shape = self.shape.set_crs('epsg:4326')
+        elif self.shape.crs.to_string() != 'EPSG:4326':
+            self.shape = self.shape.to_crs('epsg:4326')
+
+        area_proj = self.shape.to_crs(epsg=32632)
+
+        #estiamte the area in square meters
+        area_kmq = area_proj.geometry.area.iloc[0]/1e6
+        return area_kmq
 
     def _compute_spi(self, month_scale,gamma_params=None):
         """
@@ -204,53 +221,52 @@ class BaseDroughtAnalysis:
         SIDI = (sidi - baseline_mean) / baseline_std
         return SIDI
 
-    def recalculate_SIDI(self, K=None, weight_index = None, overwrite=False):
+    def recalculate_SIDI(self, K):
         """
-        Recalculate SIDI using a custom K for each weight_index without altering the original SPI set.
+        Recalculate SIDI using a custom K (top-K SPI-like scales) for each weighting
+        without altering the original SPI-like set.
 
-        Args:
-            K (int, optional): the optimal number of SPI scales to use for the SIDI recalculation.
-                               If None, defaults to self.K.
+        Parameters
+        ----------
+        K : int
+          Number of SPI-like scales to use for SIDI recalculation (top-K).
 
-            weight_index (int,optional): the optimal weight_index according to the SIDI vs SQI1 correlation
-                                if None, defaults is self.weight_index
-
-            overwrite (bool): If True, updates self.SIDI with the new values and self will be enriched by
-                            self.optimal_k
-                            self.optimal_weight_index
-                            thus, self.optimal_k and self.weight_index will be the track change for SIDI
-                              If False, returns the recalculated SIDI without modifying the object.
-
-        Returns:
-            np.ndarray: New SIDI array (time x weightings) if overwrite=False.
+        Returns
+        -------
+        np.ndarray
+          SIDI array with shape (time, n_weightings).
         """
-        K = self.K if K is None else K
-        weight_index = self.weight_index if weight_index is None else weight_index
+
+        if K is None or K <= 0:
+            raise ValueError("K must be a positive integer.")
+
+        n_scales, T = self.spi_like_set.shape
+        if K > n_scales:
+            raise ValueError(f"K={K} exceeds available scales ({n_scales}).")
+
+        # weights: shape (K, n_weightings)
         weights = generate_weights(K)
+        if weights.shape[0] != K:
+            raise RuntimeError("generate_weights(K) returned unexpected shape.")
 
-        # Pre-allocate SIDI matrix
+        # Build SIDI (time x n_weightings)
+        # self.spi_like_set has shape (scales, time). We use the first K rows.
         sidi_matrix = []
-        for j in range(len(self.m_cal)):
-            vec = self.spi_like_set[:K, j]  # Use only the top-K SPI values
-            sidi_w = [weighted_metrics(vec, w)[0] for w in weights.T]
+        for j in range(T):
+            vec = self.spi_like_set[:K, j]
+            sidi_w = [weighted_metrics(vec, w)[0] for w in weights.T]  # one value per weight_index
             sidi_matrix.append(sidi_w)
 
-        sidi_matrix = np.array(sidi_matrix)
+        sidi_matrix = np.array(sidi_matrix)  # (time, n_weightings)
 
-        # Standardize using the original baseline period
+        # Standardize on the original baseline
         tb1_id, tb2_id = baseline_indices(self.m_cal, self.start_baseline_year, self.end_baseline_year)
         baseline = sidi_matrix[tb1_id:tb2_id + 1, :]
         mean = np.nanmean(baseline, axis=0)
         std = np.nanstd(baseline, axis=0)
-        if np.any(std == 0):
-            raise ValueError("Zero std in baseline; cannot standardize.")
+        if np.any(~np.isfinite(std)) or np.any(std == 0):
+            raise ValueError("Zero or non-finite std in baseline; cannot standardize SIDI.")
         SIDI_new = (sidi_matrix - mean) / std
-
-        if overwrite:
-            self.SIDI = SIDI_new
-            print(f"Overwrote self.SIDI with recalculated values using K={K} and weight_index = {weight_index}")
-            self.optimal_k = K
-            self.optimal_weight_index = weight_index
 
         return SIDI_new
 
@@ -273,19 +289,21 @@ class BaseDroughtAnalysis:
 
         return cdn
 
-    def plot_scan(self, optimal_k=None, weight_index=None,year_ext=None,saveplot=False):
+    def plot_scan(self, optimal_k=None, weight_index=None,year_ext=None,split_plot=None, plot_order=None,saveplot=False):
         """
             Plot the drought scan visualization, including CDN, SPI-like heatmap, and SIDI.
 
             Args:
-                year_ext (tuple, optional): Years defining X-axis limits.
+
                 optimal_k (int, optional): Optimal K scale.
                 weight_index (int, optional): Weighting scheme index.
-                name (str, optional): Name of the basin.
-                index_name (str, optional): Name of the drought index (SPI, SPEI, Z-Score).
+                year_ext (tuple, optional): Years defining X-axis limits.
+                split_plot :   If True, each panel (CDN, Heatmap, SIDI) is plotted in a separate figure,
+                plot_order : str, default='CHS';    Order of the panels when split_plot=False.
+
 
             """
-        plot_overview(self, optimal_k=optimal_k, weight_index=weight_index,year_ext=year_ext)
+        plot_overview(self, optimal_k=optimal_k, weight_index=weight_index,year_ext=year_ext,split_plot=split_plot,plot_order=plot_order)
         if saveplot==True:
             self._saveplot()
     def normal_values(self):
@@ -310,6 +328,57 @@ class BaseDroughtAnalysis:
         Normal = np.tile(np.squeeze(Nn),len(np.unique(self.m_cal[:,1])))
         Normal = Normal[0:len(self.ts)]
         return Normal
+
+    def plot_spi_fit(self,K,month,return_data = False):
+        """
+        Plot the fitted relationship between the SPI values and the raw variable
+        (e.g. precipitation, PET, or balance), for a given accumulation scale (K)
+        and calendar month.
+
+        Parameters
+        ----------
+        K : int
+            The SPI timescale (number of months) to be plotted, e.g. 3 for SPI-3.
+        month : int
+            The calendar month (1 = January, ..., 12 = December).
+
+        Returns
+        -------
+        mm : ndarray, shape (K, len(domain), 12)
+            Matrix of fitted values used for plotting, containing the equivalent
+            raw values for each SPI domain point, scale, and month.
+            Returned only if the function is assigned to a variable
+            (e.g. ``mm = precipitation.plot_spi_fit(K=3, month=3)``).
+            If the function is called directly without assignment
+            (e.g. ``precipitation.plot_spi_fit(K=3, month=3)``),
+            the plot is generated and nothing is printed to the console.
+        """
+
+        var = 'mm' if isinstance(self, (Precipitation, Pet, Balance)) else "raw values"
+        months = [
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December"
+        ]
+
+        coeff = self.c2r_index
+        domain = np.arange(-3,3.2,0.2)
+        mm = np.zeros((self.K,len(domain),12))
+        for m in range(12):
+            for k in range(self.K):
+                for i,spi_value in enumerate(domain):
+                    mm[k,i,m]  = np.polyval(coeff[k, m, :], spi_value)
+        cmap = spi_cmap().reversed() if self.threshold > 0 else spi_cmap()
+        plt.figure(figsize=(7,5))
+        plt.scatter(mm[K-1, :, month-1], domain, s=80, c=domain, cmap=cmap)
+        plt.xlabel(var,fontsize=14)
+        plt.ylabel(f"{self.index_name}{K}",fontsize=14)
+        plt.title(f"SPI{K}, {months[month-1]}",fontsize=14)
+        plt.grid()
+        plt.colorbar(label=f"{self.index_name}")  # opzionale
+        plt.tight_layout()
+        if return_data:
+            return mm
+
 
     def severe_events(self, weight_index=None, plot=True, max_events=None, labels=False, unit=None, name=None):
 
@@ -396,25 +465,25 @@ class BaseDroughtAnalysis:
 
         monthly_profile(self, var=var,var_name=var_name, cumulate=cumulate,ax=ax, highlight_years=highlight_years, season_shift=season_shift)
 
-    def export_for_r_plot(self, weight_index=2, optimal_k=None, name=None, out_dir="exports"):
+    def export_scan_plot_csv(self, weight_index=2, optimal_k=None, name=None, out_dir="exports"):
         """
-        Esporta i dati minimi necessari per replicare il grafico plot_overview in R.
+        Exports the minimum data needed in CSV format to replicate the plot_scan in another workspace.
 
         Args:
-            DSO: Oggetto DroughtScan (Precipitation o Streamflow)
-            weight_index (int): indice dei pesi per la SIDI (default: log decrescente = 2)
-            optimal_k (int, optional): se specificato, calcola nuova SIDI con K ottimale
-            name (str, optional): nome del bacino per nome file
-            out_dir (str): directory in cui salvare i dati esportati
+            DSO: DroughtScan Object (Precipitation or Streamflow)
+            weight_index (int): weight index for the SIDI (default: decreasing log = 2)
+            optimal_k (int, optional): if specified, calculates a new SIDI with optimal K
+            name (str, optional): name of the basin for filename
+            out_dir (str): directory to save the exported data
         """
         os.makedirs(out_dir, exist_ok=True)
 
-        # Serie temporali
+        # time series needed
         df_mcal = pd.DataFrame(self.m_cal, columns=["month", "year"])
         df_cdn = pd.DataFrame({"CDN": self.CDN})
         spi_df = pd.DataFrame(self.spi_like_set)
 
-        # SIDI: ricalcola se richiesto
+        # SIDI:
         if optimal_k is not None:
             from drought_scan.utils import generate_weights, weighted_metrics  # o path corretto
             weights = generate_weights(k=optimal_k)
@@ -428,7 +497,7 @@ class BaseDroughtAnalysis:
 
         df_sidi = pd.DataFrame({"SIDI": sidi_vec})
 
-        # Parametri generali
+        # general metadata
         metadata = {
             "index_name": self.index_name,
             "K": self.K,
@@ -440,12 +509,9 @@ class BaseDroughtAnalysis:
         }
 
         if hasattr(self, "shape"):
-            try:
-                area_kmq = float(self.shape.to_crs(epsg=32632).geometry.area.iloc[0]) / 1e6
-                metadata["area_kmq"] = area_kmq
-            except Exception as e:
-                print(f"Impossibile calcolare area: {e}")
-
+            metadata["area_kmq"] = DSO.area_kmq
+        else:
+            metadata["area_kmq"] = np.nan
         # Salvataggio
         prefix = name.replace(" ", "_") if name else "DSO_export"
         df_mcal.to_csv(os.path.join(out_dir, f"{prefix}_m_cal.csv"), index=False)
@@ -456,7 +522,7 @@ class BaseDroughtAnalysis:
         with open(os.path.join(out_dir, f"{prefix}_meta.json"), "w") as f:
             json.dump(metadata, f, indent=2)
 
-        print(f"Dati esportati con successo in {out_dir}/ con prefisso '{prefix}'")
+        print(f"Data exported successfully in {out_dir}/ with prefix '{prefix}'")
     # ----------------------------------------------------------
     def _saveplot(self):
 
@@ -473,6 +539,7 @@ class BaseDroughtAnalysis:
         pad_inches=0.1, #specifies padding around the image when bbox_inches is “tight”.
         # frameon=None,
         metadata=None)
+
 class Precipitation(BaseDroughtAnalysis):
     def __init__(self, start_baseline_year, end_baseline_year,basin_name,ts=None,m_cal=None,prec_path=None,
                  shape_path=None,shape=None, K=None,weight_index=None,
@@ -565,14 +632,44 @@ class Precipitation(BaseDroughtAnalysis):
             print(
                 "*************** Alternatively, you can access to: \n >>> precipitation.ts (P timeseries), \n >>> precipitation.spi_like_set (SPI (1:K) timeseries) \n >>> precipitation.SIDI (D_{SPI}) \n to visualize the data your way or proceed with further analyses!")
 
-    def analyze_correlation(self, streamflow, plot=True, yellow=True, seasonal=False):
+    def set_optimal_SIDI(self, optimal_k, optimal_weight_index, overwrite=False):
         """
-        Analyze correlations between Precipitation.SIDI and Streamflow SQI1 for different weight configuration and K values
-        in order to find the combination of month-scales and weights that maximize the correlaiotn between SIDI and SQI1
+        Recalculate SIDI using the optimal K (obtained via analyze_correlation with Streamflow).
+        Optionally store optimal_k (and optimal_weight_index) on this instance.
+
+        Args:
+            optimal_k (int): optimal K determined by analyze_correlation(streamflow).
+            optimal_weight_index (int): specific weight index to track/store (0-based).
+            overwrite (bool): if True, updates self.SIDI and stores self.optimal_k
+                              and self.optimal_weight_index on the instance.
+
+        Returns:
+            np.ndarray: SIDI array (time x n_weightings) computed with optimal_k.
+        """
+        if optimal_k is None or optimal_k < 0:
+            raise ValueError("optimal_k must be a positive integer obtained by SIDI vs SQI1 optimitation (use 'analize_correlation' method to estimate optima_k.")
+
+        if optimal_weight_index is None or optimal_weight_index < 0 or  optimal_weight_index >= 5:
+            raise ValueError(
+                "optimal_weight index must be positive integers obtained via SIDI vs SQI1 optimization")
+        # ---- compute SIDI with the requested K (no side effects yet)
+        SIDI_new = self.recalculate_SIDI(K=optimal_k)
+
+        if overwrite:
+            self.SIDI = SIDI_new
+            self.optimal_k = optimal_k
+            self.optimal_weight_index = int(optimal_weight_index)
+
+        return SIDI_new
+
+    def analyze_correlation(self, streamflow,plot=True,plot_mode="all"):
+        """
+        Analyze correlations between Precipitation SIDI and Streamflow SPI for different weightings and K values.
 
         Args:
             streamflow (Streamflow): Instance of the Streamflow class.
             plot (bool, optional): Whether to generate a correlation plot and call `_plot_scan`. Default is True.
+            plot_mode (str): 'all' (default), 'seasonal', 'monthly'.
 
         Returns:
             dict: Contains the best K, weight configuration, and maximum correlation value.
@@ -588,13 +685,14 @@ class Precipitation(BaseDroughtAnalysis):
             raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
 
         # find the temporal overlap between Precipitation and Streamflow
-        self_indices, streamflow_indices = find_overlap(self.m_cal, streamflow.m_cal)
+        self_indices, streamflow_indices = find_overlap(self.m_cal,streamflow.m_cal)
         if len(self_indices) == 0 or len(streamflow_indices) == 0:
             raise ValueError("No overlapping data found between Precipitation and Streamflow.")
 
         # Subset di dati per l'overlapping time
         y = streamflow.spi_like_set[0, streamflow_indices]  # SPI-1 dello streamflow
-        spi_like_set = self.spi_like_set[:, self_indices]  # Tutte le configurazioni SIDI
+        spi_like_set = self.spi_like_set[:,self_indices]  # Tutte le configurazioni SIDI
+
 
         K_range = np.arange(1, self.K + 1)
         MatCorr = []
@@ -604,8 +702,7 @@ class Precipitation(BaseDroughtAnalysis):
             W = generate_weights(k)
             # print("Calculating Ensemble Weighted Mean for each weighting function...")
             sidis = []  # SPI ensemble mean for each day
-            for doy in range(
-                    len(spi_like_set[0])):  # in range(self._baseline_indices()[0], self._baseline_indices()[1] + 1):
+            for doy in range(len(spi_like_set[0])):#in range(self._baseline_indices()[0], self._baseline_indices()[1] + 1):
                 vec = spi_like_set[:k, doy]
                 sidis.append([weighted_metrics(vec, w)[0] for w in W.T])
             sidis = np.array(sidis)
@@ -621,31 +718,32 @@ class Precipitation(BaseDroughtAnalysis):
             MatCorr.append(rr)
         # looking to the single SQI - SPI correlation
         rr_spi = []
-        for j, spi in enumerate(spi_like_set):
+        for j,spi in enumerate(spi_like_set):
             valid_mask = np.isfinite(y) & np.isfinite(spi)
             r = stats.pearsonr(spi[valid_mask], y[valid_mask])[0]
             rr_spi.append(r ** 2)
         rr_spi = np.array(rr_spi)
         ii = np.argsort(rr_spi)[::-1]
-        R2_spi = np.array([np.arange(1, self.K + 1)[ii], rr_spi[ii]]).T
+        R2_spi = np.array([np.arange(1,self.K+1)[ii],rr_spi[ii]]).T
 
         MatCorr = np.array(MatCorr)
         # Find the best K and weight index
         max_corr = np.max(MatCorr)
         best_k, best_weight = np.unravel_index(np.argmax(MatCorr), MatCorr.shape)
 
-        print(f"Best correlation: R^2 = {max_corr:.3f} (K={K_range[best_k]}, Weight={wlabel[best_weight]})")
+
+        print(f"Best correlation: R2  = {max_corr:.3f} (K={K_range[best_k]}, Weight={wlabel[best_weight]})")
         W = generate_weights(K_range[best_k])
         sidi = []  # SPI ensemble mean for each day
-        for doy in range(
-                len(spi_like_set[0])):  # in range(self._baseline_indices()[0], self._baseline_indices()[1] + 1):
+        for doy in range(len(spi_like_set[0])):  # in range(self._baseline_indices()[0], self._baseline_indices()[1] + 1):
             vec = spi_like_set[:K_range[best_k], doy]
-            sidi.append(weighted_metrics(vec, W[:, best_weight])[0])
+            sidi.append(weighted_metrics(vec, W[:,best_weight])[0])
         sidi = np.array(sidi)
 
         SIDI = (sidi - np.nanmean(sidi)) / np.nanstd(sidi)
 
-        # Plot the correlations
+        # --- plots ----------------------------------------------------------------
+
         if plot == True:
 
             plt.figure(figsize=(10, 5))
@@ -657,43 +755,37 @@ class Precipitation(BaseDroughtAnalysis):
             plt.xticks(np.arange(len(K_range)), K_range)
             plt.ylabel(r"$R^2$", fontweight="bold", fontsize=12)
             plt.xlabel("Month-scale (K)", fontweight="bold", fontsize=12)
-            plt.title("Correlation Analysis: D{spi} (namely SIDI)  vs. SQI1 ", fontsize=14, fontweight="bold")
+            plt.title(f"Correlation Analysis: {self.SIDI_name}  vs. SQI1 ", fontsize=14, fontweight="bold")
             plt.tight_layout()
             plt.show(block=False)
 
-        # ---------------------------------------------------------------
-        # Imposta automaticamente parametri ottimali ---------------------
-        # self.set_optimal_parameters(K_range[best_k], best_weight)
-        # streamflow.set_optimal_parameters(K_range[best_k], best_weight)
-        # ---------------------------------------------------------------
-        if plot == True:
-            # Prompt per rilanciare _plot_scan con best_k
+
+
+
+            # basic scan plot
             self.plot_scan(optimal_k=K_range[best_k], weight_index=best_weight)
 
-        if plot == True:
             plt.figure(figsize=(7, 7))
-            if yellow == True:
+            if plot_mode == "all":
                 plt.plot(SIDI, y, 'ok', markerfacecolor='yellow', linewidth=2)
-            elif seasonal == True:
-                g1 = [4, 5, 6, 7, 8, 9, 10]
-                g2 = [11, 12, 1, 2, 3]
+            elif plot_mode == "seasonal":
+                g1 = [4, 5, 6, 7, 8, 9]
+                g2 = [10,11, 12, 1, 2, 3]
                 # summer ------------------------------------------------------
                 m1summer = np.isin(self.m_cal[self_indices, 0], g1)
                 m2summer = np.isin(streamflow.m_cal[streamflow_indices, 0], g1)
-                f = np.isfinite(SIDI[m1summer]) & np.isfinite(y[m2summer])
-                rho, pval = stats.pearsonr(SIDI[m1summer][f], y[m2summer][f])
-                rho = 0 if pval > 0.5 else rho
-                plt.plot(SIDI[m1summer], y[m2summer], 'o', color='tab:olive', alpha=0.4,
-                         label=f'Apr-Oct; R2={np.round(rho ** 2, 2)}')
+                f  = np.isfinite(SIDI[m1summer]) & np.isfinite(y[m2summer])
+                rho,pval = stats.pearsonr(SIDI[m1summer][f], y[m2summer][f])
+                rho = 0 if pval>0.5 else rho
+                plt.plot(SIDI[m1summer], y[m2summer], 'o', color='tab:olive', alpha=0.4, label=f'Apr-Oct; $R^2$ = {np.round(rho**2,2)}')
                 # winter ------------------------------------------------------
                 m1winter = np.isin(self.m_cal[self_indices, 0], g2)
                 m2winter = np.isin(streamflow.m_cal[streamflow_indices, 0], g2)
                 f = np.isfinite(SIDI[m1winter]) & np.isfinite(y[m2winter])
-                rho, pval = stats.pearsonr(SIDI[m1winter][f], y[m2winter][f])
-                rho = 0 if pval > 0.5 else rho
-                plt.plot(SIDI[m1winter], y[m2winter], 'o', color='tab:blue', alpha=0.4,
-                         label=f'Nov-Mar; R2={np.round(rho ** 2, 2)}')
-            else:
+                rho,pval = stats.pearsonr(SIDI[m1winter][f], y[m2winter][f])
+                rho = 0 if pval>0.5 else rho
+                plt.plot(SIDI[m1winter], y[m2winter], 'o', color='tab:blue', alpha=0.4, label=f'Nov-Mar; $R^2$ = {np.round(rho**2,2)}')
+            elif plot_mode == 'monthly':
                 if cmc is not None:
                     c = plt.get_cmap(cmc.romaO, 12)
                 else:
@@ -702,20 +794,21 @@ class Precipitation(BaseDroughtAnalysis):
                 for month in range(1, 13):
                     m1 = np.where(self.m_cal[self_indices, 0] == month)[0]
                     m2 = np.where(streamflow.m_cal[streamflow_indices, 0] == month)[0]
-                    plt.plot(SIDI[m1], y[m2], 'o', color=c(month / 12), label=f'month {month}')
+                    plt.plot(SIDI[m1],y[m2], 'o',color=c(month/12),label = f'month {month}')
 
-            plt.plot(np.arange(-3, 4), np.arange(-3, 4), '--', color='grey')
+
+            plt.plot(np.arange(-3,4),np.arange(-3,4),'--',color='grey')
             plt.grid()
             plt.ylabel(r"SQI1", fontweight="bold", fontsize=12)
-            plt.xlabel("D{spi}", fontweight="bold", fontsize=12)
-            plt.title(f"D(spi) vs. SQI1. K={best_k} - weighting function n. {best_weight}; R^2 = {max_corr:.2f}",
-                      fontsize=14, fontweight="bold")
+            plt.xlabel(f"{self.SIDI_name}", fontweight="bold", fontsize=12)
+            plt.title(f"{self.SIDI_name} vs. SQI1. K={best_k} - weighting function n. {best_weight}; $R^2$ = {max_corr:.2f}", fontsize=14, fontweight="bold")
+
             plt.legend(fontsize=12)
             plt.tight_layout()
             plt.show(block=False)
 
-        return {"best_k": K_range[best_k], "col_best_weight": best_weight, "max_correlation": max_corr,
-                'spi_corr': R2_spi}
+        return {"best_k": K_range[best_k], "col_best_weight": best_weight, "max_correlation": max_corr,'spi_corr':R2_spi}
+
 
 
 class Streamflow(BaseDroughtAnalysis):
@@ -840,18 +933,43 @@ class Streamflow(BaseDroughtAnalysis):
         self.CDN = self._calculate_CDN()
         self.is_placeholder = False
 
-    def gap_filling(self, precipitation, K=None, weight_index=2, alpha=0.1,X2=None):
+    def gap_filling(self, precipitation,optimal_k,optimal_weight_index):
         """
-        Fill missing values (NaN) in streamflow SQI[0] and streamflow time series using SIDI from Precipitation.
 
-        Args:
-            precipitation (BaseDroughtAnalysis): Precipitation instance to extract SPI and SIDI.
-            K (int, optional): Max temporal scale to recalculate SIDI. If None, uses existing SIDI.
-            weight_index (int, optional): Weighting scheme for SIDI calculation.
-            alpha (float, optional): Regularization strength for Lasso. Default is 0.1.
+        Fill missing values in the streamflow time series by regressing SQI1 on
+        precipitation-based SIDI, then back-transforming predictions to discharge.
+
+        Parameters
+        ----------
+        precipitation : BaseDroughtAnalysis
+            Precipitation instance that provides SPI-like sets and calendar. Typically the same
+            object used when running `analyze_correlation(streamflow)` to select `optimal_k`
+            and `optimal_weight_index`.
+        optimal_k : int
+            Number of SPI-like scales (top-K) used to compute SIDI on `precipitation`.
+        optimal_weight_index : int
+            Index (0-based) of the weighting scheme used when extracting the SIDI column.
+
+        Returns
+        -------
+        None
+            The method updates `self.ts` in place over the overlap with `precipitation`. If any
+            gaps are filled, it also recomputes `self.spi_like_set`, `self.SIDI`, and `self.CDN`.
+            A message is printed in the form:
+            "Gap filling completed. {n_to_fill} values updated." \
         """
         if not isinstance(precipitation, BaseDroughtAnalysis):
             raise TypeError("The input must be an instance of Precipitation.")
+
+        if optimal_k is None or optimal_k < 0:
+            raise ValueError(
+                "optimal_k must be a positive integer obtained by SIDI vs SQI1 optimitation (use 'analize_correlation' method to estimate optima_k.")
+
+        if optimal_weight_index is None or optimal_weight_index < 0 or optimal_weight_index >= 5:
+            raise ValueError(
+                "optimal_weight index must be positive integers obtained via SIDI vs SQI1 optimization")
+
+
 
         # checks for missing values otherwise exit
         mask_nan = np.isnan(self.ts)
@@ -861,7 +979,6 @@ class Streamflow(BaseDroughtAnalysis):
 
         # identify the gaps
         gaps_idx = np.where(np.isnan(self.ts))
-
         self.gap_flag = np.zeros_like(self.ts, dtype=int)
         self.gap_flag[gaps_idx] = 1
 
@@ -871,43 +988,55 @@ class Streamflow(BaseDroughtAnalysis):
         if len(self_idx) == 0:
             raise ValueError("No overlapping data between Precipitation and Streamflow.")
 
+        # specify the varibale of interest
         sqi1 = self.spi_like_set[0][self_idx]
-        spiset = precipitation.spi_like_set[:, prec_idx]
-        m_cal = self.m_cal[self_idx]
-        ts = self.ts[self_idx]
+        m_cal = self.m_cal[self_idx]  # (N_overlap, 2) atteso [month, year]
+        ts = self.ts[self_idx].copy()  # (N_overlap,)
 
-        # Recalculate SIDI if needed
-        if K is None:
-            SIDI = precipitation.SIDI[prec_idx, weight_index]
-        else:
-            W = generate_weights(K)[:, weight_index]
-            sidi_vals = np.array([
-                weighted_metrics(spiset[:K, t], W)[0]
-                for t in range(spiset.shape[1])
-            ])
-            SIDI = (sidi_vals - np.nanmean(sidi_vals)) / np.nanstd(sidi_vals)
+        SIDIs = precipitation.recalculate_SIDI(K=optimal_k)
+        SIDI = SIDIs[:, optimal_weight_index][prec_idx]
 
-        # finite  mask for regression (where both available)
         valid_mask = np.isfinite(sqi1) & np.isfinite(SIDI)
+        # ----------------------------------------------------------------------------------
+        # OLS fit with intercept using NumPy (no scikit-learn needed)
+        X = SIDI[valid_mask]
+        y = sqi1[valid_mask]
 
-        # Lasso fit
-        # model = Lasso(alpha=alpha)
-        model.fit(SIDI[valid_mask].reshape(-1, 1), sqi1[valid_mask])
+        if X.size < 2:
+            raise ValueError("Not enough overlapping finite points to fit regression.")
+
+        # Check variance to avoid singular matrix issues
+        if np.nanstd(X) == 0:
+            raise ValueError("Predictor SIDI has zero variance over valid points.")
+
+        # Design matrix [x, 1] to estimate slope (a) and intercept (b)
+        A = np.column_stack([X, np.ones_like(X)])
+        coeffs, *_ = np.linalg.lstsq(A, y, rcond=None)
+        a, b = coeffs  # sqi1 ≈ a * SIDI + b
 
         # ==================================================================================
         # prediction
         prediction_mask = np.isnan(sqi1) & np.isfinite(SIDI)
-        sqi1_pred = sqi1.copy()
-        sqi1_pred[prediction_mask] = model.predict(SIDI[prediction_mask].reshape(-1, 1))
+        n_to_fill = int(np.sum(prediction_mask))
 
-        # ==================================================================================
-        # reverse SQI1 (index == 0) to ts
-        Q_pred = ts.copy()
-        Q_pred[prediction_mask] = [np.polyval(self.c2r_index[0,m_cal[prediction_mask][i,0] - 1, :], val) for i,val in enumerate(sqi1_pred[prediction_mask])]
+        if n_to_fill > 0:
+            sqi1_pred = sqi1.copy()
+            sqi1_pred[prediction_mask] = a * SIDI[prediction_mask] + b
+
+            # back-transform SQI1 -> portata con polinomi mensili
+            Q_pred = ts.copy()
+            mc_pred = m_cal[prediction_mask]
+            s_pred = sqi1_pred[prediction_mask]
+            # reverse SQI1 (index == 0) to ts
+
+            Q_pred[prediction_mask] = [
+                np.polyval(self.c2r_index[0, mc_pred[i, 0] - 1, :], s_pred[i])
+                for i in range(s_pred.shape[0])
+            ]
 
         # ==================================================================================
         # UPDATE
-        self.ts[self_idx]=Q_pred
+        self.ts[self_idx] = Q_pred
 
         # Recalculate SPI-like set, SIDI and CDN
         self.spi_like_set, self.c2r_index = self._calculate_spi_like_set()
