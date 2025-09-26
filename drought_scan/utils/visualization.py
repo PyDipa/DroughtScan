@@ -124,7 +124,256 @@ def highlight_drought(ax, series, color='brown' ,offset=None, threshold=None):
         else:
             ax.axvspan(start +offset-0.5, end +offset-0.5, color=color, alpha=0.1)
 
-def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None):
+
+def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_plot=False, plot_order=None):
+    """
+    Plot the drought scan visualization: Heatmap(H),  SIDI(S) and  CDN (C),
+
+    Parameters
+    ----------
+    DSO : DroughtScan object
+        Instance containing SPI, SIDI, CDN, and metadata (calendar, basin info).
+    optimal_k : int, optional
+        If provided, SIDI is recomputed using the specified optimal K.
+    weight_index : int, optional
+        Index of the weighting scheme for SIDI calculation.
+        Defaults to 2 (logarithmically decreasing weights).
+        Options:
+            0 = equal weights
+            1 = linear decreasing
+            2 = logarithmic decreasing
+            3 = linear increasing
+            4 = logarithmic increasing
+    year_ext : tuple(int, int), optional
+        (start_year, end_year). If provided, limits the x-axis to this period.
+    split_plot : bool, default=False
+        If True, each panel (CDN, Heatmap, SIDI) is plotted in a separate figure,
+        each with its own x-axis labels.
+        If False, all panels are combined in a single figure.
+    plot_order : str, default='CHS'
+        Order of the panels when split_plot=False.
+        Must be any permutation of 'H', 'S', 'C':
+            'CHS' -> CDN (top), Heatmap (middle), SIDI (bottom)
+            'HSC' -> Heatmap (top), SIDI (middle), CDN (bottom)
+            'SCH' -> SIDI (top), CDN (middle), Heatmap (bottom)
+        The heatmap panel always uses a smaller height ratio, regardless of position.
+
+    Visualization
+    -------------
+    - CDN panel: cumulative deviation of SPI-1.
+    - Heatmap panel: SPI values across multiple timescales with dynamic transparency.
+    - SIDI panel: weighted drought index with shaded drought events.
+
+    Notes
+    -----
+    - When split_plot=False, only the bottom panel shows year labels on the x-axis.
+    - When split_plot=True, all figures display year labels independently.
+    - The heatmap panel is always thinner than the others to improve readability.
+    """
+
+
+    # -------------------- parametri di default --------------------
+    if weight_index is None:
+        weight_index = 2  # log-decreasing
+
+    # -------------------- SIDI: ricalcolo opzionale --------------------
+    if optimal_k is not None:
+        SIDI = DSO.recalculate_SIDI(K=optimal_k)[:, weight_index]
+        weights = generate_weights(k=optimal_k)
+        # sidis = []
+        # for j in range(len(DSO.m_cal)):
+        #     vec = DSO.spi_like_set[0:optimal_k, j]
+        #     sidis.append([weighted_metrics(vec, weights[:, weight_index])[0]])
+        # SIDI = np.squeeze(np.array(sidis))
+    else:
+        SIDI = np.array(DSO.SIDI[:, weight_index], copy=True)
+
+    # -------------------- colormap e norm per heatmap --------------------
+    cmap = spi_cmap().reversed() if DSO.threshold > 0 else spi_cmap()
+    bounds = np.array([-3, -2.5, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 2.5, 3])
+    norm = mpl.colors.BoundaryNorm(bounds, cmap.N)
+
+    rgba_matrix = cmap(norm(DSO.spi_like_set))  # (K, T, 4)
+    nan_mask = np.isnan(DSO.spi_like_set)
+    rgba_matrix[nan_mask] = [1, 1, 1, 1]
+
+    if optimal_k is not None:
+        for i in range(DSO.spi_like_set.shape[0]):
+            if i >= optimal_k:
+                rgba_matrix[i, :, -1] *= 0.3  # trasparenza per scale > Kopt
+
+    # -------------------- xticks labels --------------------
+    labels = np.array([str(int(c[1])) for c in DSO.m_cal])  # anni
+
+    # -------------------- graphical helpers  --------------------
+    def _apply_xlim(ax):
+        if year_ext is None:
+            ax.set_xlim(DSO.K, len(SIDI))
+        else:
+            try:
+                x1 = np.where(DSO.m_cal[:, 1] == year_ext[0])[0][0]
+                x2 = np.where(DSO.m_cal[:, 1] == year_ext[1])[0][-1]
+            except IndexError:
+                raise IndexError("provide a tuple of years for xlim within the actual time domain")
+            ax.set_xlim(x1, x2)
+
+    def _x_year_ticks(ax, show=True):
+        if show:
+            ax.set_xticks(np.arange(0, len(labels[0:-1:12]) * 12, 12))
+            ax.set_xticklabels(labels[0:-1:12], rotation=90)
+        else:
+            ax.set_xticks([])
+            ax.set_xticklabels([])
+
+    def _round_up(x, base=10):
+        return int(-(-x // base) * base)
+
+    def _panel_C(ax, show_xticks):
+        # CDN
+        ax.plot(np.arange(0, len(DSO.CDN)), DSO.CDN, linewidth=1, color='k')
+        highlight_drought(ax, SIDI, threshold=DSO.threshold)
+        ax.axhline(y=0, c='k', linestyle=':', alpha=0.5)
+        _x_year_ticks(ax, show=show_xticks)
+        ax.set_ylabel('CDN', fontsize=12)
+        ymax = np.max(abs(DSO.CDN))
+        ax.set_ylim(-_round_up(ymax), _round_up(ymax))
+        plt.setp(ax.get_yticklabels(), fontsize=12)
+        _apply_xlim(ax)
+
+    def _panel_H(ax, add_colorbar=True, show_xticks=False):
+        # Heatmap SPI_k
+        heat = ax.imshow(rgba_matrix, aspect='auto', interpolation='none', cmap=cmap)
+        _x_year_ticks(ax, show=show_xticks)
+        xpos = np.round(np.arange(1, DSO.K, max(1, DSO.K / 5)))
+        index_lab = [f"{DSO.index_name}$_{{{int(sub)}}}$" for sub in xpos]
+        ax.set_yticks(xpos - 1)
+        ax.set_yticklabels(index_lab, fontsize=12)
+        if add_colorbar:
+            cbar_ax = ax.inset_axes([1.01, 0.0, 0.02, 1.0])  # a destra del pannello
+            mpl.colorbar.ColorbarBase(cbar_ax, cmap=cmap, norm=norm, orientation='vertical')
+            cbar_ax.set_ylabel(f'{DSO.index_name} value', fontsize=12)
+            cbar_ax.tick_params(labelsize=10)
+        _apply_xlim(ax)
+
+
+    def _panel_S(ax, show_xticks):
+        # SIDI
+        RedArea = np.array(SIDI, copy=True)
+        if DSO.threshold >= 0:
+            RedArea[RedArea < DSO.threshold] = np.nan
+            dot = 0.7
+        else:
+            RedArea[RedArea > DSO.threshold] = np.nan
+            dot = 0.3
+
+        ax.plot(np.arange(0, len(SIDI)), SIDI, color='k', linewidth=1, alpha=0.8, label='D')
+        ax.axhline(y=DSO.threshold, c='k', linestyle=':', alpha=0.5)
+        ax.fill_between(np.arange(0, len(SIDI)), RedArea, DSO.threshold,
+                        hatch='xx', color=cmap(dot), linewidth=2, alpha=0.8)
+        _x_year_ticks(ax, show=show_xticks)
+        ax.set_ylim(-3.5, 3.5)
+        ax.set_ylabel(f"{DSO.SIDI_name}", fontsize=14)
+        plt.setp(ax.get_yticklabels(), fontsize=12)
+        _apply_xlim(ax)
+
+
+    # Map symbols
+    PANELS = {
+        'C': _panel_C,
+        'H': _panel_H,
+        'S': _panel_S,
+    }
+
+    if plot_order is None:
+        plot_order = 'CHS'
+    # validazione ordine: deve essere una permutazione di 'HSC'
+    plot_order = plot_order.upper()
+    if len(plot_order) != 3 or set(plot_order) != set("HSC"):
+        raise ValueError("plot_order deve essere una permutazione di 'HSC', es. 'CHS', 'HSC', 'SCH', ...")
+
+    order = list(plot_order)  # es. ['S','C','H']
+    # # order check
+    # if plot_order not in ('CHS', 'HSC'):
+    #     raise ValueError("plot_order deve essere 'CHS' (default) o 'HSC'.")
+
+    order = list(plot_order)
+
+    # -------------------- Dimenion of the full plot --------------------
+    def _figure_size_for_length(n):
+        """
+        Compute figure width and height as a continuous function of series length n,
+        clamped within predefined min/max limits and rounded to 1 decimal place.
+        """
+        # coefficiente di scala derivato dal caso n=1200 -> w≈20.9
+        k = 20.9 / 1200.0
+        w = k * n
+
+        # clamp tra valori minimi e massimi (dai tuoi vecchi casi)
+        w = max(20.9 / 250 * n, min(w, 20.9 / 1800 * n * 1800 / 1200))  # opzionale se vuoi stringere
+        w = min(max(w, 20.9 / 250 * 250), 20.9 / 1800 * 1800)  # clamp effettivo tra 20.9 e ~20.9 (scalato)
+
+        # oppure più semplice: clamp tra 10 e 21
+        w = min(max(w, 10), 21)
+
+        # altezza come proporzione della larghezza
+        h = w / 2 if n >= 300 else w / 1.2
+
+        return round(w, 1), round(h, 1)
+
+    # -------------------- PLOTTING --------------------
+    if not split_plot:
+        # unica figura con 3 pannelli nell'ordine scelto
+        fig_w, fig_h = _figure_size_for_length(len(DSO.ts))
+        ratios = [0.8 if key == 'H' else 1.5 for key in order]
+        fig, axes = plt.subplots(
+            nrows=3, ncols=1, figsize=(fig_w, fig_h),
+            gridspec_kw={'height_ratios': ratios }, dpi=100
+        )
+        fig.subplots_adjust(left=0.07)
+        axes = axes.ravel()
+
+        # top and mid withput xticks; bottom with yearly labels
+        for i, key in enumerate(order):
+            show_xt = (i == 2)  # solo il pannello in fondo mostra anni
+            if key == 'H':
+                PANELS[key](axes[i], add_colorbar=True, show_xticks=show_xt)
+            else:
+                PANELS[key](axes[i], show_xticks=show_xt)
+
+        # plot title
+
+        title = (f"Drought Scan for {DSO.basin_name}, Area kmq: {int(np.round(DSO.area_kmq))}. "
+                 f"Baseline: {DSO.start_baseline_year} - {DSO.end_baseline_year}")
+        fig.suptitle(title, fontsize=14)
+        fig.subplots_adjust(left=0.1)
+        plt.show(block=False)
+
+    else:
+        # 3 single plots
+        for key in order:
+            fig_w, fig_h = _figure_size_for_length(len(DSO.ts))
+            fig, ax = plt.subplots(figsize=(fig_w, fig_h / 3), dpi=100)
+            if key == 'H':
+                PANELS[key](ax, add_colorbar=True, show_xticks=True)
+                ax.set_title(f"{DSO.index_name} heatmap", fontsize=14)
+            elif key == 'C':
+                PANELS[key](ax, show_xticks=True)
+                ax.set_title("CDN", fontsize=14)
+            else:  # 'S'
+                PANELS[key](ax, show_xticks=True)
+                ax.set_title(f"{DSO.SIDI_name}", fontsize=14)
+
+            # single titles
+            subtitle = (f"{DSO.basin_name} | Baseline {DSO.start_baseline_year}-{DSO.end_baseline_year} | "
+                        f"Area {int(np.round(DSO.area_kmq))} km²")
+            fig.suptitle(subtitle, fontsize=14, y=0.96)
+            fig.subplots_adjust(left=0.1)
+            plt.tight_layout()
+            plt.show(block=False)
+
+
+
+def plot_overview_old(DSO, optimal_k=None, weight_index=None, year_ext=None):
     """
     Plot the drought scan visualization, including CDN, SPI, and SIDI metrics.
 
@@ -150,27 +399,20 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None):
 
     # Optional recalculation of SIDI with optimal_k
     if optimal_k is not None:
-        print(f"Recomputing SIDI with optimal K = {optimal_k}...")
-        weights = generate_weights(k=optimal_k)  # Generate weights for the specified K
-        sidis = []
-        for j in range(len(DSO.m_cal)):
-            vec = DSO.spi_like_set[0:optimal_k, j]  # Use only the first optimal_k rows
-            sidis.append([weighted_metrics(vec, weights[:, weight_index])[0]])
-        SIDI = np.squeeze(np.array(sidis))  # Compute new SIDI
+        SIDI = DSO.recalculate_SIDI(K=optimal_k)[:,weight_index]
+        # print(f"Recomputing SIDI with optimal K = {optimal_k}...")
+        # weights = generate_weights(k=optimal_k)  # Generate weights for the specified K
+        # sidis = []
+        # for j in range(len(DSO.m_cal)):
+        #     vec = DSO.spi_like_set[0:optimal_k, j]  # Use only the first optimal_k rows
+        #     sidis.append([weighted_metrics(vec, weights[:, weight_index])[0]])
+        # SIDI = np.squeeze(np.array(sidis))  # Compute new SIDI
     else:
         SIDI = np.array(DSO.SIDI[:, weight_index], copy=True)  # Use precomputed SIDI
 
     # ----------------------------------------------------
     # SET THE COLORMAP FOR THE HEATMAP
-    # xmap = plt.get_cmap('RdYlGn_r' if reverse_color else 'RdYlGn', 13)
-    # cmap = np.array([xmap(i) for i in range(xmap.N)])
-    # cmap[5, :] = (0.8, 0.8, 0.8, 1)  # Gray for near-neutral SPI
-    # cmap[6, :] = (0.6, 0.6, 0.6, 1)
-    # cmap = mpl.colors.LinearSegmentedColormap.from_list('Custom cmap', cmap, xmap.N)
-    # USING CRIMERI
     cmap = spi_cmap().reversed() if DSO.threshold>0 else spi_cmap()
-
-
     bounds = np.array([-3, -2.5, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 2.5, 3])
     norm = mpl.colors.BoundaryNorm(bounds, cmap.N)
 
@@ -188,17 +430,12 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None):
             if i >= optimal_k:
                 rgba_matrix[i, :, -1] *= 0.3  # Reduce alpha for rows below optimal_k
 
-    # -------------------------------------------------
-    # SET THE COLORMAP FOR CDN (SPI-1 CUMULATIVE DEVIATION)
-    # cdnmap = plt.get_cmap('coolwarm' if reverse_color else 'coolwarm_r')
-    # USING CRIMERI
-
 
     # Generate time labels for the x-axis
     labels = np.array([str(int(c[1])) for c in DSO.m_cal])
 
     # -------------------------------------------------
-    # FIGURE SETTINGS
+    # FIGURE SETTINGS FOR NOT SPLITTED PLOTS:
     # Dynamic figure size based on time series length
     if len(DSO.ts) >= 1200:  # For very long time series (~150 years)
         fig_width = (len(DSO.ts) / 1800) * 20.9
@@ -214,6 +451,7 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None):
         fig_height = fig_width / 1.2
 
     # Create subplots
+
     fig, ax = plt.subplots(figsize=(fig_width, fig_height), nrows=3, ncols=1,
                            gridspec_kw={'height_ratios': [1.5, 0.8, 1.5]}, dpi=100)
     fig.subplots_adjust(left=0.07)
@@ -277,7 +515,7 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None):
     ax[2].set_xticks(np.arange(0, len(labels[0:-1:12]) * 12, 12))
     ax[2].set_xticklabels(labels[0:-1:12], rotation=90)
     ax[2].set_ylim(-3.5, 3.5)
-    ax[2].set_ylabel(rf"$\mathbf{{\mathit{{D}}_{{\{{\mathrm{{{DSO.index_name}}}\}}}}}}$", fontsize=14)
+    ax[2].set_ylabel(f"{DSO.SIDI_name}", fontsize=14)
     # ax[2].set_ylabel(r"$\mathbf{\mathit{D}_{\{\mathrm{spi}\}}}$", fontsize=14)
     plt.setp(ax[2].get_yticklabels(), fontsize=12)
 
