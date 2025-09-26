@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 from .statistics import find_overlap
 from .drought_indices import f_spi, f_spei, f_zscore
 from .hydrology import Qcs2Qmm, Qmm2Qcs
+from .statistics import test_standardization
+
 
 __all__ = [
     "find_overlap",
@@ -15,6 +17,7 @@ __all__ = [
     "f_zscore",
     "Qcs2Qmm",
     "Qmm2Qcs",
+    "test_standardization",
     "savefig",     
 ]
 
