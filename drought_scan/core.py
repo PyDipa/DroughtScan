@@ -755,7 +755,7 @@ class Precipitation(BaseDroughtAnalysis):
             plt.xticks(np.arange(len(K_range)), K_range)
             plt.ylabel(r"$R^2$", fontweight="bold", fontsize=12)
             plt.xlabel("Month-scale (K)", fontweight="bold", fontsize=12)
-            plt.title(f"Correlation Analysis: {self.SIDI_name}  vs. SQI1 ", fontsize=14, fontweight="bold")
+            plt.title(f"Correlation Analysis: {self.SIDI_name}  vs.  {streamflow.index_name}1", fontsize=14, fontweight="bold")
             plt.tight_layout()
             plt.show(block=False)
 
@@ -799,9 +799,9 @@ class Precipitation(BaseDroughtAnalysis):
 
             plt.plot(np.arange(-3,4),np.arange(-3,4),'--',color='grey')
             plt.grid()
-            plt.ylabel(r"SQI1", fontweight="bold", fontsize=12)
+            plt.ylabel(f"{streamflow.index_name}1 ", fontweight="bold", fontsize=12)
             plt.xlabel(f"{self.SIDI_name}", fontweight="bold", fontsize=12)
-            plt.title(f"{self.SIDI_name} vs. SQI1. K={best_k} - weighting function n. {best_weight}; $R^2$ = {max_corr:.2f}", fontsize=14, fontweight="bold")
+            plt.title(f"{self.SIDI_name} vs.  {streamflow.index_name}1 . K={best_k} - weighting function n. {best_weight}; $R^2$ = {max_corr:.2f}", fontsize=14, fontweight="bold")
 
             plt.legend(fontsize=12)
             plt.tight_layout()
