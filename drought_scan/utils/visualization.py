@@ -203,7 +203,7 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_p
                 rgba_matrix[i, :, -1] *= 0.3  # trasparenza per scale > Kopt
 
     # -------------------- xticks labels --------------------
-    labels = np.array([str(int(c[1])) for c in DSO.m_cal])  # anni
+    labels = np.array([str(int(c[1])) for c in DSO.m_cal]).astype(int)  # anni
 
     # -------------------- graphical helpers  --------------------
     def _apply_xlim(ax):
