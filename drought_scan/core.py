@@ -524,21 +524,41 @@ class BaseDroughtAnalysis:
 
         print(f"Data exported successfully in {out_dir}/ with prefix '{prefix}'")
     # ----------------------------------------------------------
-    def _saveplot(self):
+    def _savedsplot(self):
 
         k = self.K if not hasattr(self, 'optimal_k') or self.optimal_k is None else self.optimal_k
         w = self.weight_index if not hasattr(self, 'optimal_weight_index') or self.optimal_weight_index is None else self.optimal_weight_index
         baseline =self.start_baseline_year,self.end_baseline_year
-        fname=f"DS_{self.basin_name}_k{k}_w{w}_baseline{baseline}.png"
         print(f"saving plot in {os.getcwd()}")
-        plt.savefig(fname,
-        dpi=300,
-        facecolor='w',
-        edgecolor='w',
-        bbox_inches='tight', #“tight”; None
-        pad_inches=0.1, #specifies padding around the image when bbox_inches is “tight”.
-        # frameon=None,
-        metadata=None)
+
+          # check the number of plots:
+        figs = plt.get_fignums()
+        if len(figs) == 1:
+            # --- singola figura ---
+            fname = f"DS_{self.basin_name}_k{k}_w{w}_baseline{baseline}.png"
+            plt.figure(figs[0]).savefig(
+                fname, dpi=300, facecolor='w', edgecolor='w',
+                bbox_inches='tight', pad_inches=0.1, metadata=None
+            )
+            print(f"  -> saved {fname}")
+
+        elif len(figs) == 3:
+            # --- three single figures ---
+            fnames = [
+                f"CDN_{self.basin_name}_baseline{baseline}.png",
+                f"HeatMap_{self.basin_name}_baseline{baseline}.png",
+                f"SIDI_{self.basin_name}_k{k}_w{w}_baseline{baseline}.png"
+            ]
+            for fig_num, fname in zip(figs, fnames):
+                plt.figure(fig_num).savefig(
+                    fname, dpi=300, facecolor='w', edgecolor='w',
+                    bbox_inches='tight', pad_inches=0.1, metadata=None
+                )
+                print(f"  -> saved {fname}")
+
+        else:
+            print(f"Warning: unexpected number of plots ({len(figs)}). No files saved.")
+
 
 class Precipitation(BaseDroughtAnalysis):
     def __init__(self, start_baseline_year, end_baseline_year,basin_name,ts=None,m_cal=None,prec_path=None,
