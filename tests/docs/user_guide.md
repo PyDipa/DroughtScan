@@ -195,6 +195,13 @@ ds2 = DS.Precipitation(
     calculation_method=f_zscore,   # z-score
     index_name='SPI (Zscore)'
 )
+
+# user can easly check the calibration obtained by the methods
+ref_month = 3 #reference month (march in the example)
+k = 6 # month-scale
+ds.plot_spi_fit(K=k,month=ref_month)
+
+ds2.plot_spi_fit(K=k,month=ref_month)
 ```
 
 ---

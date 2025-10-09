@@ -34,7 +34,7 @@ python --version
 pip --version
 ```
 
-The following instructions will download the package to your working directory (`pwd`). If you wish to download the package to a specific path, first navigate to the desired location with the terminus.+
+The following instructions will download the package to your working directory (`pwd`). If you wish to download the package to a specific path, first navigate to the desired location with the terminal.
 
 
 ### Option 1: Clone and install locally
@@ -91,27 +91,35 @@ It acts as the main container of the framework, holding attributes and methods f
 - **`SIDI`**: Standardized Integrated Drought Index (weighted ensemble of SPI1–K).  
 - **`CDN`**: Cumulative Deviation from Normal (cumulative sum of SPI1).  
 - **`basin_name`**: name of the basin under analysis.  
+- **`index_name`** name of the spi-like standardized index (default = 'SPI')
 - **`shape`**: basin geometry.  
+- **`area_kmq`**: area of the basin.  
 - **`K`**: maximum SPI scale (default 36).  
-- **`threshold`**: default threshold for severe drought (−1).  
+- **`threshold`**: default threshold for severe drought (−1).
+- **`Pgrid`**: input gridded data within the basin.
 
 
 ### Main Methods
 - **`plot_scan()`**: full DS overview (heatmap, SIDI, CDN).  
-- **`monthly_profile()`**:climatology plot (monthly profile) of the input variable
+- **`plot_monthly_profile()`**:climatology plot (monthly profile) of the input variable
 - **`normal_values()`**: Compute the "normal" values of the climatology using the inverse function of the SPI-like index.
 - **`find_trends()`** Analyze trends in the CDN using rolling windows and linear regression (without any plot)
 - **`plot_trends()`**: search, quantify, and plot trends in specific moving windows of the CDN curve
 - **`severe_events()`**: list and plot severe drought events, ordered by magnitude or duration
+- **`plot_spi_fit()`** plot the fitted relationship between the SPI values and the raw variable
+- **`recalculate_SIDI()`**: recompute SIDI with custom subset (K) of spi-like set ranging from 1 to K  
 
 
 ONLY FOR PRECIPITATION WITH AVAILABLE STREAMFLOW DATA:
 - **`analyze_correlation()`**: find the combination of month-scales and weights that maximize the correlaiotn between SIDI and SQI1
-- **`recalculate_SIDI()`**: recompute SIDI with new optimal weights and month-scales as provied by `analyze_correlation().
+- **`set_optimal_SIDI()`**: recompute SIDI with the optimal subset of the spi-like set as provied by `analyze_correlation().
+- **`plot_covariates()`**: plot the time series of the covariate: optimal_SIDI along with the target variable (generaly SQI1)
 
 ONLY FOR STREAMFLOW:
 
 -**`gap_filling()`**:Reconstruct monthly streamflow gaps thanks to the best correlation with precipitation data found out in `analyze_correlation()`.
+
+-**`plot_annual_ts(DSO)`**: plot annual timeseries along with annual time series of selected Drought Scan Object (DSO) among Precipitation, Pet, and Balance
 
 > **Note**: internal methods (prefixed with `_`) are used for calculations and should not be called directly by the user.  
 > For a detailed reference and usage examples, see the for examples and usage notes see the 
