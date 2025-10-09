@@ -629,11 +629,6 @@ class Precipitation(BaseDroughtAnalysis):
         self.calculation_method = calculation_method
         self.index_name=index_name
 
-        # Inizializza forecast come None
-        self.forecast_ts= None
-        self.forecast_m_cal = None
-
-
         # Initialize the base class
         super().__init__(self.ts, self.m_cal, self.K, self.start_baseline_year, self.end_baseline_year,
                          self.basin_name, self.calculation_method, self.threshold, self.index_name)
