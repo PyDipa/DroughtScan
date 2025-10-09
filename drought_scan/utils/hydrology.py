@@ -103,6 +103,35 @@ def Qmm2Qcs(Qmm, areakmq, m_cal):
     return Qcs
 
 
+def era_snowfall_to_mm(DSO):
+    """
+    Convert monthly snowfall rate from ERA5 (in m/s) to mm/month using fixed month lengths.
+
+    Parameters
+    ----------
+    snowfall_rate : np.ndarray
+        Monthly mean snowfall rate (1D array) in m/s.
+    m_cal : np.ndarray
+        Calendar array of shape (N, 2), with month in column 0.
+
+    Returns
+    -------
+    np.ndarray
+        Total monthly snowfall in mm (same shape as input).
+    """
+
+    # Number of days in each month (non-leap year)
+    days_in_month = [31,28,31,30,31,30,31,31,30,31,30,31]
+    months = np.arange(1,13)
+    mlen = np.zeros(len(DSO.ts))*np.nan
+    for i,m in enumerate(months):
+        ii = np.where(DSO.m_cal[:,0]==m)[0]
+        mlen[ii]=days_in_month[i]
+
+    # Convert m/s to mm/month: m/s × 1000
+    snowfall_mm = DSO.ts * mlen * 1000
+
+    return snowfall_mm
 # ===================================================================
 #  Hydrological Drought Analysis
 # ===================================================================
