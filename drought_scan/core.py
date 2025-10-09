@@ -379,7 +379,6 @@ class BaseDroughtAnalysis:
         if return_data:
             return mm
 
-
     def severe_events(self, weight_index=None, plot=True, max_events=None, labels=False, unit=None, name=None):
 
         tstartid, tendid, duration, deficit = severe_events_deficits_computation(self, weight_index=weight_index)
@@ -419,7 +418,7 @@ class BaseDroughtAnalysis:
         results = rolling_trend_analysis(var=var, window=window, significance=0.05)
         return results
 
-    def plot_trends(self, windows=[12, 36, 60, 120],ax=None,year_ext=None):
+    def plot_trends(self, windows=[12, 36, 60, 120],ax=None,year_ext=None,unit=None):
         """
         Wrapper method to plot trend bars on the CDN time series for a DroughtScan-compatible object.
 
@@ -430,7 +429,7 @@ class BaseDroughtAnalysis:
         Returns:
             None. Displays a plot.
         """
-        plot_cdn_trends(self, windows,ax=ax,year_ext=year_ext)
+        plot_cdn_trends(self, windows,ax=ax,year_ext=year_ext,unit=unit)
 
     def plot_monthly_profile(self, var=None, var_name=None, cumulate=False, ax=None,highlight_years=None,season_shift=False):
         """
@@ -524,6 +523,7 @@ class BaseDroughtAnalysis:
 
         print(f"Data exported successfully in {out_dir}/ with prefix '{prefix}'")
     # ----------------------------------------------------------
+
     def _savedsplot(self):
 
         k = self.K if not hasattr(self, 'optimal_k') or self.optimal_k is None else self.optimal_k
@@ -829,6 +829,19 @@ class Precipitation(BaseDroughtAnalysis):
 
         return {"best_k": K_range[best_k], "col_best_weight": best_weight, "max_correlation": max_corr,'spi_corr':R2_spi}
 
+    def plot_covariates(self, streamflow, year_ext=None,split_plot=False):
+
+        if not isinstance(streamflow, BaseDroughtAnalysis):
+            raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
+
+        if not hasattr(self,'optimal_weight_index'):
+            raise TypeError(
+                "The Precipitation object must be optimized with 'Precipitation.set_optimal_SIDI()' "
+                "before calling this function."
+            )
+
+        plot__covariates(self,streamflow=streamflow,weight_index=self.optimal_weight_index,year_ext=year_ext,split_plot=split_plot)
+
 
 
 class Streamflow(BaseDroughtAnalysis):
@@ -891,16 +904,11 @@ class Streamflow(BaseDroughtAnalysis):
             self.is_placeholder = False
         elif data_path is not None:
             # All'interno della tua classe (es. Streamflow, BaseDroughtAnalysis, ecc.)
-            if data_path.endswith(('.csv', '.txt')):
-                print("Loading streamflow data from CSV/TXT file...")
-                self.ts, self.m_cal = load_streamflow_from_csv(data_path)
-            elif data_path.endswith(('.xls', '.xlsx')):
-                print("Loading streamflow data Excel...")
-                self.ts, self.m_cal = load_streamflow_from_excel(data_path)
+            if data_path.endswith(('.csv', '.txt','.xls', '.xlsx')):
+                print("Loading streamflow data from text/excel file...")
+                self.ts, self.m_cal = load_streamflow(data_path)
             else:
-                raise ValueError("Formato file non supportato. Usa .csv, .txt, .xls o .xlsx")
-
-            self.is_placeholder = False
+                raise ValueError("Unsupported file format. Use .csv, .txt, .xls, or .xlsx")
         else:
             raise ValueError("You must provide either (`ts` and `m_cal`) or a valid `data_path`.")
 
@@ -908,50 +916,6 @@ class Streamflow(BaseDroughtAnalysis):
         super().__init__(self.ts, self.m_cal, self.K,
                          self.start_baseline_year, self.end_baseline_year,self.basin_name,
                          self.calculation_method, self.threshold, self.index_name)
-
-    def load_streamflow_from_csv(self, file_path, date_col=None, value_col=None, verbose=True):
-        """
-        Load and assign streamflow data from a CSV file to this instance.
-        Wrapper around `load_streamflow_from_csv_file`.
-
-        Args:
-            file_path (str): Path to the CSV file.
-            date_col (str, optional): Name of the column with dates.
-            value_col (str, optional): Name of the column with streamflow values.
-            verbose (bool, optional): Whether to print info messages.
-
-        Returns:
-            None
-        """
-        self.ts, self.m_cal = load_streamflow_from_csv(file_path, date_col, value_col)
-
-        # Ricomputazione degli indici
-        self.spi_like_set, self.c2r_index = self._calculate_spi_like_set()
-        self.SIDI = self._calculate_SIDI()
-        self.CDN = self._calculate_CDN()
-        self.is_placeholder = False
-
-    def load_streamflow_from_excel(self, file_path, date_col=None, value_col=None, verbose=True):
-        """
-        Load and assign streamflow data from a CSV file to this instance.
-        Wrapper around `load_streamflow_from_csv_file`.
-
-        Args:
-            file_path (str): Path to the CSV file.
-            date_col (str, optional): Name of the column with dates.
-            value_col (str, optional): Name of the column with streamflow values.
-            verbose (bool, optional): Whether to print info messages.
-
-        Returns:
-            None
-        """
-        self.ts, self.m_cal = load_streamflow_from_excel(file_path, date_col, value_col)
-
-        # Ricomputazione degli indici
-        self.spi_like_set, self.c2r_index = self._calculate_spi_like_set()
-        self.SIDI = self._calculate_SIDI()
-        self.CDN = self._calculate_CDN()
-        self.is_placeholder = False
 
     def gap_filling(self, precipitation,optimal_k,optimal_weight_index):
         """
@@ -1064,6 +1028,183 @@ class Streamflow(BaseDroughtAnalysis):
         self.CDN = self._calculate_CDN()
 
         print(f"Gap filling completed. {np.sum(prediction_mask)} values updated.")
+
+    def plot_annual_ts(self, DSO, starting_month=8, values='abs'):
+        """
+        Plot annual (12-month) aggregates starting from a custom month, comparing
+        streamflow (Q) with an external driver (e.g., P, PET, or P-PET).
+
+        Workflow
+        --------
+        1) Align monthly series on the common calendar (intersection of timestamps).
+        2) Build 12-month windows starting at `starting_month` (1..12). Each window is
+           included only if all 12 consecutive months exist (no gaps).
+        3) Aggregate by sum within each window for both series.
+        4) Plot external driver (blue, left Y-axis) and streamflow (black, right Y-axis),
+           and annotate R² between the annual aggregates.
+
+        Parameters
+        ----------
+        DSO : object
+            Object with `.ts` (monthly series) and `.m_cal` (calendar).
+            If `values='std'`, it should also expose `.spi_like_set[0]`.
+        starting_month : int, default 8
+            Month (1..12) at which each 12-month window starts.
+        values : {'abs', 'std'}, default 'abs'
+            - 'abs': use raw series (`self.ts` and `DSO.ts`).
+            - 'std': use standardized SPI-like series (`self.spi_like_set[0]` and
+                     `DSO.spi_like_set[0]`).
+
+        Notes
+        -----
+        - External variable label is inferred from the class name:
+            Precipitation -> 'P', Pet -> 'PET', Balance -> 'P-PET',
+            otherwise `DSO.__class__.__name__`.
+        - If your goal is to start from the climatologically driest month of Q,
+          first inspect `self.plot_monthly_profile()` and pass that month via
+          `starting_month`.
+        - Requires an existing static method `find_overlap(cal_a, cal_b)` that returns
+          aligned indices into the two calendars.
+
+        Raises
+        ------
+        ValueError
+            If no overlapping timestamps are found or no complete 12-month window exists.
+        """
+        # ---------- overlap ----------
+        self_idx, dso_idx = find_overlap(self.m_cal, DSO.m_cal)
+        if self_idx.size == 0 or dso_idx.size == 0:
+            raise ValueError("No overlapping data found between Streamflow and the Independent variable.")
+
+        if values not in {'abs', 'std'}:
+            raise ValueError("values must be either 'abs' or 'std'.")
+
+        if values == "abs":
+            Q = np.asarray(self.ts, dtype=float)[self_idx]
+            X = np.asarray(DSO.ts, dtype=float)[dso_idx]
+        else:  # 'std'
+            Q = np.asarray(self.spi_like_set[0], dtype=float)[self_idx]
+            X = np.asarray(DSO.spi_like_set[0], dtype=float)[dso_idx]
+
+        cal = np.asarray(self.m_cal, dtype=object)[self_idx]
+
+        # ---------- infer label for external variable ----------
+        cls = DSO.__class__.__name__.lower()
+        if "precip" in cls:
+            x_name = "P"
+        elif cls == "pet" or "pet" in cls:
+            x_name = "PET"
+        elif "balance" in cls:
+            x_name = "P-PET"
+        else:
+            x_name = DSO.__class__.__name__
+
+        cal = np.asarray(self.m_cal, dtype=object)[self_idx]
+        m0 = starting_month - 1
+        years = np.unique(cal[:, 1])
+
+        # annual aggregation:
+        annual_q = []
+        annual_x = []
+        for yr in range(len(years)):
+            try:
+                win = np.arange(yr * 12 + m0, yr * 12 + 12 + m0)
+                annual_x.append(np.sum(X[win]))
+                annual_q.append(np.sum(Q[win]))
+            except IndexError:
+                last_t = yr * 12 + m0
+                annual_x.append(np.sum(X[last_t::]))
+                annual_q.append(np.sum(Q[last_t::]))
+
+        annual_x = np.array(annual_x)
+        annual_q = np.array(annual_q)
+
+        # ---------- plotting ----------
+        plt.figure(figsize=(11, 4))
+
+        # Left axis: external (blue)
+        ax = plt.gca()
+        ax.plot(annual_x, label=f"{x_name}, yearly", color="tab:blue")
+        ax.set_ylabel(f"{x_name} (yearly sum)")
+        ax.grid(alpha=0.25)
+
+        # x ticks as years
+        ax.set_xlim(0, len(annual_x))
+        ax.set_xticks(np.arange(len(annual_x)))
+        ax.set_xticklabels(years.astype(int), rotation=90, fontweight="bold")
+
+        # Right axis: Q (black)
+        ax2 = ax.twinx()
+        ax2.plot(annual_q, "-k", label="Q, yearly")
+        ax2.set_ylabel("Q (yearly sum)")
+
+        # R^2 annotation (finite pairs only)
+
+        r = np.corrcoef(annual_q, annual_x)[0, 1]
+        r2 = float(r * r)
+        # place near top-left of the left axis
+        y_top = np.nanmax(annual_x)
+        ax.text(0.03, 0.92, f"R² = {r2:.2f}", transform=ax.transAxes,
+                fontsize=12, fontweight="bold")
+
+        # Legends
+        h1, l1 = ax.get_legend_handles_labels()
+        h2, l2 = ax2.get_legend_handles_labels()
+        ax.legend(h1 + h2, l1 + l2, frameon=False, loc="upper left")
+
+        # Title
+        title = f"Annual balance (start at month = {starting_month})"
+        plt.title(title)
+
+        plt.tight_layout()
+        plt.show(block=False)
+
+
+    # OLD WORKING SCRIPT
+    # def load_streamflow_from_csv(self, file_path, date_col=None, value_col=None, verbose=True):
+    #     """
+    #     Load and assign streamflow data from a CSV file to this instance.
+    #     Wrapper around `load_streamflow_from_csv_file`.
+    #
+    #     Args:
+    #         file_path (str): Path to the CSV file.
+    #         date_col (str, optional): Name of the column with dates.
+    #         value_col (str, optional): Name of the column with streamflow values.
+    #         verbose (bool, optional): Whether to print info messages.
+    #
+    #     Returns:
+    #         None
+    #     """
+    #     self.ts, self.m_cal = load_streamflow_from_csv(file_path, date_col, value_col)
+    #
+    #     # Ricomputazione degli indici
+    #     self.spi_like_set, self.c2r_index = self._calculate_spi_like_set()
+    #     self.SIDI = self._calculate_SIDI()
+    #     self.CDN = self._calculate_CDN()
+    #     self.is_placeholder = False
+    #
+    # def load_streamflow_from_excel(self, file_path, date_col=None, value_col=None, verbose=True):
+    #     """
+    #     Load and assign streamflow data from a CSV file to this instance.
+    #     Wrapper around `load_streamflow_from_csv_file`.
+    #
+    #     Args:
+    #         file_path (str): Path to the CSV file.
+    #         date_col (str, optional): Name of the column with dates.
+    #         value_col (str, optional): Name of the column with streamflow values.
+    #         verbose (bool, optional): Whether to print info messages.
+    #
+    #     Returns:
+    #         None
+    #     """
+    #     self.ts, self.m_cal = load_streamflow_from_excel(file_path, date_col, value_col)
+    #
+    #     # Ricomputazione degli indici
+    #     self.spi_like_set, self.c2r_index = self._calculate_spi_like_set()
+    #     self.SIDI = self._calculate_SIDI()
+    #     self.CDN = self._calculate_CDN()
+    #     self.is_placeholder = False
+
 
 class Pet(BaseDroughtAnalysis):
     def __init__(self, start_baseline_year, end_baseline_year, basin_name, ts=None, m_cal=None, data_path=None,
