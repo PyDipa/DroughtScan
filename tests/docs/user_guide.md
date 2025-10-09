@@ -370,9 +370,14 @@ ds.set_optimal_SIDI(
     overwrite=True
 )
 
+# Once the optimal SIDI has been recalculated and OVERWRITTEN it is possible to plot the opt-SIDI/SQI1 covariates:
+ds.plot_covariates(streamflow,year_ext=(2000,2019))
+
+
 # Option 2 (no overwrite): get the full SIDI matrix for K=best_k and pick a column
 SIDI_matrix = ds.recalculate_SIDI(K=A['best_k'])              # shape: (time, n_weightings)
 sidi_opt    = SIDI_matrix[:, A['col_best_weight']]            # 1D vector (time,)
+
 ```
 
 
