@@ -168,15 +168,16 @@ R = ds.find_trends(var=my_timeseries, window=48)
 
 ```python
 ds.plot_trends()                        # default window
-ds.plot_trends(windows=[50, 120])       # custom multiple windows
+# chose desired windows and set unit of the input variable to fullfill the label of changes. Note: the CDN is the sum of gained/lost unit of standard deviation, thus it is possible to track back to the amount of gained/lost water in absolute terms
+ds.plot_trends(windows=[50, 120],unit='mm')       # custom multiple windows, variable unit
 ```
 
 When plotting multiple trend analyses, you can provide an external axis (e.g., subplot):
 ```python
 import matplotlib.pyplot as plt
 fig, axs = plt.subplots(2, 1, figsize=(8, 6))
-ds.plot_trends(windows=[36], ax=axs[0])
-ds.plot_trends(windows=[60], ax=axs[1])
+ds.plot_trends(windows=[36], ax=axs[0],unit='mm')
+ds.plot_trends(windows=[60], ax=axs[1],unit='mm')
 ```
 Note: in plot_trends the variable cannot be changed (always based on CDN).
 
@@ -185,31 +186,31 @@ Note: in plot_trends the variable cannot be changed (always based on CDN).
 
 ## 6) Monthly profiles of input data
 
-Visualize the intra-annual cycle of the variable through monthly profiles (by default: precipitation if the instance is initialized with Precipitation, snowfall is initialized with Snowfall etc).
-The method shows the mean and interquartile range (IQR) for each month over the available years.
+Visualize the intra-annual cycle of the input variable through monthly profiles (by default: precipitation if the instance is initialized with Precipitation, snowfall is initialized with Snowfall etc).
+The method shows the mean and interquartile range (IQR) for each month over the available years. The name of the variable must be specified by the user
 
 ```python
-ds.plot_monthly_profile()
-ds.plot_monthly_profile(highlight_years=[2017,2018])
+ds.plot_monthly_profile(var_name='P')
+ds.plot_monthly_profile(var_name='P',highlight_years=[2017,2018])
 
 
 ```
 
 Cumulative profiles are useful for snow-dominated (nival) regimes or for highlighting multi-year accumulation.
 ```python
-ds.plot_monthly_profile(cumulate=True, highlight_years=[2017, 2018])
+ds.plot_monthly_profile(var_name='P',cumulate=True, highlight_years=[2017, 2018])
 ```
 
 For winter-relevant variables, the plot can be shifted and centered on the hydrological year (from August to July) using the seasonal_shift=True option: 
 ```python
-ds.plot_monthly_profile(season_shift=True, highlight_years=[2017, 2018])
+ds.plot_monthly_profile(var_name='P',season_shift=True, highlight_years=[2017, 2018])
 ```
 
 User can choose other variables from the DSO to be plotted such asfor exemple `ds.spi_like_set[0]` (that is SPI)
  
 ```python
 
-ds.plot_monthly_profile(var=ds.spi_like_set[0], season_shift=True, highlight_years=[2000])
+ds.plot_monthly_profile(var=ds.spi_like_set[0],var_name ='SPI1' ,season_shift=True, highlight_years=[2000])
 ```
 
 **Advanced options**
@@ -217,6 +218,7 @@ ds.plot_monthly_profile(var=ds.spi_like_set[0], season_shift=True, highlight_yea
 - Assign an external axis for multiple plots (e.g., in subplots):
 
 ```python
+import matplotlib.pyplot as plt
 fig, axs = plt.subplots(2, 1, figsize=(8, 6))
 ds.plot_monthly_profile(ax=axs[0])
 ds.plot_monthly_profile(season_shift=True, ax=axs[1])
