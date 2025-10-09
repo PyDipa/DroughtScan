@@ -11,6 +11,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from drought_scan.utils.drought_indices import *
+from drought_scan.utils.statistics import *
 from matplotlib.colors import Normalize
 mpl.rcParams['font.family'] = 'Helvetica'
 import os
@@ -49,6 +50,28 @@ def heatmap_cmap():
 
     return mpl.colors.LinearSegmentedColormap.from_list('Custom cmap', cmap, xmap.N)
 
+
+  # -------------------- Dimenion of the full plot --------------------
+def _figure_size_for_length(n: object) -> object:
+    """
+    Compute figure width and height as a continuous function of series length n,
+    clamped within predefined min/max limits and rounded to 1 decimal place.
+    """
+    # coefficiente di scala derivato dal caso n=1200 -> w≈20.9
+    k = 20.9 / 1200.0
+    w = k * n
+
+    # clamp tra valori minimi e massimi (dai tuoi vecchi casi)
+    w = max(20.9 / 250 * n, min(w, 20.9 / 1800 * n * 1800 / 1200))  # opzionale se vuoi stringere
+    w = min(max(w, 20.9 / 250 * 250), 20.9 / 1800 * 1800)  # clamp effettivo tra 20.9 e ~20.9 (scalato)
+
+    # oppure più semplice: clamp tra 10 e 21
+    w = min(max(w, 10), 21)
+
+    # altezza come proporzione della larghezza
+    h = w / 2 if n >= 300 else w / 1.2
+
+    return round(w, 1), round(h, 1)
 
 def spi_cmap(n_levels=13):
     if cmc is not None:
@@ -124,6 +147,27 @@ def highlight_drought(ax, series, color='brown' ,offset=None, threshold=None):
         else:
             ax.axvspan(start +offset-0.5, end +offset-0.5, color=color, alpha=0.1)
 
+# -------------------- Dimenion of the full plot --------------------
+    def _figure_size_for_length(n):
+        """
+        Compute figure width and height as a continuous function of series length n,
+        clamped within predefined min/max limits and rounded to 1 decimal place.
+        """
+        # coefficiente di scala derivato dal caso n=1200 -> w≈20.9
+        k = 20.9 / 1200.0
+        w = k * n
+
+        # clamp tra valori minimi e massimi (dai tuoi vecchi casi)
+        w = max(20.9 / 250 * n, min(w, 20.9 / 1800 * n * 1800 / 1200))  # opzionale se vuoi stringere
+        w = min(max(w, 20.9 / 250 * 250), 20.9 / 1800 * 1800)  # clamp effettivo tra 20.9 e ~20.9 (scalato)
+
+        # oppure più semplice: clamp tra 10 e 21
+        w = min(max(w, 10), 21)
+
+        # altezza come proporzione della larghezza
+        h = w / 2 if n >= 300 else w / 1.2
+
+        return round(w, 1), round(h, 1)
 
 def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_plot=False, plot_order=None):
     """
@@ -298,28 +342,6 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_p
 
     order = list(plot_order)
 
-    # -------------------- Dimenion of the full plot --------------------
-    def _figure_size_for_length(n):
-        """
-        Compute figure width and height as a continuous function of series length n,
-        clamped within predefined min/max limits and rounded to 1 decimal place.
-        """
-        # coefficiente di scala derivato dal caso n=1200 -> w≈20.9
-        k = 20.9 / 1200.0
-        w = k * n
-
-        # clamp tra valori minimi e massimi (dai tuoi vecchi casi)
-        w = max(20.9 / 250 * n, min(w, 20.9 / 1800 * n * 1800 / 1200))  # opzionale se vuoi stringere
-        w = min(max(w, 20.9 / 250 * 250), 20.9 / 1800 * 1800)  # clamp effettivo tra 20.9 e ~20.9 (scalato)
-
-        # oppure più semplice: clamp tra 10 e 21
-        w = min(max(w, 10), 21)
-
-        # altezza come proporzione della larghezza
-        h = w / 2 if n >= 300 else w / 1.2
-
-        return round(w, 1), round(h, 1)
-
     # -------------------- PLOTTING --------------------
     if not split_plot:
         # unica figura con 3 pannelli nell'ordine scelto
@@ -370,178 +392,6 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_p
             fig.subplots_adjust(left=0.1)
             plt.tight_layout()
             plt.show(block=False)
-
-
-
-def plot_overview_old(DSO, optimal_k=None, weight_index=None, year_ext=None):
-    """
-    Plot the drought scan visualization, including CDN, SPI, and SIDI metrics.
-
-    Args:
-        DSO: Droguht Scan Obeject: what the user inizialize for istance with DSO = Precipitation(data_path=...)
-        otimal_k (int, optional): Optimal number of SPI scales to consider. If provided, the SIDI is recalculated.
-        year_ext(tuple, optional): years definining the X-axis limits for the plot. Defaults to None (entire time series).
-        weight_index (int, optional): Index of the weighting scheme to use for SIDI calculation.
-            - weight_index = 0: Equal weights
-            - weight_index = 1: Linear decreasing weights
-            - weight_index = 2: Logarithmically decreasing weights (default)
-            - weight_index = 3: Linear increasing weights
-            - weight_index = 4: Logarithmically increasing weights
-        name (string, optional): the name of the basin identified by the shape
-
-    Visualization:
-        - Plot 1: Cumulative Deviation of SPI-1 (CDN)
-        - Plot 2: Heatmap of SPI scales (1 to K) with transparency control
-        - Plot 3: SIDI time series with regions of severe drought highlighted
-    """
-    if weight_index is None:
-        weight_index = 2  # Default to logarithmically decreasing weights
-
-    # Optional recalculation of SIDI with optimal_k
-    if optimal_k is not None:
-        SIDI = DSO.recalculate_SIDI(K=optimal_k)[:,weight_index]
-        # print(f"Recomputing SIDI with optimal K = {optimal_k}...")
-        # weights = generate_weights(k=optimal_k)  # Generate weights for the specified K
-        # sidis = []
-        # for j in range(len(DSO.m_cal)):
-        #     vec = DSO.spi_like_set[0:optimal_k, j]  # Use only the first optimal_k rows
-        #     sidis.append([weighted_metrics(vec, weights[:, weight_index])[0]])
-        # SIDI = np.squeeze(np.array(sidis))  # Compute new SIDI
-    else:
-        SIDI = np.array(DSO.SIDI[:, weight_index], copy=True)  # Use precomputed SIDI
-
-    # ----------------------------------------------------
-    # SET THE COLORMAP FOR THE HEATMAP
-    cmap = spi_cmap().reversed() if DSO.threshold>0 else spi_cmap()
-    bounds = np.array([-3, -2.5, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 2.5, 3])
-    norm = mpl.colors.BoundaryNorm(bounds, cmap.N)
-
-    # ----------------------------------------------------
-    # CREATE RGBA MATRIX WITH DYNAMIC TRANSPARENCY
-    rgba_matrix = cmap(norm(DSO.spi_like_set))  # Convert SPI values to RGBA
-
-    # Replace NaN values with white (RGBA: [1, 1, 1, 1])
-    nan_mask = np.isnan(DSO.spi_like_set)
-    rgba_matrix[nan_mask] = [1, 1, 1, 1]
-
-    # Adjust transparency for rows below optimal_k
-    if optimal_k is not None:
-        for i in range(DSO.spi_like_set.shape[0]):
-            if i >= optimal_k:
-                rgba_matrix[i, :, -1] *= 0.3  # Reduce alpha for rows below optimal_k
-
-
-    # Generate time labels for the x-axis
-    labels = np.array([str(int(c[1])) for c in DSO.m_cal])
-
-    # -------------------------------------------------
-    # FIGURE SETTINGS FOR NOT SPLITTED PLOTS:
-    # Dynamic figure size based on time series length
-    if len(DSO.ts) >= 1200:  # For very long time series (~150 years)
-        fig_width = (len(DSO.ts) / 1800) * 20.9
-        fig_height = fig_width / 2
-    elif (len(DSO.ts) < 1200) & (len(DSO.ts) >= 600):  # For long-to-medium time series (~120 years)
-        fig_width = (len(DSO.ts) / 1200) * 20.9
-        fig_height = fig_width / 2
-    elif (len(DSO.ts) < 600) & (len(DSO.ts) >= 300): #for medium length time series
-        fig_width = (len(DSO.ts) / 600) * 20.9
-        fig_height = fig_width / 2
-    else:  # For shorter time series (<=25 years)
-        fig_width = (len(DSO.ts) / 250) * 20.9
-        fig_height = fig_width / 1.2
-
-    # Create subplots
-
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height), nrows=3, ncols=1,
-                           gridspec_kw={'height_ratios': [1.5, 0.8, 1.5]}, dpi=100)
-    fig.subplots_adjust(left=0.07)
-
-    ax = ax.ravel()
-
-    # ----------------------------------------------------
-    # PLOT 1: Cumulative Deviation of SPI-1 (CDN)
-
-    ax[0].plot(np.arange(0,len(DSO.CDN)), DSO.CDN, linewidth=1, color='k')
-
-    highlight_drought(ax[0], SIDI, threshold=DSO.threshold)
-
-    ax[0].axhline(y=0, c='k', linestyle=':', alpha=0.5)
-    ax[0].set_xticks([])
-    ax[0].set_ylabel('CDN', fontsize=12)
-    def round_up(x, base=10):
-        return int(-(-x // base) * base)
-    ymax = np.max(abs(DSO.CDN))
-    ax[0].set_ylim(-round_up(ymax), round_up(ymax))
-    plt.setp(ax[0].get_yticklabels(), fontsize=12)
-
-    # ----------------------------------------------------
-    # PLOT 2: SPI Heatmap
-    xpos = np.round(np.arange(1, DSO.K, DSO.K / 5))
-
-    index_lab = [f"{DSO.index_name}$_{{{int(sub)}}}$" for sub in xpos]
-    heatmap = ax[1].imshow(rgba_matrix, aspect='auto', interpolation='none',
-                           cmap=cmap)  # Heatmap with dynamic transparency
-    ax[1].set_xticks([])
-    ax[1].set_yticks(xpos - 1)
-    ax[1].set_yticklabels(index_lab, fontsize=12)
-    # Add colorbar next to ax[1]
-    cbar_ax = fig.add_axes(
-        [ax[1].get_position().x1 + 0.01,  # Right edge of ax[1]
-         ax[1].get_position().y0,  # Bottom edge of ax[1]
-         0.02,  # Width of the colorbar
-         ax[1].get_position().height])  # Height of the colorbar
-    # cbar = plt.colorbar(heatmap,cax=cbar_ax, orientation='vertical')
-    cbar = mpl.colorbar.ColorbarBase(cbar_ax, cmap=cmap, norm=norm, orientation='vertical')
-    # cbar.set_ticks(bounds)
-    # cbar.set_ticklabels([f"{b:.1f}" for b in bounds])  # Optional: Customize tick labels
-    cbar.ax.set_ylabel(f'{DSO.index_name} Value', fontsize=12)
-    cbar.ax.tick_params(labelsize=10)
-
-    # ----------------------------------------------------
-    # PLOT 3: SIDI Time Series
-    RedArea = np.array(SIDI, copy=True)
-    # for Pet, Temeprature and istances where the positive anomalies are stressful condiction
-    # we have to reverse the palette and the shaded areas
-    if DSO.threshold>=0:
-        RedArea[RedArea < DSO.threshold] = np.nan  # Highlight anomalies ABOVE threshold
-        dot = 0.7
-    else:
-        RedArea[RedArea > DSO.threshold] = np.nan  # Highlight anomalies BELOW threshold
-        dot = 0.3
-    ax[2].plot(np.arange(0, len(SIDI)), SIDI, color='k', linewidth=1, label='D', alpha=0.8)
-    ax[2].axhline(y=DSO.threshold, c='k', linestyle=':', alpha=0.5)
-    ax[2].fill_between(np.arange(0, len(SIDI)), RedArea, DSO.threshold,
-                       hatch='xx', color=cmap(dot), linewidth=2, alpha=0.8)
-    ax[2].set_xticks(np.arange(0, len(labels[0:-1:12]) * 12, 12))
-    ax[2].set_xticklabels(labels[0:-1:12], rotation=90)
-    ax[2].set_ylim(-3.5, 3.5)
-    ax[2].set_ylabel(f"{DSO.SIDI_name}", fontsize=14)
-    # ax[2].set_ylabel(r"$\mathbf{\mathit{D}_{\{\mathrm{spi}\}}}$", fontsize=14)
-    plt.setp(ax[2].get_yticklabels(), fontsize=12)
-
-    # Set x-axis limits if specified
-    for i in range(3):
-        if year_ext is None:
-            ax[i].set_xlim(DSO.K, len(SIDI))
-        else:
-            try:
-                x1 = np.where(DSO.m_cal[:, 1] == year_ext[0])[0][0]
-                x2 = np.where(DSO.m_cal[:, 1] == year_ext[1])[0][-1]
-            except IndexError:
-                raise IndexError(f"provide a tuple of years for xlim within the actual time domain")
-            ax[i].set_xlim(x1, x2)
-
-    # Set the title and layout
-    basin = DSO.shape.to_crs(epsg=32632)
-    # Calcola l'area in metri quadrati
-    area_kmq = basin.geometry.area.iloc[0] / 1e6
-    K = DSO.K if not hasattr(DSO, 'optimal_k') or DSO.optimal_k is None else DSO.optimal_k
-    wlabel = ['eq','ldw','lgdw','liw','lgiw'][weight_index]
-
-    title = f'Drought Scan for {DSO.basin_name}, Area kmq: {int(np.round(area_kmq))}. Baseline: {DSO.start_baseline_year} - {DSO.end_baseline_year}'
-    fig.suptitle(title, fontsize=14)
-    plt.show(block=False)
-# plt.tight_layout()
 
 def plot_severe_events(DSO, tstartid, duration, deficit, max_events=None, labels=False, unit=None, name=None):
     """
@@ -603,7 +453,7 @@ def plot_severe_events(DSO, tstartid, duration, deficit, max_events=None, labels
     fig.suptitle(title, fontsize=12)
     plt.show(block=False)
 
-def plot_cdn_trends(DSO, windows, ax=None,year_ext=None):
+def plot_cdn_trends(DSO, windows, ax=None,year_ext=None,unit=None):
     """
     Plot trends in the Cumulative Deviation from Normal (CDN) time series
     over multiple moving window lengths, highlighting the net change
@@ -662,7 +512,7 @@ def plot_cdn_trends(DSO, windows, ax=None,year_ext=None):
         line2= ax2.bar(np.arange(len(val)), val, color=colors[i],alpha=0.3, label=f'Trend {window} mesi')
 
         ax2.axhline(y=0,color='lightgrey')
-        ax2.set_ylabel('Change [mm]', fontsize=12)
+        ax2.set_ylabel(f'Change [{unit}]', fontsize=12)
         ax2.set_xlim(36, len(val))
 
         # ----------------------------------------------------
@@ -749,6 +599,9 @@ def monthly_profile(DSO,var=None, var_name=None,cumulate=False, ax=None,highligh
         x = DSO.ts.copy()
     else:
         x = var
+
+    if var_name is None:
+        var_name = 'input variable'
 
 
     if len(x) != len(DSO.m_cal):
@@ -853,3 +706,144 @@ def monthly_profile(DSO,var=None, var_name=None,cumulate=False, ax=None,highligh
     plt.show(block=False)
 
 
+#---------------------------------------------------
+# optimal SIDI and SQI1 - diagnostic tool
+# -------------------------------------------------
+def plot__covariates(DSO, streamflow, weight_index,year_ext=None, split_plot=False):
+    """
+    Plot the covariate relationship between a Precipitation-based drought index (SIDI)
+    and a Streamflow-based index (SQI1), highlighting overlapping drought signals and
+    their difference (delta).
+
+    Parameters
+    ----------
+    DSO : Precipitation
+        An instance of Precipitation (subclass of BaseDroughtAnalysis) with an optimized
+        SIDI index (requires that `DSO.set_optimal_SIDI()` has been called before).
+    streamflow : BaseDroughtAnalysis or Streamflow
+        A Streamflow object (or subclass of BaseDroughtAnalysis) providing SQI1 or similar indices.
+    weight_index : int
+        Index of the SIDI series to be compared with streamflow.
+    split_plot : bool, optional
+        If True, produces two separate subplots:
+            (1) Optimal SIDI vs SQI1
+            (2) Their difference (SQI1 - SIDI).
+        If False (default), combines both plots in a single figure with two stacked panels.
+
+
+    Notes
+    -----
+    - The function requires the utility functions:
+        `find_overlap`, `spi_cmap`, and `highlight_drought`.
+    - Assumes that DSO and streamflow share at least some overlapping
+      monthly timeline (`m_cal`).
+    """
+
+    if not hasattr(DSO, 'optimal_k'):
+        raise TypeError(
+            "The DSO object must be optimized (and updated) to correlate with streamflow before calling this function."
+        )
+
+    # Find temporal overlap
+    self_indices, streamflow_indices = find_overlap(DSO.m_cal, streamflow.m_cal)
+    if len(self_indices) == 0 or len(streamflow_indices) == 0:
+        raise ValueError("No overlapping data found between Precipitation and Streamflow.")
+
+    # Subset to overlapping calendar
+    m_cal = DSO.m_cal[self_indices, :]
+    vec = np.arange(len(m_cal))
+
+    # Extract series
+    x = DSO.SIDI[:, weight_index][self_indices]              # SIDI
+    y = streamflow.spi_like_set[0][streamflow_indices]       # SQI1
+    delta = y - x                                            # Difference
+
+    # Colormap for delta shading
+    cmap = spi_cmap().reversed() if DSO.threshold > 0 else spi_cmap()
+    bounds = np.array([-3, -2.5, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 2.5, 3])
+    norm = mpl.colors.BoundaryNorm(bounds, cmap.N)
+
+    # Prepare labels for years
+    gen_id = np.where(m_cal[:,0]==1)[0][0]
+    year_labels = np.arange(m_cal[gen_id, 1], m_cal[-1, 1] + 1)
+    year_ticks = np.arange(gen_id, len(m_cal), 12)
+
+    def _apply_xlim(ax):
+        if year_ext is None:
+            ax.set_xlim(0,len(x))
+        else:
+            try:
+                x1 = np.where(m_cal[:, 1] == year_ext[0])[0][0]
+                x2 = np.where(m_cal[:, 1] == year_ext[1])[0][-1]
+            except IndexError:
+                raise IndexError("provide a tuple of years for xlim within the actual time domain")
+            ax.set_xlim(x1, x2)
+
+    width=_figure_size_for_length(len(x))[0]/4*3
+    hight =_figure_size_for_length(len(x))[1]/3
+
+    if split_plot:
+        # --- Panel 1: SIDI vs SQI1 ---
+        fig, ax = plt.subplots(figsize=(width,hight))
+        highlight_drought(ax, x, offset=DSO.optimal_k)
+        ax.plot(vec, x, c='tab:blue', label=DSO.SIDI_name)
+        ax.plot(vec, y, c='tab:orange', label='SQI1')
+        ax.set_ylim(-4, 4)
+        ax.legend()
+        ax.set_title(f"{DSO.basin_name}: optimal {DSO.SIDI_name} and {streamflow.index_name}1 (covariates)")
+        ax.set_xticks(year_ticks)
+        ax.set_xticklabels(year_labels, rotation=90, fontweight='bold')
+        # ax.grid(axis='y')
+        _apply_xlim(ax)
+        fig.tight_layout()
+
+        # --- Panel 2: Difference (delta) ---
+        fig, ax = plt.subplots(figsize=(width,hight))
+        highlight_drought(ax, x, offset=DSO.optimal_k)
+        ax.plot(vec, delta, 'gray', linewidth=1, alpha=0.3)
+        for j in range(len(delta) - 1):
+            ax.fill_between([vec[j], vec[j + 1]],
+                            [delta[j], delta[j + 1]],
+                            color=cmap(norm(delta[j])), alpha=1)
+        _apply_xlim(ax)
+        ax.set_title(f"{DSO.basin_name}: {streamflow.index_name}1  minus optimal {DSO.SIDI_name}")
+        ax.set_xticks(year_ticks)
+        ax.set_xticklabels(year_labels, rotation=90, fontweight='bold')
+        ax.axhline(y=-1,linestyle="--",color='gray',alpha=0.7)
+        ax.axhline(y=1, linestyle="--", color='gray',alpha=0.7)
+        _apply_xlim(ax)
+        fig.tight_layout()
+
+    else:
+        # --- Single figure with two stacked subplots ---
+        fig, axes = plt.subplots(2, 1, figsize=(width,hight*2), sharex=True)
+
+        # Panel 1: SIDI vs SQI1
+        ax = axes[0]
+        highlight_drought(ax, x, offset=DSO.optimal_k)
+        ax.plot(vec, x, c='tab:blue', label=DSO.SIDI_name)
+        ax.plot(vec, y, c='tab:orange', label=f'{streamflow.index_name} ')
+        ax.set_ylim(-4, 4)
+        ax.legend()
+        ax.set_title(f"{DSO.basin_name}: optimal {DSO.SIDI_name} and {streamflow.index_name}  (covariates)")
+        ax.grid(axis='y')
+        _apply_xlim(ax)
+
+        # Panel 2: Difference (delta)
+        ax = axes[1]
+        highlight_drought(ax, x, offset=DSO.optimal_k)
+        ax.plot(vec, delta, 'gray', linewidth=1, alpha=0.3)
+        for j in range(len(delta) - 1):
+            ax.fill_between([vec[j], vec[j + 1]],
+                            [delta[j], delta[j + 1]],
+                            color=cmap(norm(delta[j])), alpha=1)
+
+        ax.set_ylim(-4, 4)
+        ax.set_title(f"{DSO.basin_name}: {streamflow.index_name}  minus optimal {DSO.SIDI_name}")
+        ax.set_xticks(year_ticks)
+        ax.set_xticklabels(year_labels, rotation=90, fontweight='bold')
+        ax.grid(axis='y')
+        _apply_xlim(ax)
+        plt.tight_layout()
+
+    plt.show()
