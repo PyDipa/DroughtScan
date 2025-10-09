@@ -47,8 +47,6 @@ def find_overlap(m_cal1, m_cal2):
 
     return indices1, indices2
 
-from dateutil.relativedelta import relativedelta
-from datetime import date
 def concatenate_m_cal(m_cal1,m_cal2):
 
     """
