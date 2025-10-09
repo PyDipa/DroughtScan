@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "droughtscan"
-version = "2.0.1"
+version = "3.0.0"
 description = "Drought monitoring and seasonal prediction toolkit"
 authors = [
   { name="Arianna Di Paola"},
@@ -15,18 +15,19 @@ maintainers = [
   { name="Arianna Di Paola",email="arianna.dipaola@cnr.it" }
 ]
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license =  "GPL-3.0-or-later"
 dependencies = [
-    "numpy",
-    "pandas",
-    "matplotlib",
-    "cmcrameri",
-    "scipy",
-    "geopandas",
-    "regionmask",
-    "netCDF4",
-    "python-dateutil",
+  "numpy>=2.0",
+  "pandas>=2.2",
+  "openpyxl>=3.1",
+  "matplotlib>=3.8",
+  "cmcrameri>=1.4",
+  "scipy>=1.11",
+  "geopandas>=1.0",
+  "regionmask>=0.11",
+  "netCDF4>=1.6",
+  "python-dateutil>=2.8",
 ]
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "ruff", "black", "mypy", "pre-commit"]

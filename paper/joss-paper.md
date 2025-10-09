@@ -37,7 +37,11 @@ In particularly vulnerable regions such as the Mediterranean—where agriculture
 Traditional drought monitoring relies on standardized indices such as the Standardized Precipitation Index (SPI) [@McKee1993] and the Standardized Streamflow Index (SQI) [@Telesca2012]. While widely adopted due to their simplicity and comparability, these indicators offer a static snapshot of the system that depends heavily on the selected timescale and often fail to account for antecedent conditions or cumulative stress [@VanLoon2015]. Furthermore, the understanding of drought propagation from meteorological anomalies to hydrological impacts remains limited.
 
 To address these limitations, the **Drought Scan (DS)** framework was developed [@DiPaola2025]. DS introduces two complementary indicators designed to integrate short- and long-term drought signals:  
-– the **Standardized Integrated Drought Index (SIDI)**, which condenses a full set of SPI timescales (1 to N months) into a single weighted index that can be optionally optimized against observed streamflow (SQI1);  
+– the **Standardized Integrated Drought Index (SIDI)**, which condenses a full set of SPI timescales (1 to N months) into a single weighted index that can be optionally optimized against observ
+
+
+
+ed streamflow (SQI1);  
 – and the **Cumulative Deviation from Normal (CDN)**, computed as the cumulative sum of SPI1, which captures hydrological memory by highlighting prolonged phases of surplus or deficit. While the SIDI focuses on temporally integrated responses to precipitation, the CDN offers an intuitive view of storage dynamics and long-term system stress.
 
 Building on this conceptual foundation, we present **DroughtScan**, an open-source Python package that implements the DS framework for reproducible, basin-scale drought analysis. The library supports input from gridded climate data (e.g., precipitation, potential evapotranspiration) and streamflow series in tabular format. It provides tools for computing SPI/SQI across multiple monthly timescales, deriving SIDI and CDN, applying different standardization distributions (Gamma, Pearson III, Gaussian), and visualizing results through SPI heatmaps, SIDI–CDN overlays, seasonal profiles, and trend analysis.
