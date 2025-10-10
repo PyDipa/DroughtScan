@@ -4,7 +4,7 @@
 **Drought Scan** is a Python library implementing a multi-temporal and basin-scale approach for drought analysis. It is designed to provide advanced tools for evaluating drought severity and trends at the river basin scale by integrating meteorological and hydrological data.
 
 The methodology is described in the article:  
-*"A novel framework for multi-temporal and basin-scale drought analysis"* ([Read the article](https://www.sciencedirect.com/science/article/pii/S0048969724081063)).
+*Building a framework for a synoptic overview of drought* ([Read the article](https://www.sciencedirect.com/science/article/pii/S0048969724081063)).
 and is continuously developed within the activities of Drought Central ([DroughtCentral](https://droughtcentral.it)).
 
 ---
