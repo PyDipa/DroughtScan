@@ -1,0 +1,29 @@
+DroughtScan Commercial License Terms
+Copyright (c) 2025 Arianna Di Paola
+
+DroughtScan is distributed under the GNU General Public License v3.0 (GPL-3.0)
+for academic and non-commercial research use.
+
+Commercial use of this software — including but not limited to integration into
+commercial products or services, consulting activities, paid software
+distribution, or any other use that generates direct or indirect financial gain —
+requires a separate commercial license agreement with the author.
+
+To obtain such a license, please contact:
+
+    Arianna Di Paola
+    (PyDipa on GitHub)
+    Email: arianna.dipaola@cnr.it
+
+Under a commercial license, terms of use, warranty, support, and maintenance
+can be negotiated depending on the nature of the intended use.
+
+The existence of this COMMERCIAL LICENSE does not alter the terms of the
+GNU GPL v3.0 for academic and non-commercial users. All provisions of the GPL
+remain in full effect for those users.
+
+Summary:
+- Academic, educational, and research use → fully covered under GPL-3.0.
+- Commercial or revenue-generating use → requires explicit authorization.
+
+SPDX-License-Identifier: GPL-3.0-or-later
