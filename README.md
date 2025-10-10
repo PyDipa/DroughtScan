@@ -125,7 +125,14 @@ ONLY FOR STREAMFLOW:
 > For a detailed reference and usage examples, see the for examples and usage notes see the 
 [User Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/user_guide.md) and  [Visualization Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/visualization_guide.md)
 
+## License
 
+DroughtScan is distributed under the [GNU GPL v3.0](LICENSE) for academic and
+non-commercial research use.
+
+For any commercial or revenue-generating application, a separate commercial
+license is required. See [COMMERCIAL_LICENSE.txt](COMMERCIAL_LICENSE.txt) for
+details or contact the author directly.
 
 ## Authors
 
