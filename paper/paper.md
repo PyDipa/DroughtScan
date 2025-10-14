@@ -10,16 +10,16 @@ tags:
 
 authors:
   - name: Arianna Di Paola
-    orcid: https://orcid.org/0000-0001-9050-4787
+    orcid: 0000-0001-9050-4787
     affiliation: 1
   - name: Massimiliano Pasqui
-    orcid: https://orcid.org/0000-0002-0926-362X
+    orcid: 0000-0002-0926-362X
     affiliation: 1
   - name: Ramona Magno
-    orcid: https://orcid.org/0000-0001-5170-2852
+    orcid: 0000-0001-5170-2852
     affiliation: 2
   - name: Leandro Rocchi
-    orcid: https://orcid.org/0000-0003-4613-8550
+    orcid: 0000-0003-4613-8550
     affiliation: 2
 affiliations:
   - name: National Research Council of Italy (CNR) - Institute of BioEconomy (IBE) - Rome, Italy
