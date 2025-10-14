@@ -131,8 +131,9 @@ DroughtScan is distributed under the [GNU GPL v3.0](LICENSE) for academic and
 non-commercial research use.
 
 For any commercial or revenue-generating application, a separate commercial
-license is required. See [COMMERCIAL_LICENSE.txt](COMMERCIAL_LICENSE.txt) for
-details or contact the author directly.
+license is required. A separate commercial license can be arranged **outside** this repository 
+and **does not alter** the open-source terms of the GPL for this codebase.  
+For inquiries: arianna.dipaola@cnr.it
 
 ## Authors
 
