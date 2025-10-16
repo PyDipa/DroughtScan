@@ -785,7 +785,7 @@ def plot__covariates(DSO, streamflow, weight_index,year_ext=None, split_plot=Fal
     if split_plot:
         # --- Panel 1: SIDI vs SQI1 ---
         fig, ax = plt.subplots(figsize=(width,hight))
-        highlight_drought(ax, x, offset=DSO.optimal_k)
+        highlight_drought(ax, x, offset=0)
         ax.plot(vec, x, c='tab:blue', label=DSO.SIDI_name)
         ax.plot(vec, y, c='tab:orange', label='SQI1')
         ax.set_ylim(-4, 4)
@@ -799,7 +799,7 @@ def plot__covariates(DSO, streamflow, weight_index,year_ext=None, split_plot=Fal
 
         # --- Panel 2: Difference (delta) ---
         fig, ax = plt.subplots(figsize=(width,hight))
-        highlight_drought(ax, x, offset=DSO.optimal_k)
+        highlight_drought(ax, x, offset=0)
         ax.plot(vec, delta, 'gray', linewidth=1, alpha=0.3)
         for j in range(len(delta) - 1):
             ax.fill_between([vec[j], vec[j + 1]],
@@ -820,7 +820,7 @@ def plot__covariates(DSO, streamflow, weight_index,year_ext=None, split_plot=Fal
 
         # Panel 1: SIDI vs SQI1
         ax = axes[0]
-        highlight_drought(ax, x, offset=DSO.optimal_k)
+        highlight_drought(ax, x, offset=0)
         ax.plot(vec, x, c='tab:blue', label=DSO.SIDI_name)
         ax.plot(vec, y, c='tab:orange', label=f'{streamflow.index_name} ')
         ax.set_ylim(-4, 4)
@@ -831,7 +831,7 @@ def plot__covariates(DSO, streamflow, weight_index,year_ext=None, split_plot=Fal
 
         # Panel 2: Difference (delta)
         ax = axes[1]
-        highlight_drought(ax, x, offset=DSO.optimal_k)
+        highlight_drought(ax, x, offset=0)
         ax.plot(vec, delta, 'gray', linewidth=1, alpha=0.3)
         for j in range(len(delta) - 1):
             ax.fill_between([vec[j], vec[j + 1]],
