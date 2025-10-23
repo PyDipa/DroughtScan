@@ -28,9 +28,9 @@ if version is not None:
         #  "project name" as that used in pyproject.toml 
         __version__ = version("drought_scan")
     except PackageNotFoundError:  # type: ignore
-        __version__ = "0.0.0"
+        __version__ = "3.0.4"
 else:
-    __version__ = "0.0.0"
+    __version__ = "3.0.4"
 
 # --- Public API (leggera) ----------------------------------------------------
 # Import diretti delle classi core: devono essere leggeri e senza side-effect.
