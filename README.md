@@ -18,9 +18,10 @@ and is continuously developed within the activities of Drought Central ([Drought
 - Multi-temporal scales for flexibility in drought assessment.
 - Possibility of generating synthetic graphs and seasonal trend analysis.
 
-for examples and usage notes see: 
-- [User Guide](tests/docs/user_guide.md)→ Demonstrates how to initialize a Drough-Scan Object
-- [Visualization Guide](tests/docs/visualization_guide.md) → Demonstrates how to use some visualization methods.
+
+for examples and usage notes see:
+- [User Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/user_guide.md) → Demonstrates how to initialize a Drought-Scan Object
+- [Visualization Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/visualization_guide.md) → Demonstrates how to use some visualization methods
 
 ---
 ## Installation
