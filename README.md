@@ -1,4 +1,7 @@
 # Drought Scan
+[![PyPI version](https://img.shields.io/pypi/v/droughtscan.svg)](https://pypi.org/project/droughtscan/)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17318415.svg)](https://doi.org/10.5281/zenodo.17318415)
 
 ## Overview
 **Drought Scan** is a Python library implementing a multi-temporal and basin-scale approach for drought analysis. It is designed to provide advanced tools for evaluating drought severity and trends at the river basin scale by integrating meteorological and hydrological data.
@@ -22,10 +25,20 @@ for examples and usage notes see:
 ---
 ## Installation
 
-**Note**: DroughtScan will soon be available on PyPI.  
-Until then, it can be installed directly from this repository.
 
-Python version & environment
+### Option 1:
+DroughtScan is available on **[PyPI](https://pypi.org/project/droughtscan/)**.
+To install the latest stable version:
+
+```bash
+pip install droughtscan
+```
+
+### Option 2: Clone and install locally
+ 
+Drought Scan can be installed directly from this repository.
+
+Note:
 DroughtScan requires Python ≥3.9.
 If multiple Python versions are installed (e.g. 3.10 and 3.12), make sure pip and python refer to the same interpreter. You can check it by running
 
@@ -36,15 +49,13 @@ pip --version
 
 The following instructions will download the package to your working directory (`pwd`). If you wish to download the package to a specific path, first navigate to the desired location with the terminal.
 
-
-### Option 1: Clone and install locally
 ```bash
 git clone https://github.com/PyDipa/DroughtScan.git
 cd DroughtScan
 pip install .
 ```
 
-Option 2: Install directly from GitHub (no local clone)
+### Option 3: Install directly from GitHub (no local clone)
 ```bash
 pip install git+https://github.com/PyDipa/DroughtScan.git
 ```

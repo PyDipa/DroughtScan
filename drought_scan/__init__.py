@@ -20,13 +20,12 @@ from typing import TYPE_CHECKING
 try:
     from importlib.metadata import version, PackageNotFoundError  # Py>=3.8
 except Exception:  # pragma: no cover
-    version = None  # type: ignore
-    PackageNotFoundError = Exception  # type: ignore
+    from importlib_metadata import version, PackageNotFoundError  # type: ignore
 
 if version is not None:
     try:
         #  "project name" as that used in pyproject.toml 
-        __version__ = version("drought_scan")
+        __version__ = version("droughtscan")
     except PackageNotFoundError:  # type: ignore
         __version__ = "3.0.4"
 else:
