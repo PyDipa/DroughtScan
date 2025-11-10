@@ -15,7 +15,7 @@ maintainers = [
   { name="Arianna Di Paola",email="arianna.dipaola@cnr.it" }
 ]
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.9,<3.11"
 license =  "GPL-3.0-or-later"
 dependencies = [
   "numpy>=1.2",
