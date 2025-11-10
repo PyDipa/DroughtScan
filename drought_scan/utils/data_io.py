@@ -236,39 +236,50 @@ def load_shape(shape_path):
 # Helpers for streamflow data
 # ---------------------------
 
+
 _DEF_NA = ['-9999', '-999.000', '@', '-', '- ', '', ' ', '--', 'NA', 'NaN', 'nan']
 
-def _get_regex_for_date_format(date_format):
+format_map = {
+    "DD/MM/YY": "%d/%m/%y",
+    "DD/MM/YYYY": "%d/%m/%Y",
+    "D/M/YYYY":"%d/%m/%Y",
+    "YYYY-MM-DD": "%Y-%m-%d",
+    "YYYY/MM/DD": "%Y/%m/%d",
+    "DD-MM-YYYY": "%d-%m-%Y",
+    "YYYY.MM.DD": "%Y.%m.%d",
+    "DD.MM.YYYY": "%d.%m.%Y",
+    "YYYYMMDD": "%Y%m%d"
+}
+
+format_to_regex = {
+    "YYYY-MM-DD": r'^\d{4}-\d{2}-\d{2}$',
+    "YYYY/MM/DD": r'^\d{4}/\d{2}/\d{2}$',
+    "DD-MM-YYYY": r'^\d{2}-\d{2}-\d{4}$',
+    "DD/MM/YYYY": r'^\d{2}/\d{2}/\d{4}$',
+    "D/M/YYYY": r'^\d{1,2}/\d{1,2}/\d{4}$',
+    "DD/MM/YY": r'^\d{2}/\d{2}/\d{2}$',
+    "YYYYMMDD": r'^\d{4}\d{2}\d{2}$',
+    "DD MMM YYYY": r'^\d{2}\s\w{3}\s\d{4}$',  # e.g., 01 Dec 2023
+    "MMM DD, YYYY": r'^\w{3}\s\d{2},\s\d{4}$',  # e.g., Dec 01, 2023
+    "YYYY-DOY": r'^\d{4}-\d{3}$',  # Julian day, e.g., 2023-365
+    "YYYY.MM.DD": r'^\d{4}\.\d{2}\.\d{2}$',
+    "DD.MM.YYYY": r'^\d{2}\.\d{2}\.\d{4}$',
+    "YYYY/MM": r'^\d{4}/\d{2}$',  # Year and month
+    "HH:MM:SS": r'^\d{2}:\d{2}:\d{2}$',
+    "ISO8601": r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$',  # ISO 8601
+    "YYYY-MM-DD": r'^\d{4}-\d{2}-\d{2}$'  # e.g., 1960-12-31
+}
+
+def _detect_date_format(date_str):
     """
-    Returns the regex corresponding to a given date format string.
-
-    Args:
-        date_format (str): Date format expressed as a string (e.g., 'YYYY-MM-DD').
-
-    Returns:
-        str: The regex corresponding to the format or None if not found.
+    Automatically detects the format of a text date
+    by comparing it to a set of predefined regexes.
+    Returns the format string compatible with strftime/pandas.
     """
-    # Mapping dictionary: Literal format -> Regex
-    format_to_regex = {
-        "YYYY-MM-DD": r'^\d{4}-\d{2}-\d{2}$',
-        "YYYY/MM/DD": r'^\d{4}/\d{2}/\d{2}$',
-        "DD-MM-YYYY": r'^\d{2}-\d{2}-\d{4}$',
-        "DD/MM/YYYY": r'^\d{2}/\d{2}/\d{4}$',
-        "DD/MM/YY": r'^\d{2}/\d{2}/\d{2}$',
-        "YYYYMMDD": r'^\d{4}\d{2}\d{2}$',
-        "DD MMM YYYY": r'^\d{2}\s\w{3}\s\d{4}$',    # e.g., 01 Dec 2023
-        "MMM DD, YYYY": r'^\w{3}\s\d{2},\s\d{4}$',  # e.g., Dec 01, 2023
-        "YYYY-DOY": r'^\d{4}-\d{3}$',               # Julian day, e.g., 2023-365
-        "YYYY.MM.DD": r'^\d{4}\.\d{2}\.\d{2}$',
-        "DD.MM.YYYY": r'^\d{2}\.\d{2}\.\d{4}$',
-        "YYYY/MM": r'^\d{4}/\d{2}$',                # Year and month
-        "HH:MM:SS": r'^\d{2}:\d{2}:\d{2}$',
-        "ISO8601": r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$',  # ISO 8601
-        "YYYY-MM-DD": r'^\d{4}-\d{2}-\d{2}$' #e.g., 1960-12-31
-    }
-
-    # Return the regex if the format matches any of the defined patterns
-    return format_to_regex.get(date_format, None)
+    for fmt_key, pattern in format_to_regex.items():
+        if re.match(pattern, date_str.strip()):
+            return format_map.get(fmt_key)
+    return None
 
 def _check_datetime(text):
     """
@@ -303,6 +314,8 @@ def _check_datetime(text):
         if re.match(regex, text):
             return True
     return False
+
+
 def _detect_delimiter(line):
     """
     Detects the most likely delimiter in a CSV line.
@@ -360,16 +373,15 @@ def _pick_col(df, candidates, contains=False):
                     return orig
     return None
 
-def _pick_date_col(df: pd.DataFrame, date_col_hint=None) -> str:
+def _pick_date_col(df: pd.DataFrame) -> str:
     """
     Identify the name of the column containing date information.
 
     Logic:
-        1. Use the provided hint if valid.
-        2. Check for common Italian/English date column names.
-        3. Apply a first-row heuristic using `check_datetime()` or the presence of ':'.
-        4. If split date columns (day/month/year) exist, create '_date' and return its name.
-        5. Fallback: choose the column with at least 50% valid datetime parses.
+        1. Check for common Italian/English date column names.
+        2. Apply a first-row heuristic using `check_datetime()` or the presence of ':'.
+        3. If split date columns (day/month/year) exist, create '_date' and return its name.
+        4. Fallback: choose the column with at least 50% valid datetime parses.
 
     Returns:
         str: The name of the detected date column.
@@ -379,11 +391,7 @@ def _pick_date_col(df: pd.DataFrame, date_col_hint=None) -> str:
     """
     lower2orig = _normalize_colnames(df)
 
-    # 1) Hint esplicito
-    if date_col_hint is not None:
-        col = lower2orig.get(str(date_col_hint).strip().lower(), None)
-        if col is not None:
-            return col
+
 
     # 2) Singola colonna data (IT/EN)
     single_date_candidates = ['data', 'date', 'timestamp', 'datetime', 'time', 'data/ora', 'data ora']
@@ -436,25 +444,87 @@ def _pick_date_col(df: pd.DataFrame, date_col_hint=None) -> str:
         return best_col
 
     raise ValueError("Impossibile determinare una colonna data (singola, split o euristica).")
+def _date_related_cols(df: pd.DataFrame, date_col: str) -> set:
+    """
+    Return the set of columns related to date information that should be excluded
+    when selecting the numeric value column.
 
-def _pick_value_col(df: pd.DataFrame, value_col_hint=None) -> str:
+    Includes:
+        - The chosen date column (chosen_date_col)
+        - Any '_date' column created by _pick_date_col
+        - Split date components such as day/month/year in Italian or English
+        - Common aliases for datetime fields
+
+    Args:
+        df (pd.DataFrame): The input dataframe.
+        chosen_date_col (str or None): The name of the selected date column.
+
+    Returns:
+        set: Names of columns to exclude from numeric value detection.
+    """
+    rel = set()
+
+    # Add the detected main date column
+    if date_col and date_col in df.columns:
+        rel.add(date_col)
+
+    # Add the possible synthetic column created by _pick_date_col
+    if '_date' in df.columns:
+        rel.add('_date')
+
+    # Typical split column names for day, month, year (IT/EN variants)
+    day_keys   = ['giorno', 'gg', 'day', 'd']
+    month_keys = ['mese', 'mm', 'month', 'm']
+    year_keys  = ['anno', 'aaaa', 'yy', 'yyyy', 'year', 'y']
+
+    # Map lowercase names to original columns for matching
+    cols_lower = {str(c).strip().lower(): c for c in df.columns}
+
+    def add_matches(keys):
+        """Add any column whose name equals or clearly contains a keyword (word boundaries)."""
+        for k in keys:
+            pattern = r'\b' + re.escape(k) + r'\b'  # match whole word
+            for low, orig in cols_lower.items():
+                if re.search(pattern, low):
+                    rel.add(orig)
+
+    # Add split date components
+    add_matches(day_keys)
+    add_matches(month_keys)
+    add_matches(year_keys)
+
+    # Also include typical single-column aliases for datetime fields
+    single_date_alias = ['data', 'date', 'timestamp', 'datetime', 'time', 'data/ora', 'data ora']
+    add_matches(single_date_alias)
+
+    return rel
+
+def _pick_value_col(df: pd.DataFrame, exclude_cols=None) -> str:
     """
     Identify the name of the column containing numeric streamflow values.
 
     Logic:
-        1. Use the provided hint if valid.
-        2. Match common Italian/English keywords related to discharge or flow.
-        3. Fallback: choose the column with the highest ratio of numeric (non-NaN) values.
-        4. As a last resort, return the first non-datetime column.
+        0. Exclude candidate columns passed via `exclude_cols` (es. data, giorno/mese/anno, '_date').
+        1. Use the provided hint if valid (and not excluded).
+        2. Match common IT/EN keywords for discharge/flow (and not excluded).
+        3. Fallback: choose the column with the highest ratio of numeric (non-NaN) values (and not excluded).
+        4. Last resort: first non-datetime column not excluded.
 
     Returns:
-        str: The name of the detected value column.
+      str: The name of the detected value column.
     """
     lower2orig = _normalize_colnames(df)
-    if value_col_hint is not None:
-        col = lower2orig.get(str(value_col_hint).strip().lower(), value_col_hint if value_col_hint in df.columns else None)
-        if col is not None:
-            return col
+
+    excl_set = set()
+    if exclude_cols:
+        # Normalizza contro i nomi originali del DF
+        for ec in exclude_cols:
+            if ec is None:
+                continue
+            ec_norm = str(ec).strip().lower()
+            orig = lower2orig.get(ec_norm, ec)
+            if orig in df.columns:
+                excl_set.add(orig)
 
     # Heuristics su nomi IT/EN
     name_keys = [
@@ -463,26 +533,24 @@ def _pick_value_col(df: pd.DataFrame, value_col_hint=None) -> str:
     ]
     matches = []
     for key in name_keys:
-        matches += [c for c in df.columns if key in str(c).lower()]
+        matches += [c for c in df.columns if key in str(c).lower() and c not in excl_set]
     if matches:
         return matches[0]
 
     # Fallback: colonna con massima densità numerica
+    # --- 3) Fallback: colonna con massima densità numerica (skip escluse) ---
     candidates = []
     for c in df.columns:
+        if c in excl_set:
+            continue
         s = pd.to_numeric(df[c], errors='coerce')
-        if s.notna().mean() > 0.8:
+        if s.notna().mean() > 0.5: #at least 50% of data mush be numeric and finite!
             candidates.append((c, s.notna().mean()))
     if candidates:
         return sorted(candidates, key=lambda x: x[1], reverse=True)[0][0]
 
-    # Ultima spiaggia: prima colonna non-datetime
-    for c in df.columns:
-        try:
-            _ = pd.to_datetime(df[c], errors='coerce')
-        except Exception:
-            return c
     return df.columns[0]
+
 def _coerce_to_monthly(df, date_col, value_col, min_days=20):
     """
     Coerce daily streamflow data to monthly means, applying a minimum valid-days rule.
@@ -504,16 +572,19 @@ def _coerce_to_monthly(df, date_col, value_col, min_days=20):
     """
 
     df = df.copy()
-    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+    try: #works for stings, not for timestamp
+        format = _detect_date_format(df[date_col][0])
+        df[date_col] = pd.to_datetime(df[date_col], format=format, errors="coerce")
+    except AttributeError:
+       df[date_col] = pd.to_datetime(df[date_col],errors="coerce")
     df = df.dropna(subset=[date_col, value_col])
-    df = df.sort_values(date_col)
+    # df = df.sort_values(date_col)
 
     # Check frequency: daily if multiple distinct days per month
     is_daily = df[date_col].dt.day.nunique() > 4
 
     if is_daily:
         print(f"Daily resolution detected: aggregating to monthly means (min_valid_days={min_days}).")
-        min_days = 20
         monthly = (
             df.resample('ME', on=date_col)[value_col]
             .agg(['mean', 'count'])  # mean = nanmean, count = non-NaN
@@ -665,7 +736,7 @@ def _read_csv_smart(file_path: str) -> pd.DataFrame:
     return df
 
 
-def _pipeline_common(df: pd.DataFrame, date_col=None, value_col=None, origin_label=""):
+def _pipeline_common(df, origin_label=""):
     """
       Standard pipeline for cleaning, detecting, and converting streamflow data to monthly format.
 
@@ -685,8 +756,9 @@ def _pipeline_common(df: pd.DataFrame, date_col=None, value_col=None, origin_lab
               - ts (np.ndarray): Monthly streamflow time series.
               - m_cal (np.ndarray): Corresponding calendar array [month, year].
       """
-    date_col_name = _pick_date_col(df, date_col_hint=date_col)
-    value_col_name = _pick_value_col(df, value_col_hint=value_col)
+    date_col_name = _pick_date_col(df)
+    exclude = _date_related_cols(df, date_col_name)
+    value_col_name = _pick_value_col(df, exclude_cols=exclude)
 
 
     monthly_df, ts, m_cal = _coerce_to_monthly( df, date_col_name, value_col_name)
@@ -704,7 +776,7 @@ def _pipeline_common(df: pd.DataFrame, date_col=None, value_col=None, origin_lab
 # ---------------------------
 # Unified API  + wrapper
 # ---------------------------
-def load_streamflow(file_path, date_col=None, value_col=None):
+def load_streamflow(file_path):
     """
     Robust loader for streamflow data from CSV or Excel files.
 
@@ -713,8 +785,6 @@ def load_streamflow(file_path, date_col=None, value_col=None):
 
     Args:
         file_path (str): Path to the input file (.csv, .txt, .xlsx, .xls).
-        date_col (str, optional): Name of the date column (auto-detected if None).
-        value_col (str, optional): Name of the value column (auto-detected if None).
 
     Returns:
         tuple:
@@ -729,14 +799,13 @@ def load_streamflow(file_path, date_col=None, value_col=None):
     ext = os.path.splitext(file_path)[1].lower()
     if ext in ('.csv', '.txt'):
         df = _read_csv_smart(file_path)
-        return _pipeline_common(df, date_col=date_col, value_col=value_col, origin_label="csv")
+        return _pipeline_common(df, origin_label="csv")
     elif ext in ('.xlsx', '.xls'):
         df = pd.read_excel(file_path)
         df = df.dropna(axis=1, how='all')
-        return _pipeline_common(df, date_col=date_col, value_col=value_col, origin_label="Excel")
+        return _pipeline_common(df, origin_label="Excel")
     else:
         raise ValueError(f"Estensione non riconosciuta: {ext}")
-
 
 #--------------------------------------
 # Teleindex
