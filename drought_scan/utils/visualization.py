@@ -13,7 +13,7 @@ from matplotlib.colors import ListedColormap, BoundaryNorm
 from drought_scan.utils.drought_indices import *
 from drought_scan.utils.statistics import *
 from matplotlib.colors import Normalize
-mpl.rcParams['font.family'] = 'Helvetica'
+mpl.rcParams['font.family'] = ['Helvetica', 'DejaVu Sans', 'Arial']
 import os
 
 
