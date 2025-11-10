@@ -6,15 +6,21 @@ author: PyDipa
 Custom functions for visualization
 """
 
-import matplotlib as mpl
 import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from drought_scan.utils.drought_indices import *
 from drought_scan.utils.statistics import *
 from matplotlib.colors import Normalize
-mpl.rcParams['font.family'] = ['Helvetica', 'DejaVu Sans', 'Arial']
 import os
+
+import matplotlib as mpl
+import matplotlib.font_manager as fm
+available = {f.name for f in fm.fontManager.ttflist}
+if 'Helvetica' in available:
+    mpl.rcParams['font.family'] = 'Helvetica'
+else:
+    mpl.rcParams['font.family'] = 'Arial'
 
 
 try:

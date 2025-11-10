@@ -27,7 +27,12 @@ import re
 import os
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-mpl.rcParams['font.family'] = 'Helvetica'
+import matplotlib.font_manager as fm
+available = {f.name for f in fm.fontManager.ttflist}
+if 'Helvetica' in available:
+    mpl.rcParams['font.family'] = 'Helvetica'
+else:
+    mpl.rcParams['font.family'] = 'Arial'
 import geopandas as gpd
 import regionmask
 import netCDF4 as nc
