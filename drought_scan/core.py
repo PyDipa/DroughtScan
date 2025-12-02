@@ -837,6 +837,135 @@ class Precipitation(BaseDroughtAnalysis):
 
         plot__covariates(self,streamflow=streamflow,weight_index=self.optimal_weight_index,year_ext=year_ext,split_plot=split_plot)
 
+    def spi_sqi_corr(self, streamflow, plot=True):
+        """
+        Compute the month-wise correlation between SPIₖ (k = 1…K) and SQI₁
+        and optionally plot the R² heatmap.
+
+        This function quantifies how precipitation-based SPI-like indices
+        propagate into hydrological drought (SQI-like) on a month-by-month basis.
+        For each calendar month (Jan…Dec), the function computes the
+        Pearson correlation between SPIₖ and SQI₁ for all k in [1, K],
+        returning an R² matrix of shape (12 × K).
+
+        Parameters
+        ----------
+        streamflow : object
+            A DroughtScan-compatible object containing:
+            - `m_cal`: (N, 2) array of [month, year] metadata
+            - `spi_like_set`: 2D array of standardized streamflow indices,
+               where spi_like_set[0] corresponds to SQI₁.
+        plot : bool, optional (default=False)
+            If True, produces a contourf heatmap of R²(month, k).
+
+        Returns
+        -------
+        R2 : ndarray, shape (12, K)
+            Matrix of determination coefficients R² for each month (rows)
+            and SPI scale k (columns). Only correlations with p < 0.05
+            are retained; others are set to 0.
+
+        Raises
+        ------
+        ValueError
+            If no temporal overlap exists between precipitation and streamflow.
+
+        Notes
+        -----
+        • Overlap between precipitation and streamflow calibration windows
+          is enforced to avoid inconsistent correlations.
+        • R² values are rounded to 2 decimals for compact visualization.
+        • Non-significant correlations (p ≥ 0.05) are set to 0 by construction.
+
+        """
+
+        # ------------------------------------------------------------
+        # 1. Find temporal overlap between precipitation and streamflow
+        # ------------------------------------------------------------
+        self_indices, streamflow_indices = find_overlap(self.m_cal, streamflow.m_cal)
+
+        if len(self_indices) == 0 or len(streamflow_indices) == 0:
+            raise ValueError("No overlapping data found between Precipitation and Streamflow.")
+
+        # ------------------------------------------------------------
+        # 2. Extract overlapping standardized indices
+        # ------------------------------------------------------------
+        # SQI₁ (streamflow): first row of streamflow.spi_like_set
+        sqi1 = streamflow.spi_like_set[0, streamflow_indices]
+
+        # SPI-like set (precipitation): all scales
+        spi_like_set = self.spi_like_set[:, self_indices]
+
+        # Month/year metadata for overlapping period
+        m_cal = self.m_cal[self_indices]
+
+        # ------------------------------------------------------------
+        # 3. Compute R²(month, k) matrix
+        # ------------------------------------------------------------
+        R2 = []
+        Ki = np.arange(self.K)  # scales 0…K-1
+
+        for m in range(1, 13):  # calendar months
+            r2_row = []
+
+            # indices of entries belonging to month m
+            ii = np.where(m_cal[:, 0] == m)[0]
+
+            # SQI₁ for month m
+            y = sqi1[ii]
+
+            for K in Ki:
+                x = spi_like_set[K][ii]
+
+                # filter finite values to avoid NaNs in Pearsonr
+                mask = (np.isfinite(x) & np.isfinite(y))
+
+                if mask.sum() < 3:
+                    # too few points to compute correlation
+                    r2_row.append(0)
+                    continue
+
+                rho, pval = stats.pearsonr(x[mask], y[mask])
+
+                # Keep only statistically significant correlations
+                r2_val = np.round(rho ** 2, 2) if pval < 0.05 else 0
+                r2_row.append(r2_val)
+
+            R2.append(r2_row)
+
+        R2 = np.array(R2)
+
+        # ------------------------------------------------------------
+        # 4. Optional plotting
+        # ------------------------------------------------------------
+        if plot:
+            plt.figure(figsize=(10, 4))
+            X, Y = np.meshgrid(np.arange(1, self.K + 1), np.arange(1, 13))
+
+            levels = np.arange(0.05, 1.15, 0.1)
+            centers = (levels[:-1] + levels[1:]) / 2
+
+            cf = plt.contourf(X, Y, R2, cmap='pink_r', levels=levels)
+
+            plt.xticks(np.arange(1, self.K + 1))
+            plt.yticks(
+                np.arange(1, 13),
+                ['Jan.', 'Feb.', 'Mar.', 'Apr.', 'May', 'Jun.',
+                 'Jul.', 'Aug.', 'Sep.', 'Oct.', 'Nov.', 'Dec.']
+            )
+
+            plt.xlabel('month scale (K)')
+            cbar = plt.colorbar(cf, ticks=centers)
+            cbar.ax.set_yticklabels([f"{c:.2f}" for c in centers])
+            cbar.set_label(r"$R^2$", rotation=0, labelpad=12, fontsize=12)
+
+            # Minor grid for readability
+            plt.gca().set_yticks(np.arange(1.5, 12, 1), minor=True)
+            plt.grid(axis='y', which='minor', linestyle='--', alpha=0.7)
+
+            plt.tight_layout()
+
+        return R2
 
 
 class Streamflow(BaseDroughtAnalysis):
@@ -1285,6 +1414,138 @@ class Pet(BaseDroughtAnalysis):
             print("Run the following class methods to access key functionalities:\n")
             print(" >>> ._plot_scan(): to plot the CDN, zscore heatmap, and D_{zscore} \n")
 
+    def speti_sqi_corr(self, streamflow, plot=True):
+        """
+        Compute the month-wise correlation between SPETIₖ (k = 1…K) and SQI₁
+        and optionally plot the R² heatmap.
+
+        This function quantifies how precipitation-based SPI-like indices
+        propagate into hydrological drought (SQI-like) on a month-by-month basis.
+        For each calendar month (Jan…Dec), the function computes the
+        Pearson correlation between SPETIₖ and SQI₁ for all k in [1, K],
+        returning an R² matrix of shape (12 × K).
+
+        Parameters
+        ----------
+        streamflow : object
+            A DroughtScan-compatible object containing:
+            - `m_cal`: (N, 2) array of [month, year] metadata
+            - `spi_like_set`: 2D array of standardized streamflow indices,
+               where spi_like_set[0] corresponds to SQI₁.
+        plot : bool, optional (default=False)
+            If True, produces a contourf heatmap of R²(month, k).
+
+        Returns
+        -------
+        R2 : ndarray, shape (12, K)
+            Matrix of determination coefficients R² for each month (rows)
+            and SPI scale k (columns). Only correlations with p < 0.05
+            are retained; others are set to 0.
+
+        Raises
+        ------
+        ValueError
+            If no temporal overlap exists between precipitation and streamflow.
+
+        Notes
+        -----
+        • Overlap between precipitation and streamflow calibration windows
+          is enforced to avoid inconsistent correlations.
+        • R² values are rounded to 2 decimals for compact visualization.
+        • Non-significant correlations (p ≥ 0.05) are set to 0 by construction.
+
+        """
+
+        # ------------------------------------------------------------
+        # 1. Find temporal overlap between precipitation and streamflow
+        # ------------------------------------------------------------
+        self_indices, streamflow_indices = find_overlap(self.m_cal, streamflow.m_cal)
+
+        if len(self_indices) == 0 or len(streamflow_indices) == 0:
+            raise ValueError("No overlapping data found between Precipitation and Streamflow.")
+
+        # ------------------------------------------------------------
+        # 2. Extract overlapping standardized indices
+        # ------------------------------------------------------------
+        # SQI₁ (streamflow): first row of streamflow.spi_like_set
+        sqi1 = streamflow.spi_like_set[0, streamflow_indices]
+
+        # SPI-like set (precipitation): all scales
+        spi_like_set = self.spi_like_set[:, self_indices]
+
+        # Month/year metadata for overlapping period
+        m_cal = self.m_cal[self_indices]
+
+        # ------------------------------------------------------------
+        # 3. Compute R²(month, k) matrix
+        # ------------------------------------------------------------
+        R2 = []
+        Ki = np.arange(self.K)  # scales 0…K-1
+
+        for m in range(1, 13):  # calendar months
+            r2_row = []
+
+            # indices of entries belonging to month m
+            ii = np.where(m_cal[:, 0] == m)[0]
+
+            # SQI₁ for month m
+            y = sqi1[ii]
+
+            for K in Ki:
+                x = spi_like_set[K][ii]
+
+                # filter finite values to avoid NaNs in Pearsonr
+                mask = (np.isfinite(x) & np.isfinite(y))
+
+                if mask.sum() < 3:
+                    # too few points to compute correlation
+                    r2_row.append(0)
+                    continue
+
+                rho, pval = stats.pearsonr(x[mask], y[mask])
+
+                # Keep only statistically significant correlations
+                r2_val = np.round(rho ** 2, 2) if pval < 0.05 else 0
+                r2_row.append(r2_val)
+
+            R2.append(r2_row)
+
+        R2 = np.array(R2)
+
+        # ------------------------------------------------------------
+        # 4. Optional plotting
+        # ------------------------------------------------------------
+        if plot:
+            plt.figure(figsize=(10, 4))
+            X, Y = np.meshgrid(np.arange(1, self.K + 1), np.arange(1, 13))
+
+            levels = np.arange(0.05, 1.15, 0.1)
+            centers = (levels[:-1] + levels[1:]) / 2
+
+            cf = plt.contourf(X, Y, R2, cmap='pink_r', levels=levels)
+
+            plt.xticks(np.arange(1, self.K + 1))
+            plt.yticks(
+                np.arange(1, 13),
+                ['Jan.', 'Feb.', 'Mar.', 'Apr.', 'May', 'Jun.',
+                 'Jul.', 'Aug.', 'Sep.', 'Oct.', 'Nov.', 'Dec.']
+            )
+
+            plt.xlabel('month scale (K)')
+            cbar = plt.colorbar(cf, ticks=centers)
+            cbar.ax.set_yticklabels([f"{c:.2f}" for c in centers])
+            cbar.set_label(r"$R^2$", rotation=0, labelpad=12, fontsize=12)
+
+            # Minor grid for readability
+            plt.gca().set_yticks(np.arange(1.5, 12, 1), minor=True)
+            plt.grid(axis='y', which='minor', linestyle='--', alpha=0.7)
+
+            plt.tight_layout()
+
+        return R2
+
+
+
 class Balance(BaseDroughtAnalysis):
     def __init__(self, start_baseline_year, end_baseline_year, basin_name, prec_path=None, pet_path=None,
                  shape_path=None, shape=None, ts=None, m_cal=None, K=None,
@@ -1397,6 +1658,137 @@ class Balance(BaseDroughtAnalysis):
         # Calcola la differenza tra precipitazione e PET
         ts = prec_ts[p_id] - pet_ts[pet_id]
         return Pgrid, ETgrid, m_cal, ts
+
+    def spei_sqi_corr(self, streamflow, plot=True):
+        """
+        Compute the month-wise correlation between SPEIₖ (k = 1…K) and SQI₁
+        and optionally plot the R² heatmap.
+
+        This function quantifies how precipitation-based SPI-like indices
+        propagate into hydrological drought (SQI-like) on a month-by-month basis.
+        For each calendar month (Jan…Dec), the function computes the
+        Pearson correlation between SPEIₖ and SQI₁ for all k in [1, K],
+        returning an R² matrix of shape (12 × K).
+
+        Parameters
+        ----------
+        streamflow : object
+            A DroughtScan-compatible object containing:
+            - `m_cal`: (N, 2) array of [month, year] metadata
+            - `spi_like_set`: 2D array of standardized streamflow indices,
+               where spi_like_set[0] corresponds to SQI₁.
+        plot : bool, optional (default=False)
+            If True, produces a contourf heatmap of R²(month, k).
+
+        Returns
+        -------
+        R2 : ndarray, shape (12, K)
+            Matrix of determination coefficients R² for each month (rows)
+            and SPI scale k (columns). Only correlations with p < 0.05
+            are retained; others are set to 0.
+
+        Raises
+        ------
+        ValueError
+            If no temporal overlap exists between precipitation and streamflow.
+
+        Notes
+        -----
+        • Overlap between precipitation and streamflow calibration windows
+          is enforced to avoid inconsistent correlations.
+        • R² values are rounded to 2 decimals for compact visualization.
+        • Non-significant correlations (p ≥ 0.05) are set to 0 by construction.
+
+        """
+
+        # ------------------------------------------------------------
+        # 1. Find temporal overlap between precipitation and streamflow
+        # ------------------------------------------------------------
+        self_indices, streamflow_indices = find_overlap(self.m_cal, streamflow.m_cal)
+
+        if len(self_indices) == 0 or len(streamflow_indices) == 0:
+            raise ValueError("No overlapping data found between Precipitation and Streamflow.")
+
+        # ------------------------------------------------------------
+        # 2. Extract overlapping standardized indices
+        # ------------------------------------------------------------
+        # SQI₁ (streamflow): first row of streamflow.spi_like_set
+        sqi1 = streamflow.spi_like_set[0, streamflow_indices]
+
+        # SPI-like set (precipitation): all scales
+        spi_like_set = self.spi_like_set[:, self_indices]
+
+        # Month/year metadata for overlapping period
+        m_cal = self.m_cal[self_indices]
+
+        # ------------------------------------------------------------
+        # 3. Compute R²(month, k) matrix
+        # ------------------------------------------------------------
+        R2 = []
+        Ki = np.arange(self.K)  # scales 0…K-1
+
+        for m in range(1, 13):  # calendar months
+            r2_row = []
+
+            # indices of entries belonging to month m
+            ii = np.where(m_cal[:, 0] == m)[0]
+
+            # SQI₁ for month m
+            y = sqi1[ii]
+
+            for K in Ki:
+                x = spi_like_set[K][ii]
+
+                # filter finite values to avoid NaNs in Pearsonr
+                mask = (np.isfinite(x) & np.isfinite(y))
+
+                if mask.sum() < 3:
+                    # too few points to compute correlation
+                    r2_row.append(0)
+                    continue
+
+                rho, pval = stats.pearsonr(x[mask], y[mask])
+
+                # Keep only statistically significant correlations
+                r2_val = np.round(rho ** 2, 2) if pval < 0.05 else 0
+                r2_row.append(r2_val)
+
+            R2.append(r2_row)
+
+        R2 = np.array(R2)
+
+        # ------------------------------------------------------------
+        # 4. Optional plotting
+        # ------------------------------------------------------------
+        if plot:
+            plt.figure(figsize=(10, 4))
+            X, Y = np.meshgrid(np.arange(1, self.K + 1), np.arange(1, 13))
+
+            levels = np.arange(0.05, 1.15, 0.1)
+            centers = (levels[:-1] + levels[1:]) / 2
+
+            cf = plt.contourf(X, Y, R2, cmap='pink_r', levels=levels)
+
+            plt.xticks(np.arange(1, self.K + 1))
+            plt.yticks(
+                np.arange(1, 13),
+                ['Jan.', 'Feb.', 'Mar.', 'Apr.', 'May', 'Jun.',
+                 'Jul.', 'Aug.', 'Sep.', 'Oct.', 'Nov.', 'Dec.']
+            )
+
+            plt.xlabel('month scale (K)')
+            cbar = plt.colorbar(cf, ticks=centers)
+            cbar.ax.set_yticklabels([f"{c:.2f}" for c in centers])
+            cbar.set_label(r"$R^2$", rotation=0, labelpad=12, fontsize=12)
+
+            # Minor grid for readability
+            plt.gca().set_yticks(np.arange(1.5, 12, 1), minor=True)
+            plt.grid(axis='y', which='minor', linestyle='--', alpha=0.7)
+
+            plt.tight_layout()
+
+        return R2
+
 
 
 class Temperature(BaseDroughtAnalysis):
