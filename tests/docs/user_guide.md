@@ -387,7 +387,6 @@ sidi_opt    = SIDI_matrix[:, A['col_best_weight']]            # 1D vector (time,
 
 ```
 
-
 ## 8.2) Streamflow Gap Filling
 Observed streamflow time series may contain **missing values** due to monitoring gaps or sensor errors.  
 The method `gap_filling` of the `Streamflow` class allows you to fill short gaps and preserve continuity in index calculation.
@@ -407,6 +406,78 @@ streamflow.gap_filling(
     optimal_weight_index=A['col_best_weight']
 )
 
+```
+## 8.3) Month-wise SPIₖ–SQI₁ Correlation (`spi_sqi_corr`)
+
+The method `spi_sqi_corr` provides a detailed month-by-month diagnostic of how 
+precipitation-based drought conditions propagate into hydrological drought.
+
+While `analyze_correlation` identifies the *optimal* multi-scale SIDI configuration,
+`spi_sqi_corr` focuses on the **raw physical relationship** between:
+
+- each precipitation accumulation scale **SPIₖ**,  
+- and the streamflow one-month index **SQI₁**,  
+
+across the **12 calendar months**.
+
+This allows the user to quantify seasonal differences in drought propagation and 
+identify which SPI time-scales are most influential for river discharge in each month.
+
+### What the method computes
+
+- Automatically finds the overlapping period between Precipitation and Streamflow.
+- For each month (Jan…Dec) and each SPI scale k = 1…K:
+  - computes the Pearson correlation ρ(SPIₖ, SQI₁),
+  - retains only statistically significant correlations (p < 0.05),
+  - stores the determination coefficient **R² = ρ²**.
+- Returns a **12 × K matrix** of R² values.
+- Optionally produces a contour heatmap to visualize the propagation patterns.
+
+### When to use it
+
+Use `spi_sqi_corr` when you need:
+
+- a **diagnostic map** of meteorological → hydrological drought propagation,  
+- identification of **seasonally dependent response times**,  
+- insight on which SPI time-scales dominate in specific months,  
+- comparison of catchments with different hydrological memory,  
+- validation before SIDI optimization.
+
+It is especially useful in catchments where snowmelt, reservoir regulation or 
+irrigation withdrawals create **seasonal asymmetries** between precipitation and discharge.
+
+### Example
+
+```python
+import drought_scan as DS
+
+shape_path = 'tests/data/bacino_pontelagoscuro.shp'
+prec_path  = 'tests/data/LAPrec1871.v1.1.nc'
+river_path = 'tests/data/ARPAE_Q_month.csv'
+
+# Initialize Precipitation and Streamflow with the same baseline
+tb1, tb2 = 1961, 2000
+
+prec = DS.Precipitation(
+    prec_path=prec_path,
+    shape_path=shape_path,
+    start_baseline_year=tb1,
+    end_baseline_year=tb2,
+    basin_name='Po'
+)
+
+streamflow = DS.Streamflow(
+    data_path=river_path,
+    shape_path=shape_path,
+    start_baseline_year=tb1,
+    end_baseline_year=tb2,
+    basin_name='Po'
+)
+
+# Compute the month-wise SPIk–SQI1 correlation matrix (R²)
+R2 = prec.spi_sqi_corr(streamflow, plot=True)
+
+print("Shape of R² matrix:", R2.shape)   # Expected: (12, K)
 ```
 ---
 
