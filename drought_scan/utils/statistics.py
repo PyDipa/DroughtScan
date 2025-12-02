@@ -140,57 +140,293 @@ def concatenate_m_cal(m_cal1,m_cal2):
 # ===================================================================
 #  Standardization Test
 # ===================================================================
-def test_standardization(data):
+def test_standardization(data, groups=None):
     """
-    Determine the most appropriate standardization method for a dataset.
+    Determine the most appropriate standardization method for a dataset,
+    optionally performing the analysis separately per group.
 
-    This function analyzes the input data to decide whether to use:
-    - Gamma function: for datasets with strong left-skew and only positive values.
-    - Pearson III function: for asymmetric datasets with both positive and negative values.
-    - Gaussian (z-score): for datasets following a normal distribution.
+    The function computes skewness, a normality test, a recommended
+    distribution family (Gamma / Pearson III / Gaussian), and a KS-based
+    goodness-of-fit metric. If `groups` is provided, the analysis is run
+    independently for each group.
 
-    Parameters:
+    Parameters
     ----------
     data : array-like
-        The input dataset to analyze.
+        Input data to analyze.
+    groups : array-like or None, optional
+        Optional grouping labels, must have the same length as `data`.
+        If provided, a separate analysis is performed for each unique
+        group value.
 
-    Returns:
+    Returns
     -------
     dict
-        A dictionary containing:
-        - Skewness: The calculated skewness of the data.
-        - Normality p-value: The p-value from the normality test.
-        - Recommendation: The suggested standardization method based on the analysis.
-
-    Example:
-    --------
-    data = [102.44, 103.45, 104.46, ..., 132.73]
-    result = test_standardization(data)
-    print(result)
+        If `groups` is None:
+            A dictionary with keys:
+                - "skewness"
+                - "normality_p_value"
+                - "recommendation"
+                - "KS_statistic"
+                - "KS_p_value"
+                - "error_percent"
+                - "goodness_percent"
+        If `groups` is provided:
+            A nested dictionary of the form:
+            {group_value: stats_dict} with the same fields as above.
     """
-    # Calculate the skewness of the data.
-    # A high skewness (>1 or <-1) indicates significant asymmetry.
-    skewness = stats.skew(data)
 
-    # Perform a normality test (D'Agostino and Pearson's test).
-    # Null hypothesis: the data comes from a normal distribution.
-    _, p_value = stats.normaltest(data)
-    if p_value < 0.05:
-        print("The null hypothesis can be rejected: data is not normally distributed.")
-    else:
-        print("The null hypothesis cannot be rejected: data may follow a normal distribution.")
+    data = np.asarray(data)
 
-    # Determine the appropriate standardization method.
-    if np.min(data) > 0 and skewness > 1:
-        recommendation = "Gamma (strong left-skew and only positive values)"
-    elif skewness > 1 or skewness < -1:
-        recommendation = "Pearson III (significant asymmetry with both positive and negative values)"
-    elif p_value > 0.05:  # Data likely follows a normal distribution
-        recommendation = "Gaussian (z-score, data follows a normal distribution)"
-    else:
-        recommendation = "Unclear. Further exploration of the data is required."
+    # -------------------------
+    # INTERNAL ANALYSIS FUNCTION
+    # -------------------------
+    def analyze_single(dataset):
+        dataset = np.asarray(dataset)
+        dataset = dataset[np.isfinite(dataset)]
 
-# statistics.py in utils/
+        # --- basic stats ---
+        skewness = stats.skew(dataset)
+        _, p_normal = stats.normaltest(dataset)
+
+        # --- recommendation logic ---
+        if np.min(dataset) > 0 and skewness > 1:
+            recommendation = "Gamma (strong right-skew and only positive values)"
+            dist = "gamma"
+        elif skewness > 1 or skewness < -1:
+            recommendation = "Pearson III (significant asymmetry)"
+            dist = "pearson3"
+        elif p_normal > 0.05:
+            recommendation = "Gaussian (z-score, likely normal)"
+            dist = "gaussian"
+        else:
+            recommendation = "Unclear — further analysis needed"
+            dist = "gamma"  # fallback
+
+        # -------------------------
+        # KS TEST SECTION
+        # -------------------------
+        # gamma: need positive data
+        if dist == "gamma":
+            # shift to avoid zero
+            shifted = dataset + 1
+            alpha, loc, scale = stats.gamma.fit(shifted, floc=0)
+            D, p_ks = stats.kstest(shifted, 'gamma', args=(alpha, loc, scale))
+
+        # Pearson III: SciPy implementation is stats.pearson3
+        elif dist == "pearson3":
+            # pearson3 fit: shape, loc, scale
+            shape, loc, scale = stats.pearson3.fit(dataset)
+            D, p_ks = stats.kstest(dataset, 'pearson3', args=(shape, loc, scale))
+
+        # Gaussian
+        else:
+            mu, sigma = np.mean(dataset), np.std(dataset)
+            D, p_ks = stats.kstest(dataset, 'norm', args=(mu, sigma))
+
+        # Convert KS statistic to intuitive metrics
+        error_pct = 100 * D
+        goodness_pct = 100 * (1 - D)
+
+        return {
+            "skewness": skewness,
+            "normality_p_value": p_normal,
+            "recommendation": recommendation,
+            "KS_statistic": D,
+            "KS_p_value": p_ks,
+            "error_percent": error_pct,
+            "goodness_percent": goodness_pct,
+        }
+
+    # -------------------------
+    # CASE 1: single dataset
+    # -------------------------
+    if groups is None:
+        return analyze_single(data)
+
+    # -------------------------
+    # CASE 2: grouped dataset
+    # -------------------------
+    groups = np.asarray(groups)
+    if len(groups) != len(data):
+        raise ValueError("`groups` must have the same length as `data`.")
+
+    results = {}
+    for g in np.unique(groups):
+        subset = data[groups == g]
+        results[g] = analyze_single(subset)
+
+    return results
+
+def fit_distribution_stats(data, dist="gamma", groups=None, shift_for_gamma=True):
+    """
+    Compute goodness-of-fit statistics for a chosen distribution
+    (gamma, pearson3, gaussian), optionally per group.
+
+    The function performs:
+        - Skewness estimation
+        - Normality test (D'Agostino & Pearson)
+        - MLE fitting of the selected distribution
+        - KS test between empirical data and fitted distribution
+        - Log-likelihood and AIC computation
+        - Error/goodness percentages from KS statistic
+        - Optional grouped analysis
+
+    Parameters
+    ----------
+    data : array-like
+        Input dataset.
+    dist : {"gamma", "pearson3", "gaussian"}, default="gamma"
+        Target distribution for fitting and KS testing.
+    groups : array-like or None, optional
+        If provided, must have same length as `data`. The analysis is
+        performed independently for each unique group value.
+    shift_for_gamma : bool, optional
+        If True, and the chosen distribution is Gamma, a shift
+        (data + 1) is applied to avoid issues with zeros or negative values.
+
+    Returns
+    -------
+    dict
+        If groups is None:
+            A dictionary containing all fit statistics.
+        If groups is provided:
+            A nested dictionary {group_value: stats_dict}.
+
+        Each stats_dict includes:
+            - "distribution": selected distribution
+            - "skewness"
+            - "normality_p_value"
+            - "params": fitted parameters
+            - "KS_statistic"
+            - "KS_p_value"
+            - "error_percent"
+            - "goodness_percent"
+            - "log_likelihood"
+            - "AIC"
+
+    Notes
+    -----
+    - Gamma and Pearson III fits use 3 parameters (shape, loc, scale),
+      Gaussian uses 2 (mu, sigma).
+    - Data are automatically filtered for non-finite values.
+    """
+
+    data = np.asarray(data)
+    dist = dist.lower()
+
+    allowed = {"gamma", "pearson3", "gaussian"}
+    if dist not in allowed:
+        raise ValueError(f"`dist` must be one of {allowed}, got: {dist}")
+
+    # --------------------------------------------------
+    # Internal helper: analyze a single dataset
+    # --------------------------------------------------
+    def analyze_single(dataset):
+        dataset = np.asarray(dataset)
+        dataset = dataset[np.isfinite(dataset)]  # ensure clean data
+
+        # Basic statistics
+        skewness = stats.skew(dataset)
+        _, p_normal = stats.normaltest(dataset)
+
+        # Fit and KS test according to selected distribution
+        if dist == "gamma":
+            # Apply optional shift to avoid zero or negative values
+            if shift_for_gamma:
+                data_used = dataset + 1
+            else:
+                data_used = dataset
+
+            # Fit Gamma: shape, loc, scale
+            shape, loc, scale = stats.gamma.fit(data_used, floc=0)
+            D, p_ks = stats.kstest(data_used, "gamma", args=(shape, loc, scale))
+
+            params = {
+                "shape": shape,
+                "loc": loc,
+                "scale": scale,
+                "shift_applied": bool(shift_for_gamma),
+            }
+
+            logpdf_vals = stats.gamma.logpdf(data_used, shape, loc=loc, scale=scale)
+
+        elif dist == "pearson3":
+            data_used = dataset
+
+            # Fit Pearson type III: shape, loc, scale
+            shape, loc, scale = stats.pearson3.fit(data_used)
+            D, p_ks = stats.kstest(data_used, "pearson3", args=(shape, loc, scale))
+
+            params = {
+                "shape": shape,
+                "loc": loc,
+                "scale": scale,
+            }
+
+            logpdf_vals = stats.pearson3.logpdf(data_used, shape, loc=loc, scale=scale)
+
+        else:  # Gaussian
+            data_used = dataset
+
+            mu = np.mean(data_used)
+            sigma = np.std(data_used, ddof=0)
+
+            D, p_ks = stats.kstest(data_used, "norm", args=(mu, sigma))
+
+            params = {
+                "mu": mu,
+                "sigma": sigma,
+            }
+
+            logpdf_vals = stats.norm.logpdf(data_used, loc=mu, scale=sigma)
+
+        # Log-likelihood
+        log_likelihood = np.sum(logpdf_vals)
+
+        # Number of parameters for AIC:
+        #   Gamma / Pearson III: 3 parameters (shape, loc, scale)
+        #   Gaussian: 2 parameters (mu, sigma)
+        k = 3 if dist in {"gamma", "pearson3"} else 2
+        aic = 2 * k - 2 * log_likelihood
+
+        # KS metric mapping
+        error_pct = 100 * D
+        goodness_pct = 100 * (1 - D)
+
+        return {
+            "distribution": dist,
+            "skewness": skewness,
+            "normality_p_value": p_normal,
+            "params": params,
+            "KS_statistic": D,
+            "KS_p_value": p_ks,
+            "error_percent": error_pct,
+            "goodness_percent": goodness_pct,
+            "log_likelihood": log_likelihood,
+            "AIC": aic,
+        }
+
+    # --------------------------------------------------
+    # Case 1: no groups
+    # --------------------------------------------------
+    if groups is None:
+        return analyze_single(data)
+
+    # --------------------------------------------------
+    # Case 2: grouped analysis
+    # --------------------------------------------------
+    groups = np.asarray(groups)
+    if len(groups) != len(data):
+        raise ValueError("`groups` must have the same length as `data`.")
+
+    results = {}
+    for g in np.unique(groups):
+        subset = data[groups == g]
+        results[g] = analyze_single(subset)
+
+    return results
+
 
 # ===================================================================
 #  Rolling Trend Analysis
