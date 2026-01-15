@@ -306,6 +306,7 @@ class BaseDroughtAnalysis:
         plot_overview(self, optimal_k=optimal_k, weight_index=weight_index,year_ext=year_ext,split_plot=split_plot,plot_order=plot_order)
         if saveplot==True:
             self._saveplot()
+
     def normal_values(self):
         """
           Compute the "normal" values of the  climatology  using the inverse function of the SPI-like index.
@@ -372,7 +373,7 @@ class BaseDroughtAnalysis:
         plt.scatter(mm[K-1, :, month-1], domain, s=80, c=domain, cmap=cmap)
         plt.xlabel(var,fontsize=14)
         plt.ylabel(f"{self.index_name}{K}",fontsize=14)
-        plt.title(f"SPI{K}, {months[month-1]}",fontsize=14)
+        plt.title(f"{self.index_name}{K} calibration, {months[month-1]}",fontsize=14)
         plt.grid()
         plt.colorbar(label=f"{self.index_name}")  # opzionale
         plt.tight_layout()
