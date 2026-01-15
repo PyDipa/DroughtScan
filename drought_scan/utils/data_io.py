@@ -68,7 +68,7 @@ def extract_variable(data, possible_names):
     for name in possible_names:
         if name in data.variables:
             try:
-                return np.array(data[name])
+                return np.asarray(data[name])
             except Exception as e:
                 raise ValueError(f"Error extracting variable '{name}': {e}")
     # raise ValueError(f"None of {possible_names} found in NetCDF variables.")
@@ -163,6 +163,25 @@ def import_netcdf_for_cumulative_variable(file_path, possible_names,shape,verbos
 
                 Pgrid = Pgrid_m
                 m_cal = np.array([[m, y] for y in years for m in range(1, 13)])
+
+
+            # ------------------ CHECK For missing/duplicated time-stamp ------------------
+            start = f"{m_cal[0, 1]:04d}-{m_cal[0, 0]:02d}"
+            end = f"{m_cal[-1, 1]:04d}-{m_cal[-1, 0]:02d}"
+
+            expected = pd.period_range(start=start, end=end, freq="M")
+            actual = pd.PeriodIndex(year=m_cal[:, 1], month=m_cal[:, 0], freq="M")
+
+            # 1) duplicates (to do before)
+            dup = actual[actual.duplicated()]
+            if dup.size > 0:
+                raise ValueError(f"The data has duplicated TIMESTAMP ({dup.size}): {list(dup)}")
+
+            # 2) missing (to do after duplicates checks)
+            missing = expected.difference(actual)
+            if missing.size > 0:
+                raise ValueError(f"The data has missing TIMESTAMP ({missing.size}): {list(missing)}")
+
 
             # Flip LAT if necessary
             if LAT[0, 0] < LAT[1, 0]:
