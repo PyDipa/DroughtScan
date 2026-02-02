@@ -480,9 +480,10 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, kde_params=None):
         a = np.array([idmesi_all - j for j in np.flip(np.arange(0, stride))]).T
         x = np.array([np.sum(prec[row]) if np.all(row >= 0) else np.nan for row in a])
 
-    # ---------------- KDE-based SPI -----------------------------------
+        # ---------------- KDE-based SPI -----------------------------------
     spi = np.full_like(x, np.nan, dtype=float)
-
+    x_log = np.log(x)
+    xbase_log = np.log(xbase)
     # Maschere finite
     finite_x = np.isfinite(x)
     finite_xbase = np.isfinite(xbase)
@@ -495,7 +496,7 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, kde_params=None):
 
     # --- KDE fit (baseline) -----------------------------------------------
     if kde_params is None:
-        xb = xbase[finite_xbase]
+        xb = xbase_log[finite_xbase]
 
         if xb.size < 10:
             raise ValueError(
@@ -521,7 +522,7 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, kde_params=None):
     # CDF(x) = ∫_{-∞}^{x} KDE(t) dt
     Gx = np.full_like(x, np.nan, dtype=float)
 
-    for i, xi in enumerate(x):
+    for i, xi in enumerate(x_log):
         if np.isfinite(xi):
             Gx[i] = float(kde.integrate_box_1d(-np.inf, xi))
 
