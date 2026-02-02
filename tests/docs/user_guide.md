@@ -113,11 +113,13 @@ Below are the most impactful options, with defaults and when you might want to c
   Available (in `utils.py`):
   - `f_spi` → a function to standardize data according to a **Gamma** distribution. Best for **positive, right-skewed** data (e.g., precipitation). Works fine on positive near-normal as well. Generally used for the calculation of SPI.
   - `f_spei` → **Pearson III** distribution. Handles **real-valued, negative and/or skewed** data; Gnerally used for **SPEI**. Works fine on negative, positive near-normal as well, being also well suited for precipitation data.
+  - `f_kdee` → Non-parametric standardization using Gaussian Kernel Density Estimation (Silverman bandwidth) 
   - `f_zscore` → standard z-score. Best when data are **approximately Gaussian** (real-valued); no parametric skew modeling.
 
   Practical guidance:  
   - Use `f_spi` for precipitation-like data (eg.  SPI/SIDI.  
   - Use `f_spei` for **SPEI-style** applications (precip–PET, can be negative).  
+  - Use `f_kde` for all type of data when you are dissatisfied with parametric methods.
   - Use `f_zscore` when you trust normality and prefer a simpler transform.
 
 - **`weight_index` (int)** — *weighting scheme for SIDI aggregation across scales*  
@@ -261,7 +263,12 @@ Please see the *visualization_guide.md* for further details about plotting metho
 
 
 ## 7) Streamflow (SQI), Pet and Balance (SPEI) classes
-For drought analysis based on other standardiezed indices like  SQI, SPEI or SPETI you can use the corresponding  `Streamflow`, `Balance ` and `Pet`  classes. They shares the same initialization philosophy; provide `ts/m_cal` **or** file paths, set `K`, `baseline`, `calculation_method` (`f_spi` on positive flows as Streamflow, f_spei for the P-PET balance and f_zscore for PET), and optionally a `threshold` aligned with your risk definition. Outputs include **SQI/SPEI/SPETI** (SPI-like arrays), **SIDI**, and **CDN** computed by using the 1-month scale of the obtained index.
+For drought analysis based on other standardiezed indices like  SQI, 
+SPEI or SPETI you can use the corresponding  `Streamflow`, `Balance ` and `Pet`  classes. 
+They shares the same initialization philosophy; provide `ts/m_cal` **or** file paths, 
+set `K`, `baseline`, `calculation_method` (`f_spi` on positive flows as Streamflow, `f_spei` for the P-PET balance 
+and `f_kde` or `f_zscore` to any type of data), and optionally a `threshold` aligned with your risk definition. Outputs include **SQI/SPEI/SPETI** (SPI-like arrays), **SIDI**, and **CDN** computed by using the 1-month scale of the obtained index.
+
 
 
 The **substantial differences** are limited to:
