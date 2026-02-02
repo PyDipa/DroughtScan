@@ -399,6 +399,150 @@ def f_spei(balance, stride, m, m_cal, tb1, tb2,gamma_params= None):
 
     return idmesi_all, spei, coef,(c, loc, scale) if gamma_params is None else None
 
+
+# FOR ALL DATA
+# ===================================================================
+#  NON-Parametric Fit (Kernel Density Estimation)
+# ===================================================================
+def f_kde(prec, stride, m, m_cal, tb1, tb2, kde_params=None):
+    """
+    SPI-like standardization using Gaussian KDE (Silverman bandwidth) instead of Gamma fit.
+
+    Args:
+        prec (np.ndarray): monthly series (n_months,)
+        stride (int): accumulation period (e.g., 18 for SPI18)
+        m (int): reference month (1-12)
+        m_cal (np.ndarray): calendar (n_months, 2) -> [month, year]
+        tb1 (int): baseline start year
+        tb2 (int): baseline end year
+        kde_params (dict|None): optional precomputed KDE info:
+            {
+              "kde": gaussian_kde object,
+              "qq_baseline": float (optional)
+            }
+
+    Returns:
+        idmesi_all (np.ndarray): indices of months for target month m in full period
+        spi (np.ndarray): standardized index values
+        coef (np.ndarray): polyfit coefficients for inverse mapping (deg=3)
+        out_params (dict|None): if kde_params is None, returns dict with KDE + metadata; else None
+    """
+
+    # ---- time bounds from calendar
+    t1 = int(m_cal[0, 1])
+    t2 = int(m_cal[-1, 1])
+    anni = np.unique(m_cal[:, 1]).astype(int)
+
+    try:
+        tb1_id = np.where(anni == tb1)[0][0]
+        tb2_id = np.where(anni == tb2)[0][0]
+    except IndexError:
+        raise ValueError(
+            "Baseline years not consistent with available calendar years "
+            f"({anni[0]} - {anni[-1]})."
+        )
+
+    # -------- BASELINE / WHOLE PERIOD selection (same logic as f_spi)
+    if stride == 1:
+        idmesi_base = get_month_indices(m, tb1, tb2, m_cal)
+        xbase = prec[idmesi_base]
+
+        # Whole period indices (robust to small calendar inconsistencies)
+        try:
+            idmesi_all = get_month_indices(m, t1, t2, m_cal)
+        except (IndexError, ValueError):
+            try:
+                idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
+            except (IndexError, ValueError):
+                try:
+                    idmesi_all = get_month_indices(m, t1 + 1, t2, m_cal)
+                except (IndexError, ValueError):
+                    idmesi_all = get_month_indices(m, t1 + 1, t2 - 1, m_cal)
+
+        x = prec[idmesi_all]
+
+    else:
+        idmesi_base = get_month_indices(m, tb1, tb2, m_cal)
+        a = np.array([idmesi_base - j for j in np.flip(np.arange(0, stride))]).T
+        xbase = np.array([np.sum(prec[row]) if np.all(row >= 0) else np.nan for row in a])
+
+        try:
+            idmesi_all = get_month_indices(m, t1, t2, m_cal)
+        except (IndexError, ValueError):
+            try:
+                idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
+            except (IndexError, ValueError):
+                try:
+                    idmesi_all = get_month_indices(m, t1 + 1, t2, m_cal)
+                except (IndexError, ValueError):
+                    idmesi_all = get_month_indices(m, t1 + 1, t2 - 1, m_cal)
+
+        a = np.array([idmesi_all - j for j in np.flip(np.arange(0, stride))]).T
+        x = np.array([np.sum(prec[row]) if np.all(row >= 0) else np.nan for row in a])
+
+    # ---------------- KDE-based SPI -----------------------------------
+    spi = np.full_like(x, np.nan, dtype=float)
+
+    # Maschere finite
+    finite_x = np.isfinite(x)
+    finite_xbase = np.isfinite(xbase)
+
+    # Check minimo dati
+    if not np.any(finite_x):
+        return idmesi_all, spi, np.array([np.nan, np.nan, np.nan, np.nan]), (
+            None if kde_params is None else None
+        )
+
+    # --- KDE fit (baseline) -----------------------------------------------
+    if kde_params is None:
+        xb = xbase[finite_xbase]
+
+        if xb.size < 10:
+            raise ValueError(
+                "Not enough baseline data to fit KDE. "
+                f"Available samples: {xb.size}"
+            )
+
+        kde = gaussian_kde(xb, bw_method="silverman")
+
+        out_params = {
+            "kde": kde,
+            "bw_factor": float(kde.factor),
+            "n_fit": int(xb.size),
+            "fit_domain": "xbase (finite, full R)"
+        }
+    else:
+        kde = kde_params.get("kde", None)
+        if kde is None:
+            raise ValueError("kde_params provided but missing key 'kde'.")
+        out_params = None
+
+    # --- CDF evaluation ---------------------------------------------------
+    # CDF(x) = ∫_{-∞}^{x} KDE(t) dt
+    Gx = np.full_like(x, np.nan, dtype=float)
+
+    for i, xi in enumerate(x):
+        if np.isfinite(xi):
+            Gx[i] = float(kde.integrate_box_1d(-np.inf, xi))
+
+    # --- Normal-score transform ------------------------------------------
+    # clipping per evitare ±inf (≈ ±4)
+    Gx = np.clip(Gx, 3.17e-5, 1 - 3.17e-5)
+    spi = np.round(norm.ppf(Gx), 4)
+
+    # -------- reverse fit (identico al tuo) -------------------------------
+    spibase = spi[tb1_id:tb2_id + 1]
+    coef = np.polyfit(
+        spibase[np.isfinite(xbase)],
+        xbase[np.isfinite(xbase)],
+        deg=3
+    )
+
+    return idmesi_all, spi, coef, out_params
+
+
+
+
 # FOR NORMAL DISTRIBUTED DATA
 # ===================================================================
 #  Z-Score Computation

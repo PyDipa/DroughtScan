@@ -109,7 +109,7 @@ class BaseDroughtAnalysis:
         """
         Spi_ts = np.full_like(self.ts, np.nan, dtype=float)
 
-        if self.calculation_method in [f_spi, f_spei]:
+        if self.calculation_method in [f_spi, f_spei,f_kde]:
             c2rspi = np.zeros((12, 4), dtype=float)
             way = 1
         elif self.calculation_method == f_zscore:
@@ -158,7 +158,7 @@ class BaseDroughtAnalysis:
         # Initialize SPI set and coefficients
         spiset = np.full((self.K, len(self.ts)), np.nan, dtype=float)
 
-        if self.calculation_method in [f_spi, f_spei]:
+        if self.calculation_method in [f_spi, f_spei,f_kde]:
             c2rspi = np.zeros((self.K, 12, 4), dtype=float)
         elif self.calculation_method == f_zscore:
             c2rspi = np.zeros((self.K, 12, 2), dtype=float)

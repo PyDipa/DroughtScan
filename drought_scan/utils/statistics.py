@@ -258,10 +258,25 @@ def test_standardization(data, groups=None):
 
     return results
 
-def fit_distribution_stats(data, dist="gamma", groups=None, shift_for_gamma=True):
+def fit_distribution_stats(data, dist="gamma", groups=None, shift_for_gamma=True,plot=True):
     """
-    Compute goodness-of-fit statistics for a chosen distribution
-    (gamma, pearson3, gaussian), optionally per group.
+    Compute goodness-of-fit statistics for a chosen probability distribution
+    (Gamma, Pearson type III, Gaussian, or KDE) on a given dataset.
+
+    IMPORTANT:
+    ----------
+    All goodness-of-fit metrics are computed on the ORIGINAL SCALE of the input data.
+    This function does NOT perform any temporal aggregation or transformation.
+
+    As a consequence:
+        - If `data` contains raw monthly values (e.g., monthly precipitation),
+          the results describe the suitability of the chosen distribution for
+          a 1-month time scale (e.g., SPI-1).
+        - The results are NOT directly transferable to other temporal scales
+          (e.g., SPI-3, SPI-6, SPI-12), which require prior aggregation of the data
+          at the corresponding scale.
+        - To assess distributional adequacy at longer accumulation periods,
+          the input data must be aggregated BEFORE calling this function.
 
     The function performs:
         - Skewness estimation
@@ -309,13 +324,15 @@ def fit_distribution_stats(data, dist="gamma", groups=None, shift_for_gamma=True
     -----
     - Gamma and Pearson III fits use 3 parameters (shape, loc, scale),
       Gaussian uses 2 (mu, sigma).
+    - For non-parametric KDE fits, AIC is not defined and is returned as NaN.
+
     - Data are automatically filtered for non-finite values.
     """
 
     data = np.asarray(data)
     dist = dist.lower()
 
-    allowed = {"gamma", "pearson3", "gaussian"}
+    allowed = {"gamma", "pearson3", "gaussian","kde"}
     if dist not in allowed:
         raise ValueError(f"`dist` must be one of {allowed}, got: {dist}")
 
@@ -366,6 +383,33 @@ def fit_distribution_stats(data, dist="gamma", groups=None, shift_for_gamma=True
 
             logpdf_vals = stats.pearson3.logpdf(data_used, shape, loc=loc, scale=scale)
 
+        elif dist == "kde":
+            data_used = dataset
+
+            # Fit KDE gaussiana con bandwidth Silverman
+            kde = stats.gaussian_kde(data_used, bw_method="silverman")
+
+            # KS test: confronta campione vs CDF stimata KDE
+            # Nota: kstest vuole una callable che prende x e ritorna CDF(x).
+            def kde_cdf(xx):
+                xx = np.atleast_1d(xx)
+                return np.array([kde.integrate_box_1d(-np.inf, v) for v in xx])
+
+            D, p_ks = stats.kstest(data_used, kde_cdf)
+
+            params = {
+                "bw_method": "silverman",
+                "bw_factor": float(kde.factor),
+                "n_fit": int(len(data_used)),
+                "kde_object": kde,  # occhio: non serializzabile facilmente
+            }
+
+            # "log-likelihood" (pseudo) per KDE
+            pdf_vals = kde.evaluate(data_used)
+            pdf_vals = np.clip(pdf_vals, 1e-300, None)  # evita log(0)
+            logpdf_vals = np.log(pdf_vals)
+
+
         else:  # Gaussian
             data_used = dataset
 
@@ -386,9 +430,18 @@ def fit_distribution_stats(data, dist="gamma", groups=None, shift_for_gamma=True
 
         # Number of parameters for AIC:
         #   Gamma / Pearson III: 3 parameters (shape, loc, scale)
-        #   Gaussian: 2 parameters (mu, sigma)
-        k = 3 if dist in {"gamma", "pearson3"} else 2
-        aic = 2 * k - 2 * log_likelihood
+        # #   Gaussian: 2 parameters (mu, sigma)
+        # k = 3 if dist in {"gamma", "pearson3"} else 2
+        # aic = 2 * k - 2 * log_likelihood
+        if dist in {"gamma", "pearson3"}:
+            k = 3
+            aic = 2 * k - 2 * log_likelihood
+        elif dist == "gaussian":
+            k = 2
+            aic = 2 * k - 2 * log_likelihood
+        else:  # kde
+            k = None
+            aic = np.nan
 
         # KS metric mapping
         error_pct = 100 * D
@@ -411,7 +464,43 @@ def fit_distribution_stats(data, dist="gamma", groups=None, shift_for_gamma=True
     # Case 1: no groups
     # --------------------------------------------------
     if groups is None:
+        res = analyze_single(data)
+        dist = res['distribution']
+        params = res["params"]
+
+        data_clean = np.asarray(data)
+        data_clean = data_clean[np.isfinite(data_clean)]
+        data_used = data_clean + 1 if dist == 'gamma' and shift_for_gamma else data_clean
+        if plot:
+            fig, ax = plt.subplots(figsize=(6, 4))
+            # Empirical density
+            ax.hist(data_used, bins="auto", density=True, alpha=0.4, label="Empirical")
+            # Theoretical PDF
+            q1, q99 = np.quantile(data_used, [0.01, 0.99])
+            x = np.linspace(q1, q99, 400)
+            if dist == "gamma":
+                pdf = stats.gamma.pdf(x, params["shape"], loc=params["loc"], scale=params["scale"])
+                label = f"Gamma fit"
+            elif dist == "pearson3":
+                skew = params["shape"]
+                pdf = stats.pearson3.pdf(x, skew, loc=params["loc"], scale=params["scale"])
+                label = f"Pearson III fit"
+            elif dist == "kde":
+                pdf = params["kde_object"].evaluate(x)
+                label = "KDE (Gaussian, Silverman)"
+
+            else:
+                pdf = stats.norm.pdf(x, loc=params["mu"], scale=params["sigma"])
+                label = f"Gaussian fit"
+
+            ax.plot(x, pdf, label=label)
+            ax.set_xlabel("Value")
+            ax.set_ylabel("Density")
+            ax.legend()
+            plt.tight_layout()
+
         return analyze_single(data)
+
 
     # --------------------------------------------------
     # Case 2: grouped analysis
