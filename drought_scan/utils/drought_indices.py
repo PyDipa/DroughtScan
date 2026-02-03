@@ -404,7 +404,7 @@ def f_spei(balance, stride, m, m_cal, tb1, tb2,gamma_params= None):
 # ===================================================================
 #  NON-Parametric Fit (Kernel Density Estimation)
 # ===================================================================
-def f_kde(prec, stride, m, m_cal, tb1, tb2, kde_params=None):
+def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=False, kde_params=None):
     """
     SPI-like standardization using Gaussian KDE (Silverman bandwidth) instead of Gamma fit.
 
@@ -415,6 +415,7 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, kde_params=None):
         m_cal (np.ndarray): calendar (n_months, 2) -> [month, year]
         tb1 (int): baseline start year
         tb2 (int): baseline end year
+        log_transform (bool): whether to use log-transform or not to the sample data
         kde_params (dict|None): optional precomputed KDE info:
             {
               "kde": gaussian_kde object,
@@ -481,12 +482,16 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, kde_params=None):
         x = np.array([np.sum(prec[row]) if np.all(row >= 0) else np.nan for row in a])
 
         # ---------------- KDE-based SPI -----------------------------------
+
+        # ---------------- KDE-based SPI -----------------------------------
     spi = np.full_like(x, np.nan, dtype=float)
-    x_log = np.log(x)
-    xbase_log = np.log(xbase)
     # Maschere finite
     finite_x = np.isfinite(x)
     finite_xbase = np.isfinite(xbase)
+
+    if log_transform:
+        x_log = np.log(x)
+        xbase_log = np.log(xbase)
 
     # Check minimo dati
     if not np.any(finite_x):
@@ -496,7 +501,7 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, kde_params=None):
 
     # --- KDE fit (baseline) -----------------------------------------------
     if kde_params is None:
-        xb = xbase_log[finite_xbase]
+        xb = xbase_log[finite_xbase] if log_transform else xbase[finite_xbase]
 
         if xb.size < 10:
             raise ValueError(
@@ -522,7 +527,8 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, kde_params=None):
     # CDF(x) = ∫_{-∞}^{x} KDE(t) dt
     Gx = np.full_like(x, np.nan, dtype=float)
 
-    for i, xi in enumerate(x_log):
+    xfull = x_log if log_transform else x
+    for i, xi in enumerate(xfull):
         if np.isfinite(xi):
             Gx[i] = float(kde.integrate_box_1d(-np.inf, xi))
 
