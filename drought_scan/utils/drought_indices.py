@@ -246,6 +246,15 @@ def f_spi(prec,stride,m,m_cal, tb1,tb2,gamma_params=None):
     # --------------------------- SPI -----------------------------------------
     # Calculate the monthly balance for the baseline and the entire period
     # Start with SPI: pre-allocate and calculate gamma distribution parameters
+    if xbase.size < 10:
+        warnings.warn(
+            (
+                "SPEI baseline sample size is very small "
+                f"(n={xbase.size}). Fit may be unreliable."
+            ),
+            category=RuntimeWarning,
+            stacklevel=2
+        )
     spi = np.empty(np.shape(x))
     spi[:] = np.nan
     if gamma_params is None:
@@ -371,6 +380,15 @@ def f_spei(balance, stride, m, m_cal, tb1, tb2,gamma_params= None):
 
     # ------------------------------ SPEI Calculation --------------------------------------
     # Fit Pearson distribution for Dbase
+    if xbase.size < 10:
+        warnings.warn(
+            (
+                "SPEI baseline sample size is very small "
+                f"(n={xbase.size}). Fit may be unreliable."
+            ),
+            category=RuntimeWarning,
+            stacklevel=2
+        )
     if gamma_params is None:
         c, loc, scale = pearson3.fit(xbase[np.isfinite(xbase)])  # Fit Pearson III distribution
         # c, loc, scale = fisk.fit(x[np.isfinite(x)])  # Fit Pearson III distribution
@@ -504,9 +522,13 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=False, kde_params=None
         xb = xbase_log[finite_xbase] if log_transform else xbase[finite_xbase]
 
         if xb.size < 10:
-            raise ValueError(
-                "Not enough baseline data to fit KDE. "
-                f"Available samples: {xb.size}"
+            warnings.warn(
+                (
+                    "KDE baseline sample size is very small "
+                    f"(n={xb.size}). Fit may be unreliable."
+                ),
+                category=RuntimeWarning,
+                stacklevel=2
             )
 
         kde = gaussian_kde(xb, bw_method="silverman")
