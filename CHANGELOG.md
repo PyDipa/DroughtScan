@@ -1,5 +1,5 @@
 # Changelog
-## [3.1.0] - 2025-10-10
+## [3.1.0] - 2026-02-13
 ### added
 - KDE-based distribution fitting in `fit_distribution_stats`, including KS goodness-of-fit and AIC evaluation.
 - New correlation tools:
