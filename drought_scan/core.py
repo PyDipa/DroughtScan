@@ -564,7 +564,7 @@ class BaseDroughtAnalysis:
 class Precipitation(BaseDroughtAnalysis):
     def __init__(self, start_baseline_year, end_baseline_year,basin_name,ts=None,m_cal=None,prec_path=None,
                  shape_path=None,shape=None, K=None,weight_index=None,
-                 calculation_method =f_spi,threshold=None, verbose=True, index_name = 'SPI'):
+                 calculation_method =f_kde,threshold=None, verbose=True, index_name = 'SPI'):
 
         """
         Initialize the Precipitation class.
@@ -825,6 +825,299 @@ class Precipitation(BaseDroughtAnalysis):
 
         return {"best_k": K_range[best_k], "col_best_weight": best_weight, "max_correlation": max_corr,'spi_corr':R2_spi}
 
+    def analyze_correlation_seasonal(self, streamflow, agg='quarter',plot=True,seasons=None):
+        """
+        Perform seasonal correlation analysis between precipitation-based SIDI and
+        streamflow-based SPI indices for different weighting schemes and K (month-scale) values.
+
+        Depending on the selected aggregation mode (`agg`), data are grouped by predefined
+        temporal windows (quarterly, semiannual, four-monthly) or by a custom set of months.
+
+        Args:
+            streamflow (Streamflow):
+                Instance of the Streamflow class to be compared with the precipitation dataset.
+            agg (str, optional):
+                Defines how data are temporally aggregated. Options are:
+
+                - **'quarter'** *(default)* →
+                  Standard climatological seasons:
+                  `{'DJF':[12,1,2], 'MAM':[3,4,5], 'JJA':[6,7,8], 'SON':[9,10,11]}`
+
+                - **'semiannual'** →
+                  Two six-month periods:
+                  `{'autwin':[9,10,11,12,1,2], 'springsum':[3,4,5,6,7,8]}`
+
+                - **'four-monthly'** →
+                  Three four-month periods:
+                  `{'ONDJ':[10,11,12,1], 'FMAM':[2,3,4,5], 'JJAS':[6,7,8,9]}`
+
+                -**'monthly**
+
+                - **'custom'** →
+                  User-defined aggregation; requires passing an additional dictionary
+                  through the `seasons` argument, e.g.:
+                  `seasons={'period1':[1,2,3,4], 'period2':[5,6,7,8]}`
+
+            plot (bool, optional):
+                If True, generate diagnostic plots showing the R²–K relationships
+                and the scatter plots for the best seasonal configurations. Default is True.
+
+            seasons (dict, optional):
+                Custom month mapping to use when `agg='custom'`.
+                The dictionary must have season names as keys and lists of month indices as values.
+
+        Returns:
+            dict:
+                Dictionary containing seasonal correlation results. Each key corresponds to
+                a season or aggregation period, and the value is a dictionary with the fields:
+
+                - `"best_k"` *(int)* → Optimal temporal aggregation window (K)
+                - `"col_best_weight"` *(int)* → Index of the best weighting function
+                - `"max_correlation"` *(float)* → Maximum R² value obtained
+                - `"R2_matrix"` *(np.ndarray)* → Full R² matrix for all K × weighting configurations
+
+                Example:
+                {
+                    "DJF": {"best_k": 3, "col_best_weight": 1, "max_correlation": 0.72, "R2_matrix": array(...)},
+                    "MAM": {...},
+                    ...
+                }
+
+        Notes:
+            The method automatically adjusts subplot layout and figure dimensions according
+            to the number of analyzed seasons. Overlapping months between precipitation
+            and streamflow datasets are used to ensure temporal consistency.
+
+        """
+
+        wlabel = [
+            'EW',
+            'Lin. DW',
+            'Log. DW',
+            'Lin. IW',
+            'Log. IW'
+        ]
+
+        if not isinstance(streamflow, BaseDroughtAnalysis):
+            raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
+
+        # --- Temporal overlap between Precipitation and Streamflow ---
+        self_indices, streamflow_indices = find_overlap(self.m_cal, streamflow.m_cal)
+        if len(self_indices) == 0 or len(streamflow_indices) == 0:
+            raise ValueError("No overlapping data found between Precipitation and Streamflow.")
+
+        # --- Subset to overlapping period ---
+        y = streamflow.spi_like_set[0, streamflow_indices]  # SPI-1 (streamflow)
+        spi_like_set = self.spi_like_set[:, self_indices]  # All SIDI configurations
+        m_cal_overlap = np.array([self.m_cal[i] for i in self_indices])
+        months_overlap = np.array([m[0] for m in m_cal_overlap], dtype=int)
+
+        K_range = np.arange(1, self.K + 1)
+
+        def _compute_corr(y_sub, spi_sub):
+            """Compute the R² correlation matrix for all K and weighting functions."""
+            MatCorr = []
+            for k in K_range:
+                W = generate_weights(k)
+                sidis = []
+                for doy in range(spi_sub.shape[1]):
+                    vec = spi_sub[:k, doy]
+                    sidis.append([weighted_metrics(vec, w)[0] for w in W.T])
+                sidis = np.array(sidis)
+
+                rr = []
+                for w in range(W.shape[1]):
+                    SIDI = (sidis[:, w] - np.nanmean(sidis[:, w])) / np.nanstd(sidis[:, w])
+                    valid_mask = np.isfinite(y_sub) & np.isfinite(SIDI)
+                    if np.sum(valid_mask) > 10:
+                        r = stats.pearsonr(SIDI[valid_mask], y_sub[valid_mask])[0]
+                        rr.append(r ** 2)
+                    else:
+                        rr.append(np.nan)
+                MatCorr.append(rr)
+            return np.array(MatCorr)
+
+        # --- Seasonal analysis ---
+        if agg == 'quarter':
+            seasons = {
+                "DJF": [12, 1, 2],
+                "MAM": [3, 4, 5],
+                "JJA": [6, 7, 8],
+                "SON": [9, 10, 11],
+            }
+            figsize1 = (14,10)
+            figsize2 = (10,11)
+            ncols,nrows = (2,2)
+
+        elif (agg == 'semiannual') | (agg =='biannual'):
+            seasons = {
+                "autwin": [9, 10, 11,12, 1, 2],
+                "springsum": [3, 4, 5,6, 7, 8],
+            }
+            figsize1 = (14,5)
+            figsize2 = (10,6)
+            ncols,nrows = (2,1)
+
+        elif agg == 'four-monthly':
+            seasons = {
+                "ONDG" : [10,11, 12, 1],
+                "FMAM" : [2,3,4,5],
+                "JJAS" : [6,7,8,9],
+            }
+            figsize1 = (16,6)
+            figsize2 = (15,6)
+            ncols,nrows = (3,1)
+
+        elif agg == 'monthly':
+            seasons = {'Jan':[1], 'Feb': [2], 'Mar': [3], 'Apr': [4], 'May': [5], 'Jun': [6],
+            'Jul': [7], 'Aug': [8], 'Sep': [9], 'Oct': [10], 'Nov': [11], 'Dec': [12]}
+            figsize1 = (7,6)
+            figsize2 = (7,6)
+            ncols,nrows = (1,1)
+
+        elif agg == 'custom':
+            seasons = seasons
+            layout_map = {1: (1, 1), 2: (1, 2), 3: (1, 3), 4: (2, 2), 5: (2, 3), 6: (2, 3)}
+            nrows, ncols = layout_map.get(len(seasons), (2, 3))
+            wid = np.round(5*ncols,1)
+            h = np.round(5*nrows,1)+0.5
+            figsize1,figsize2 =(wid+3,h),(wid,h)
+
+
+
+        # a check on the whole year
+        all_months = [m for lst in seasons.values() for m in lst]
+        unique = set(all_months)
+        missing = [m for m in range(1, 13) if m not in unique]
+        duplicates = [m for m in unique if all_months.count(m) > 1]
+
+        if missing:
+            print("allert: missing month(s):", missing)
+        if duplicates:
+            print("allert: duplicates month(s):", duplicates)
+
+
+        print("Starting correlation analysis (seasonal)...")
+        MatCorr = {}
+        for name, mlist in seasons.items():
+            idx = np.isin(months_overlap, mlist)
+            if np.count_nonzero(idx) <= 10:
+                continue
+
+            M = _compute_corr(y[idx], spi_like_set[:, idx])
+            max_corr = np.nanmax(M)
+            bk, bw = np.unravel_index(np.nanargmax(M), M.shape)
+
+            print(f" Season {name}: best R²={max_corr:.3f} (K={K_range[bk]}, Weight={wlabel[bw]})")
+
+            MatCorr[name] = {
+                "best_k": int(K_range[bk]),
+                "col_best_weight": int(bw),
+                "max_correlation": float(max_corr),
+                "R2_matrix": M,
+                "sample number": np.count_nonzero(idx)
+
+            }
+
+        # --- Plot 1: R² vs K for each weighting scheme ---
+        if agg =='monthly':
+            # ordine mesi: 'Jan'...'Dec'
+            months = list(calendar.month_abbr[1:])  # ['Jan','Feb',...,'Dec']
+
+            # vettore con i max R^2 mese per mese (NaN se manca)
+            r2max = np.array([MatCorr.get(m, {}).get('max_correlation', np.nan) for m in months], float)
+
+            # plot rapido (bar)
+            plt.figure(figsize=(7, 5))
+            plt.bar(months, r2max,0.5,alpha=0.8,facecolor='dimgrey',edgecolor='k')
+            plt.ylabel(r"$\max R^2$")
+            plt.ylim(0, 1)
+            plt.grid(axis='y', alpha=0.3)
+            plt.title(f"{self.basin_name} - Monthly max R² {self.SIDI_name} vs. {streamflow.index_name}1")
+            plt.axhline(y=0.4, linestyle='--',color='tab:orange',label='Significant limit')
+            plt.legend()
+            # plt.text(0.10,0.45, 'Significant limit', color='tab:orange',fontweight='bold',fontsize=14)
+
+            plt.tight_layout()
+            plt.show(block=False)
+
+        else:
+            if plot:
+                fig, ax = plt.subplots(figsize=figsize1, nrows=nrows, ncols=ncols)
+                ax = ax.ravel()
+                for i, name in enumerate(MatCorr.keys()):
+                    mat = MatCorr[name]['R2_matrix']
+                    for w in range(mat.shape[1]):
+                        ax[i].plot(mat[:, w], label=wlabel[w], linewidth=2)
+                    ax[i].grid()
+                    ax[i].set_xticks(np.arange(0,len(K_range),3))
+                    ax[i].set_xticklabels(K_range[0:-1:3])
+                    ax[i].tick_params(axis='x', labelsize=14)
+                    ax[i].tick_params(axis='y', labelsize=14)
+                    ax[i].set_ylabel(r"$R^2$", fontweight="bold", fontsize=16)
+                    ax[i].set_xlabel("Month-scale (K)", fontweight="bold", fontsize=16)
+                    ax[i].set_title(name, fontweight="bold", fontsize=16)
+                    if i==0:
+                        ax[i].legend(loc=3)
+                fig.suptitle(
+                    f"{self.basin_name} - Correlation Analysis: {self.SIDI_name} vs. {streamflow.index_name}1",
+                    fontsize=16, fontweight="bold"
+                )
+                plt.tight_layout()
+                plt.show(block=False)
+
+            # --- Plot 2: Scatter plots (best configuration per season) ---
+                if len(seasons)>5:
+                    if cmc is not None:
+                        c = plt.get_cmap(cmc.romaO, len(seasons))
+                    else:
+                        c = plt.get_cmap('twilight_shifted', len(seasons))
+                else:
+                    c = ['tab:olive', 'tab:brown', 'tab:orange', 'tab:cyan','tab:purple']
+                fig, ax = plt.subplots(figsize=figsize2, nrows=nrows, ncols=ncols)
+                ax = ax.ravel()
+
+                for i, (season, vals) in enumerate(MatCorr.items()):
+                    best_k = vals['best_k']
+                    best_weight = vals['col_best_weight']
+
+                    W = generate_weights(best_k)
+                    sidi = []
+                    for doy in range(spi_like_set.shape[1]):
+                        vec = spi_like_set[:best_k, doy]
+                        sidi.append(weighted_metrics(vec, W[:, best_weight])[0])
+                    sidi = np.array(sidi)
+                    SIDI = (sidi - np.nanmean(sidi)) / np.nanstd(sidi)
+
+                    idx = np.isin(months_overlap, seasons[season])
+                    valid = np.isfinite(SIDI[idx]) & np.isfinite(y[idx])
+                    if np.count_nonzero(valid) > 10:
+                        r, _ = stats.pearsonr(SIDI[idx][valid], y[idx][valid])
+                        r2 = r ** 2
+                    else:
+                        r2 = np.nan
+
+                    ax[i].plot(SIDI[idx], y[idx], 'o', color=c[i], alpha=0.4, label=f'$R^2$ = {np.round(r2, 2)} \n K ={best_k}; {wlabel[best_weight]}')
+                    ax[i].plot(np.arange(-3, 4), np.arange(-3, 4), '--', color='grey')
+                    ax[i].tick_params(axis='x', labelsize=14)
+                    ax[i].tick_params(axis='y', labelsize=14)
+                    ax[i].grid()
+                    ax[i].set_title(season, fontweight="bold", fontsize=16)
+                    ax[i].set_ylabel(f"{streamflow.index_name}1", fontweight="bold", fontsize=16)
+                    ax[i].set_xlabel(f"{self.SIDI_name}", fontweight="bold", fontsize=16)
+                    ax[i].legend(fontsize=12)
+
+                fig.suptitle(
+                    f"{self.basin_name} - {self.SIDI_name} vs. {streamflow.index_name}1 — Best seasonal configurations",
+                    fontsize=14, fontweight="bold"
+                )
+                if i < ncols*nrows-1:
+                    fig.delaxes(ax[-1])
+                plt.tight_layout()
+                plt.show(block=False)
+
+        return MatCorr
+
     def plot_covariates(self, streamflow, year_ext=None,split_plot=False):
 
         if not isinstance(streamflow, BaseDroughtAnalysis):
@@ -973,7 +1266,7 @@ class Streamflow(BaseDroughtAnalysis):
     def __init__(self, start_baseline_year, end_baseline_year,basin_name,
                  ts=None, m_cal=None, shape=None, shape_path=None,
                  data_path=None, K=36, weight_index=2,
-                 calculation_method=f_spi, threshold=-1, index_name='SQI'):
+                 calculation_method=f_kde, threshold=-1, index_name='SQI'):
         """
         Initialize the Streamflow class for drought analysis using streamflow data (e.g., river discharge).
 
@@ -1334,7 +1627,7 @@ class Streamflow(BaseDroughtAnalysis):
 class Pet(BaseDroughtAnalysis):
     def __init__(self, start_baseline_year, end_baseline_year, basin_name, ts=None, m_cal=None, data_path=None,
                  shape_path=None, shape=None, K=None, weight_index=None,
-                 calculation_method =f_zscore,threshold=None, index_name = 'SPETI',verbose=True):
+                 calculation_method =f_kde,threshold=None, index_name = 'SPETI',verbose=True):
         """
         Initialize the Pet class.
 
@@ -1545,12 +1838,451 @@ class Pet(BaseDroughtAnalysis):
 
         return R2
 
+    def analyze_correlation(self, streamflow,plot=True,plot_mode="all"):
+        """
+        Analyze correlations between Precipitation SIDI and Streamflow SPI for different weightings and K values.
+
+        Args:
+            streamflow (Streamflow): Instance of the Streamflow class.
+            plot (bool, optional): Whether to generate a correlation plot and call `_plot_scan`. Default is True.
+            plot_mode (str): 'all' (default), 'seasonal', 'monthly'.
+
+        Returns:
+            dict: Contains the best K, weight configuration, and maximum correlation value.
+                - "best_k" (int): Optimal month-scale (K).
+                - "col_best_weight" (int): Index of the best weight configuration.
+                - "max_correlation" (float): Maximum R^2 value achieved.
+        """
+        wlabel = ['equal weights (ew)', 'linearly decreasing weights (ldw)',
+                  ' logarithmically decreasing weights (lgdw)', 'linearly increasing weights (liw)',
+                  'logarithmically increasing weights (lgiw)']
+
+        if not isinstance(streamflow, BaseDroughtAnalysis):
+            raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
+
+        # find the temporal overlap between Precipitation and Streamflow
+        self_indices, streamflow_indices = find_overlap(self.m_cal,streamflow.m_cal)
+        if len(self_indices) == 0 or len(streamflow_indices) == 0:
+            raise ValueError("No overlapping data found between Precipitation and Streamflow.")
+
+        # Subset di dati per l'overlapping time
+        y = streamflow.spi_like_set[0, streamflow_indices]  # SPI-1 dello streamflow
+        spi_like_set = self.spi_like_set[:,self_indices]  # Tutte le configurazioni SIDI
+
+
+        K_range = np.arange(1, self.K + 1)
+        MatCorr = []
+
+        print("Starting correlation analysis...")
+        for k in K_range:
+            W = generate_weights(k)
+            # print("Calculating Ensemble Weighted Mean for each weighting function...")
+            sidis = []  # SPI ensemble mean for each day
+            for doy in range(len(spi_like_set[0])):#in range(self._baseline_indices()[0], self._baseline_indices()[1] + 1):
+                vec = spi_like_set[:k, doy]
+                sidis.append([weighted_metrics(vec, w)[0] for w in W.T])
+            sidis = np.array(sidis)
+
+            rr = []  # Correlations for each weighting function
+            for w in range(len(W.T)):
+                # Standardize SIDI sull'intero periodo perché l'overlapping è troppo variabile
+                SIDI = (sidis[:, w] - np.nanmean(sidis[:, w])) / np.nanstd(sidis[:, w])
+                valid_mask = np.isfinite(y) & np.isfinite(SIDI)
+                r = stats.pearsonr(SIDI[valid_mask], y[valid_mask])[0]
+                rr.append(r ** 2)
+                # print(f"K={k}, Weight {w + 1}: R^2 = {np.round(r ** 2, 3)}")
+            MatCorr.append(rr)
+        # looking to the single SQI - SPI correlation
+        rr_spi = []
+        for j,spi in enumerate(spi_like_set):
+            valid_mask = np.isfinite(y) & np.isfinite(spi)
+            r = stats.pearsonr(spi[valid_mask], y[valid_mask])[0]
+            rr_spi.append(r ** 2)
+        rr_spi = np.array(rr_spi)
+        ii = np.argsort(rr_spi)[::-1]
+        R2_spi = np.array([np.arange(1,self.K+1)[ii],rr_spi[ii]]).T
+
+        MatCorr = np.array(MatCorr)
+        # Find the best K and weight index
+        max_corr = np.max(MatCorr)
+        best_k, best_weight = np.unravel_index(np.argmax(MatCorr), MatCorr.shape)
+
+
+        print(f"Best correlation: R2  = {max_corr:.3f} (K={K_range[best_k]}, Weight={wlabel[best_weight]})")
+        W = generate_weights(K_range[best_k])
+        sidi = []  # SPI ensemble mean for each day
+        for doy in range(len(spi_like_set[0])):  # in range(self._baseline_indices()[0], self._baseline_indices()[1] + 1):
+            vec = spi_like_set[:K_range[best_k], doy]
+            sidi.append(weighted_metrics(vec, W[:,best_weight])[0])
+        sidi = np.array(sidi)
+
+        SIDI = (sidi - np.nanmean(sidi)) / np.nanstd(sidi)
+
+        # --- plots ----------------------------------------------------------------
+
+        if plot == True:
+
+            plt.figure(figsize=(10, 5))
+            # weight_labels = ["Equal", "Linear Shallow", "Geom Shallow", "Linear Deep", "Geom Deep"]
+            for w in range(len(W.T)):
+                plt.plot(MatCorr[:, w], label=wlabel[w], linewidth=2)
+            plt.grid()
+            plt.legend(loc=3)
+            plt.xticks(np.arange(len(K_range)), K_range)
+            plt.ylabel(r"$R^2$", fontweight="bold", fontsize=12)
+            plt.xlabel("Month-scale (K)", fontweight="bold", fontsize=12)
+            plt.title(f"Correlation Analysis: {self.SIDI_name}  vs.  {streamflow.index_name}1", fontsize=14, fontweight="bold")
+            plt.tight_layout()
+            plt.show(block=False)
+
+
+
+
+            # basic scan plot
+            self.plot_scan(optimal_k=K_range[best_k], weight_index=best_weight)
+
+            plt.figure(figsize=(7, 7))
+            if plot_mode == "all":
+                plt.plot(SIDI, y, 'ok', markerfacecolor='yellow', linewidth=2)
+            elif plot_mode == "seasonal":
+                g1 = [4, 5, 6, 7, 8, 9]
+                g2 = [10,11, 12, 1, 2, 3]
+                # summer ------------------------------------------------------
+                m1summer = np.isin(self.m_cal[self_indices, 0], g1)
+                m2summer = np.isin(streamflow.m_cal[streamflow_indices, 0], g1)
+                f  = np.isfinite(SIDI[m1summer]) & np.isfinite(y[m2summer])
+                rho,pval = stats.pearsonr(SIDI[m1summer][f], y[m2summer][f])
+                rho = 0 if pval>0.5 else rho
+                plt.plot(SIDI[m1summer], y[m2summer], 'o', color='tab:olive', alpha=0.4, label=f'Apr-Oct; $R^2$ = {np.round(rho**2,2)}')
+                # winter ------------------------------------------------------
+                m1winter = np.isin(self.m_cal[self_indices, 0], g2)
+                m2winter = np.isin(streamflow.m_cal[streamflow_indices, 0], g2)
+                f = np.isfinite(SIDI[m1winter]) & np.isfinite(y[m2winter])
+                rho,pval = stats.pearsonr(SIDI[m1winter][f], y[m2winter][f])
+                rho = 0 if pval>0.5 else rho
+                plt.plot(SIDI[m1winter], y[m2winter], 'o', color='tab:blue', alpha=0.4, label=f'Nov-Mar; $R^2$ = {np.round(rho**2,2)}')
+            elif plot_mode == 'monthly':
+                if cmc is not None:
+                    c = plt.get_cmap(cmc.romaO, 12)
+                else:
+                    c = plt.get_cmap('twilight_shifted', 12)
+
+                for month in range(1, 13):
+                    m1 = np.where(self.m_cal[self_indices, 0] == month)[0]
+                    m2 = np.where(streamflow.m_cal[streamflow_indices, 0] == month)[0]
+                    plt.plot(SIDI[m1],y[m2], 'o',color=c(month/12),label = f'month {month}')
+
+
+            plt.plot(np.arange(-3,4),np.arange(-3,4),'--',color='grey')
+            plt.grid()
+            plt.ylabel(f"{streamflow.index_name}1 ", fontweight="bold", fontsize=12)
+            plt.xlabel(f"{self.SIDI_name}", fontweight="bold", fontsize=12)
+            plt.title(f"{self.SIDI_name} vs.  {streamflow.index_name}1 . K={best_k} - weighting function n. {best_weight}; $R^2$ = {max_corr:.2f}", fontsize=14, fontweight="bold")
+
+            plt.legend(fontsize=12)
+            plt.tight_layout()
+            plt.show(block=False)
+
+        return {"best_k": K_range[best_k], "col_best_weight": best_weight, "max_correlation": max_corr,'spi_corr':R2_spi}
+
+    def analyze_correlation_seasonal(self, streamflow, agg='quarter',plot=True,seasons=None):
+        """
+        Perform seasonal correlation analysis between precipitation-based SIDI and
+        streamflow-based SPI indices for different weighting schemes and K (month-scale) values.
+
+        Depending on the selected aggregation mode (`agg`), data are grouped by predefined
+        temporal windows (quarterly, semiannual, four-monthly) or by a custom set of months.
+
+        Args:
+            streamflow (Streamflow):
+                Instance of the Streamflow class to be compared with the precipitation dataset.
+            agg (str, optional):
+                Defines how data are temporally aggregated. Options are:
+
+                - **'quarter'** *(default)* →
+                  Standard climatological seasons:
+                  `{'DJF':[12,1,2], 'MAM':[3,4,5], 'JJA':[6,7,8], 'SON':[9,10,11]}`
+
+                - **'semiannual'** →
+                  Two six-month periods:
+                  `{'autwin':[9,10,11,12,1,2], 'springsum':[3,4,5,6,7,8]}`
+
+                - **'four-monthly'** →
+                  Three four-month periods:
+                  `{'ONDJ':[10,11,12,1], 'FMAM':[2,3,4,5], 'JJAS':[6,7,8,9]}`
+
+                -**'monthly**
+
+                - **'custom'** →
+                  User-defined aggregation; requires passing an additional dictionary
+                  through the `seasons` argument, e.g.:
+                  `seasons={'period1':[1,2,3,4], 'period2':[5,6,7,8]}`
+
+            plot (bool, optional):
+                If True, generate diagnostic plots showing the R²–K relationships
+                and the scatter plots for the best seasonal configurations. Default is True.
+
+            seasons (dict, optional):
+                Custom month mapping to use when `agg='custom'`.
+                The dictionary must have season names as keys and lists of month indices as values.
+
+        Returns:
+            dict:
+                Dictionary containing seasonal correlation results. Each key corresponds to
+                a season or aggregation period, and the value is a dictionary with the fields:
+
+                - `"best_k"` *(int)* → Optimal temporal aggregation window (K)
+                - `"col_best_weight"` *(int)* → Index of the best weighting function
+                - `"max_correlation"` *(float)* → Maximum R² value obtained
+                - `"R2_matrix"` *(np.ndarray)* → Full R² matrix for all K × weighting configurations
+
+                Example:
+                {
+                    "DJF": {"best_k": 3, "col_best_weight": 1, "max_correlation": 0.72, "R2_matrix": array(...)},
+                    "MAM": {...},
+                    ...
+                }
+
+        Notes:
+            The method automatically adjusts subplot layout and figure dimensions according
+            to the number of analyzed seasons. Overlapping months between precipitation
+            and streamflow datasets are used to ensure temporal consistency.
+
+        """
+
+        wlabel = [
+            'EW',
+            'Lin. DW',
+            'Log. DW',
+            'Lin. IW',
+            'Log. IW'
+        ]
+
+        if not isinstance(streamflow, BaseDroughtAnalysis):
+            raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
+
+        # --- Temporal overlap between Precipitation and Streamflow ---
+        self_indices, streamflow_indices = find_overlap(self.m_cal, streamflow.m_cal)
+        if len(self_indices) == 0 or len(streamflow_indices) == 0:
+            raise ValueError("No overlapping data found between Precipitation and Streamflow.")
+
+        # --- Subset to overlapping period ---
+        y = streamflow.spi_like_set[0, streamflow_indices]  # SPI-1 (streamflow)
+        spi_like_set = self.spi_like_set[:, self_indices]  # All SIDI configurations
+        m_cal_overlap = np.array([self.m_cal[i] for i in self_indices])
+        months_overlap = np.array([m[0] for m in m_cal_overlap], dtype=int)
+
+        K_range = np.arange(1, self.K + 1)
+
+        def _compute_corr(y_sub, spi_sub):
+            """Compute the R² correlation matrix for all K and weighting functions."""
+            MatCorr = []
+            for k in K_range:
+                W = generate_weights(k)
+                sidis = []
+                for doy in range(spi_sub.shape[1]):
+                    vec = spi_sub[:k, doy]
+                    sidis.append([weighted_metrics(vec, w)[0] for w in W.T])
+                sidis = np.array(sidis)
+
+                rr = []
+                for w in range(W.shape[1]):
+                    SIDI = (sidis[:, w] - np.nanmean(sidis[:, w])) / np.nanstd(sidis[:, w])
+                    valid_mask = np.isfinite(y_sub) & np.isfinite(SIDI)
+                    if np.sum(valid_mask) > 10:
+                        r = stats.pearsonr(SIDI[valid_mask], y_sub[valid_mask])[0]
+                        rr.append(r ** 2)
+                    else:
+                        rr.append(np.nan)
+                MatCorr.append(rr)
+            return np.array(MatCorr)
+
+        # --- Seasonal analysis ---
+        if agg == 'quarter':
+            seasons = {
+                "DJF": [12, 1, 2],
+                "MAM": [3, 4, 5],
+                "JJA": [6, 7, 8],
+                "SON": [9, 10, 11],
+            }
+            figsize1 = (14,10)
+            figsize2 = (10,11)
+            ncols,nrows = (2,2)
+
+        elif (agg == 'semiannual') | (agg =='biannual'):
+            seasons = {
+                "autwin": [9, 10, 11,12, 1, 2],
+                "springsum": [3, 4, 5,6, 7, 8],
+            }
+            figsize1 = (14,5)
+            figsize2 = (10,6)
+            ncols,nrows = (2,1)
+
+        elif agg == 'four-monthly':
+            seasons = {
+                "ONDG" : [10,11, 12, 1],
+                "FMAM" : [2,3,4,5],
+                "JJAS" : [6,7,8,9],
+            }
+            figsize1 = (16,6)
+            figsize2 = (15,6)
+            ncols,nrows = (3,1)
+
+        elif agg == 'monthly':
+            seasons = {'Jan':[1], 'Feb': [2], 'Mar': [3], 'Apr': [4], 'May': [5], 'Jun': [6],
+            'Jul': [7], 'Aug': [8], 'Sep': [9], 'Oct': [10], 'Nov': [11], 'Dec': [12]}
+            figsize1 = (7,6)
+            figsize2 = (7,6)
+            ncols,nrows = (1,1)
+
+        elif agg == 'custom':
+            seasons = seasons
+            layout_map = {1: (1, 1), 2: (1, 2), 3: (1, 3), 4: (2, 2), 5: (2, 3), 6: (2, 3)}
+            nrows, ncols = layout_map.get(len(seasons), (2, 3))
+            wid = np.round(5*ncols,1)
+            h = np.round(5*nrows,1)+0.5
+            figsize1,figsize2 =(wid+3,h),(wid,h)
+
+
+
+        # a check on the whole year
+        all_months = [m for lst in seasons.values() for m in lst]
+        unique = set(all_months)
+        missing = [m for m in range(1, 13) if m not in unique]
+        duplicates = [m for m in unique if all_months.count(m) > 1]
+
+        if missing:
+            print("allert: missing month(s):", missing)
+        if duplicates:
+            print("allert: duplicates month(s):", duplicates)
+
+
+        print("Starting correlation analysis (seasonal)...")
+        MatCorr = {}
+        for name, mlist in seasons.items():
+            idx = np.isin(months_overlap, mlist)
+            if np.count_nonzero(idx) <= 10:
+                continue
+
+            M = _compute_corr(y[idx], spi_like_set[:, idx])
+            max_corr = np.nanmax(M)
+            bk, bw = np.unravel_index(np.nanargmax(M), M.shape)
+
+            print(f" Season {name}: best R²={max_corr:.3f} (K={K_range[bk]}, Weight={wlabel[bw]})")
+
+            MatCorr[name] = {
+                "best_k": int(K_range[bk]),
+                "col_best_weight": int(bw),
+                "max_correlation": float(max_corr),
+                "R2_matrix": M,
+                "sample number": np.count_nonzero(idx)
+
+            }
+
+        # --- Plot 1: R² vs K for each weighting scheme ---
+        if agg =='monthly':
+            # ordine mesi: 'Jan'...'Dec'
+            months = list(calendar.month_abbr[1:])  # ['Jan','Feb',...,'Dec']
+
+            # vettore con i max R^2 mese per mese (NaN se manca)
+            r2max = np.array([MatCorr.get(m, {}).get('max_correlation', np.nan) for m in months], float)
+
+            # plot rapido (bar)
+            plt.figure(figsize=(7, 5))
+            plt.bar(months, r2max,0.5,alpha=0.8,facecolor='dimgrey',edgecolor='k')
+            plt.ylabel(r"$\max R^2$")
+            plt.ylim(0, 1)
+            plt.grid(axis='y', alpha=0.3)
+            plt.title(f"{self.basin_name} - Monthly max R² {self.SIDI_name} vs. {streamflow.index_name}1")
+            plt.axhline(y=0.4, linestyle='--',color='tab:orange',label='Significant limit')
+            plt.legend()
+            # plt.text(0.10,0.45, 'Significant limit', color='tab:orange',fontweight='bold',fontsize=14)
+
+            plt.tight_layout()
+            plt.show(block=False)
+
+        else:
+            if plot:
+                fig, ax = plt.subplots(figsize=figsize1, nrows=nrows, ncols=ncols)
+                ax = ax.ravel()
+                for i, name in enumerate(MatCorr.keys()):
+                    mat = MatCorr[name]['R2_matrix']
+                    for w in range(mat.shape[1]):
+                        ax[i].plot(mat[:, w], label=wlabel[w], linewidth=2)
+                    ax[i].grid()
+                    ax[i].set_xticks(np.arange(0,len(K_range),3))
+                    ax[i].set_xticklabels(K_range[0:-1:3])
+                    ax[i].tick_params(axis='x', labelsize=14)
+                    ax[i].tick_params(axis='y', labelsize=14)
+                    ax[i].set_ylabel(r"$R^2$", fontweight="bold", fontsize=16)
+                    ax[i].set_xlabel("Month-scale (K)", fontweight="bold", fontsize=16)
+                    ax[i].set_title(name, fontweight="bold", fontsize=16)
+                    if i==0:
+                        ax[i].legend(loc=3)
+                fig.suptitle(
+                    f"{self.basin_name} - Correlation Analysis: {self.SIDI_name} vs. {streamflow.index_name}1",
+                    fontsize=16, fontweight="bold"
+                )
+                plt.tight_layout()
+                plt.show(block=False)
+
+            # --- Plot 2: Scatter plots (best configuration per season) ---
+                if len(seasons)>5:
+                    if cmc is not None:
+                        c = plt.get_cmap(cmc.romaO, len(seasons))
+                    else:
+                        c = plt.get_cmap('twilight_shifted', len(seasons))
+                else:
+                    c = ['tab:olive', 'tab:brown', 'tab:orange', 'tab:cyan','tab:purple']
+                fig, ax = plt.subplots(figsize=figsize2, nrows=nrows, ncols=ncols)
+                ax = ax.ravel()
+
+                for i, (season, vals) in enumerate(MatCorr.items()):
+                    best_k = vals['best_k']
+                    best_weight = vals['col_best_weight']
+
+                    W = generate_weights(best_k)
+                    sidi = []
+                    for doy in range(spi_like_set.shape[1]):
+                        vec = spi_like_set[:best_k, doy]
+                        sidi.append(weighted_metrics(vec, W[:, best_weight])[0])
+                    sidi = np.array(sidi)
+                    SIDI = (sidi - np.nanmean(sidi)) / np.nanstd(sidi)
+
+                    idx = np.isin(months_overlap, seasons[season])
+                    valid = np.isfinite(SIDI[idx]) & np.isfinite(y[idx])
+                    if np.count_nonzero(valid) > 10:
+                        r, _ = stats.pearsonr(SIDI[idx][valid], y[idx][valid])
+                        r2 = r ** 2
+                    else:
+                        r2 = np.nan
+
+                    ax[i].plot(SIDI[idx], y[idx], 'o', color=c[i], alpha=0.4, label=f'$R^2$ = {np.round(r2, 2)} \n K ={best_k}; {wlabel[best_weight]}')
+                    ax[i].plot(np.arange(-3, 4), np.arange(-3, 4), '--', color='grey')
+                    ax[i].tick_params(axis='x', labelsize=14)
+                    ax[i].tick_params(axis='y', labelsize=14)
+                    ax[i].grid()
+                    ax[i].set_title(season, fontweight="bold", fontsize=16)
+                    ax[i].set_ylabel(f"{streamflow.index_name}1", fontweight="bold", fontsize=16)
+                    ax[i].set_xlabel(f"{self.SIDI_name}", fontweight="bold", fontsize=16)
+                    ax[i].legend(fontsize=12)
+
+                fig.suptitle(
+                    f"{self.basin_name} - {self.SIDI_name} vs. {streamflow.index_name}1 — Best seasonal configurations",
+                    fontsize=14, fontweight="bold"
+                )
+                if i < ncols*nrows-1:
+                    fig.delaxes(ax[-1])
+                plt.tight_layout()
+                plt.show(block=False)
+
+        return MatCorr
 
 
 class Balance(BaseDroughtAnalysis):
     def __init__(self, start_baseline_year, end_baseline_year, basin_name, prec_path=None, pet_path=None,
                  shape_path=None, shape=None, ts=None, m_cal=None, K=None,
-                 calculation_method=f_spei, threshold=None, index_name = 'SPEI',verbose=True):
+                 calculation_method=f_kde, threshold=None, index_name = 'SPEI',verbose=True):
         """
         Initialize the Balance class for calculating water balance (precipitation - PET).
 
@@ -1790,12 +2522,453 @@ class Balance(BaseDroughtAnalysis):
 
         return R2
 
+    def analyze_correlation(self, streamflow,plot=True,plot_mode="all"):
+        """
+        Analyze correlations between Precipitation SIDI and Streamflow SPI for different weightings and K values.
+
+        Args:
+            streamflow (Streamflow): Instance of the Streamflow class.
+            plot (bool, optional): Whether to generate a correlation plot and call `_plot_scan`. Default is True.
+            plot_mode (str): 'all' (default), 'seasonal', 'monthly'.
+
+        Returns:
+            dict: Contains the best K, weight configuration, and maximum correlation value.
+                - "best_k" (int): Optimal month-scale (K).
+                - "col_best_weight" (int): Index of the best weight configuration.
+                - "max_correlation" (float): Maximum R^2 value achieved.
+        """
+        wlabel = ['equal weights (ew)', 'linearly decreasing weights (ldw)',
+                  ' logarithmically decreasing weights (lgdw)', 'linearly increasing weights (liw)',
+                  'logarithmically increasing weights (lgiw)']
+
+        if not isinstance(streamflow, BaseDroughtAnalysis):
+            raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
+
+        # find the temporal overlap between Precipitation and Streamflow
+        self_indices, streamflow_indices = find_overlap(self.m_cal,streamflow.m_cal)
+        if len(self_indices) == 0 or len(streamflow_indices) == 0:
+            raise ValueError("No overlapping data found between Precipitation and Streamflow.")
+
+        # Subset di dati per l'overlapping time
+        y = streamflow.spi_like_set[0, streamflow_indices]  # SPI-1 dello streamflow
+        spi_like_set = self.spi_like_set[:,self_indices]  # Tutte le configurazioni SIDI
+
+
+        K_range = np.arange(1, self.K + 1)
+        MatCorr = []
+
+        print("Starting correlation analysis...")
+        for k in K_range:
+            W = generate_weights(k)
+            # print("Calculating Ensemble Weighted Mean for each weighting function...")
+            sidis = []  # SPI ensemble mean for each day
+            for doy in range(len(spi_like_set[0])):#in range(self._baseline_indices()[0], self._baseline_indices()[1] + 1):
+                vec = spi_like_set[:k, doy]
+                sidis.append([weighted_metrics(vec, w)[0] for w in W.T])
+            sidis = np.array(sidis)
+
+            rr = []  # Correlations for each weighting function
+            for w in range(len(W.T)):
+                # Standardize SIDI sull'intero periodo perché l'overlapping è troppo variabile
+                SIDI = (sidis[:, w] - np.nanmean(sidis[:, w])) / np.nanstd(sidis[:, w])
+                valid_mask = np.isfinite(y) & np.isfinite(SIDI)
+                r = stats.pearsonr(SIDI[valid_mask], y[valid_mask])[0]
+                rr.append(r ** 2)
+                # print(f"K={k}, Weight {w + 1}: R^2 = {np.round(r ** 2, 3)}")
+            MatCorr.append(rr)
+        # looking to the single SQI - SPI correlation
+        rr_spi = []
+        for j,spi in enumerate(spi_like_set):
+            valid_mask = np.isfinite(y) & np.isfinite(spi)
+            r = stats.pearsonr(spi[valid_mask], y[valid_mask])[0]
+            rr_spi.append(r ** 2)
+        rr_spi = np.array(rr_spi)
+        ii = np.argsort(rr_spi)[::-1]
+        R2_spi = np.array([np.arange(1,self.K+1)[ii],rr_spi[ii]]).T
+
+        MatCorr = np.array(MatCorr)
+        # Find the best K and weight index
+        max_corr = np.max(MatCorr)
+        best_k, best_weight = np.unravel_index(np.argmax(MatCorr), MatCorr.shape)
+
+
+        print(f"Best correlation: R2  = {max_corr:.3f} (K={K_range[best_k]}, Weight={wlabel[best_weight]})")
+        W = generate_weights(K_range[best_k])
+        sidi = []  # SPI ensemble mean for each day
+        for doy in range(len(spi_like_set[0])):  # in range(self._baseline_indices()[0], self._baseline_indices()[1] + 1):
+            vec = spi_like_set[:K_range[best_k], doy]
+            sidi.append(weighted_metrics(vec, W[:,best_weight])[0])
+        sidi = np.array(sidi)
+
+        SIDI = (sidi - np.nanmean(sidi)) / np.nanstd(sidi)
+
+        # --- plots ----------------------------------------------------------------
+
+        if plot == True:
+
+            plt.figure(figsize=(10, 5))
+            # weight_labels = ["Equal", "Linear Shallow", "Geom Shallow", "Linear Deep", "Geom Deep"]
+            for w in range(len(W.T)):
+                plt.plot(MatCorr[:, w], label=wlabel[w], linewidth=2)
+            plt.grid()
+            plt.legend(loc=3)
+            plt.xticks(np.arange(len(K_range)), K_range)
+            plt.ylabel(r"$R^2$", fontweight="bold", fontsize=12)
+            plt.xlabel("Month-scale (K)", fontweight="bold", fontsize=12)
+            plt.title(f"Correlation Analysis: {self.SIDI_name}  vs.  {streamflow.index_name}1", fontsize=14, fontweight="bold")
+            plt.tight_layout()
+            plt.show(block=False)
+
+
+
+
+            # basic scan plot
+            self.plot_scan(optimal_k=K_range[best_k], weight_index=best_weight)
+
+            plt.figure(figsize=(7, 7))
+            if plot_mode == "all":
+                plt.plot(SIDI, y, 'ok', markerfacecolor='yellow', linewidth=2)
+            elif plot_mode == "seasonal":
+                g1 = [4, 5, 6, 7, 8, 9]
+                g2 = [10,11, 12, 1, 2, 3]
+                # summer ------------------------------------------------------
+                m1summer = np.isin(self.m_cal[self_indices, 0], g1)
+                m2summer = np.isin(streamflow.m_cal[streamflow_indices, 0], g1)
+                f  = np.isfinite(SIDI[m1summer]) & np.isfinite(y[m2summer])
+                rho,pval = stats.pearsonr(SIDI[m1summer][f], y[m2summer][f])
+                rho = 0 if pval>0.5 else rho
+                plt.plot(SIDI[m1summer], y[m2summer], 'o', color='tab:olive', alpha=0.4, label=f'Apr-Oct; $R^2$ = {np.round(rho**2,2)}')
+                # winter ------------------------------------------------------
+                m1winter = np.isin(self.m_cal[self_indices, 0], g2)
+                m2winter = np.isin(streamflow.m_cal[streamflow_indices, 0], g2)
+                f = np.isfinite(SIDI[m1winter]) & np.isfinite(y[m2winter])
+                rho,pval = stats.pearsonr(SIDI[m1winter][f], y[m2winter][f])
+                rho = 0 if pval>0.5 else rho
+                plt.plot(SIDI[m1winter], y[m2winter], 'o', color='tab:blue', alpha=0.4, label=f'Nov-Mar; $R^2$ = {np.round(rho**2,2)}')
+            elif plot_mode == 'monthly':
+                if cmc is not None:
+                    c = plt.get_cmap(cmc.romaO, 12)
+                else:
+                    c = plt.get_cmap('twilight_shifted', 12)
+
+                for month in range(1, 13):
+                    m1 = np.where(self.m_cal[self_indices, 0] == month)[0]
+                    m2 = np.where(streamflow.m_cal[streamflow_indices, 0] == month)[0]
+                    plt.plot(SIDI[m1],y[m2], 'o',color=c(month/12),label = f'month {month}')
+
+
+            plt.plot(np.arange(-3,4),np.arange(-3,4),'--',color='grey')
+            plt.grid()
+            plt.ylabel(f"{streamflow.index_name}1 ", fontweight="bold", fontsize=12)
+            plt.xlabel(f"{self.SIDI_name}", fontweight="bold", fontsize=12)
+            plt.title(f"{self.SIDI_name} vs.  {streamflow.index_name}1 . K={best_k} - weighting function n. {best_weight}; $R^2$ = {max_corr:.2f}", fontsize=14, fontweight="bold")
+
+            plt.legend(fontsize=12)
+            plt.tight_layout()
+            plt.show(block=False)
+
+        return {"best_k": K_range[best_k], "col_best_weight": best_weight, "max_correlation": max_corr,'spi_corr':R2_spi}
+
+    def analyze_correlation_seasonal(self, streamflow, agg='quarter',plot=True,seasons=None):
+        """
+        Perform seasonal correlation analysis between precipitation-based SIDI and
+        streamflow-based SPI indices for different weighting schemes and K (month-scale) values.
+
+        Depending on the selected aggregation mode (`agg`), data are grouped by predefined
+        temporal windows (quarterly, semiannual, four-monthly) or by a custom set of months.
+
+        Args:
+            streamflow (Streamflow):
+                Instance of the Streamflow class to be compared with the precipitation dataset.
+            agg (str, optional):
+                Defines how data are temporally aggregated. Options are:
+
+                - **'quarter'** *(default)* →
+                  Standard climatological seasons:
+                  `{'DJF':[12,1,2], 'MAM':[3,4,5], 'JJA':[6,7,8], 'SON':[9,10,11]}`
+
+                - **'semiannual'** →
+                  Two six-month periods:
+                  `{'autwin':[9,10,11,12,1,2], 'springsum':[3,4,5,6,7,8]}`
+
+                - **'four-monthly'** →
+                  Three four-month periods:
+                  `{'ONDJ':[10,11,12,1], 'FMAM':[2,3,4,5], 'JJAS':[6,7,8,9]}`
+
+                -**'monthly**
+
+                - **'custom'** →
+                  User-defined aggregation; requires passing an additional dictionary
+                  through the `seasons` argument, e.g.:
+                  `seasons={'period1':[1,2,3,4], 'period2':[5,6,7,8]}`
+
+            plot (bool, optional):
+                If True, generate diagnostic plots showing the R²–K relationships
+                and the scatter plots for the best seasonal configurations. Default is True.
+
+            seasons (dict, optional):
+                Custom month mapping to use when `agg='custom'`.
+                The dictionary must have season names as keys and lists of month indices as values.
+
+        Returns:
+            dict:
+                Dictionary containing seasonal correlation results. Each key corresponds to
+                a season or aggregation period, and the value is a dictionary with the fields:
+
+                - `"best_k"` *(int)* → Optimal temporal aggregation window (K)
+                - `"col_best_weight"` *(int)* → Index of the best weighting function
+                - `"max_correlation"` *(float)* → Maximum R² value obtained
+                - `"R2_matrix"` *(np.ndarray)* → Full R² matrix for all K × weighting configurations
+
+                Example:
+                {
+                    "DJF": {"best_k": 3, "col_best_weight": 1, "max_correlation": 0.72, "R2_matrix": array(...)},
+                    "MAM": {...},
+                    ...
+                }
+
+        Notes:
+            The method automatically adjusts subplot layout and figure dimensions according
+            to the number of analyzed seasons. Overlapping months between precipitation
+            and streamflow datasets are used to ensure temporal consistency.
+
+        """
+
+        wlabel = [
+            'EW',
+            'Lin. DW',
+            'Log. DW',
+            'Lin. IW',
+            'Log. IW'
+        ]
+
+        if not isinstance(streamflow, BaseDroughtAnalysis):
+            raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
+
+        # --- Temporal overlap between Precipitation and Streamflow ---
+        self_indices, streamflow_indices = find_overlap(self.m_cal, streamflow.m_cal)
+        if len(self_indices) == 0 or len(streamflow_indices) == 0:
+            raise ValueError("No overlapping data found between Precipitation and Streamflow.")
+
+        # --- Subset to overlapping period ---
+        y = streamflow.spi_like_set[0, streamflow_indices]  # SPI-1 (streamflow)
+        spi_like_set = self.spi_like_set[:, self_indices]  # All SIDI configurations
+        m_cal_overlap = np.array([self.m_cal[i] for i in self_indices])
+        months_overlap = np.array([m[0] for m in m_cal_overlap], dtype=int)
+
+        K_range = np.arange(1, self.K + 1)
+
+        def _compute_corr(y_sub, spi_sub):
+            """Compute the R² correlation matrix for all K and weighting functions."""
+            MatCorr = []
+            for k in K_range:
+                W = generate_weights(k)
+                sidis = []
+                for doy in range(spi_sub.shape[1]):
+                    vec = spi_sub[:k, doy]
+                    sidis.append([weighted_metrics(vec, w)[0] for w in W.T])
+                sidis = np.array(sidis)
+
+                rr = []
+                for w in range(W.shape[1]):
+                    SIDI = (sidis[:, w] - np.nanmean(sidis[:, w])) / np.nanstd(sidis[:, w])
+                    valid_mask = np.isfinite(y_sub) & np.isfinite(SIDI)
+                    if np.sum(valid_mask) > 10:
+                        r = stats.pearsonr(SIDI[valid_mask], y_sub[valid_mask])[0]
+                        rr.append(r ** 2)
+                    else:
+                        rr.append(np.nan)
+                MatCorr.append(rr)
+            return np.array(MatCorr)
+
+        # --- Seasonal analysis ---
+        if agg == 'quarter':
+            seasons = {
+                "DJF": [12, 1, 2],
+                "MAM": [3, 4, 5],
+                "JJA": [6, 7, 8],
+                "SON": [9, 10, 11],
+            }
+            figsize1 = (14,10)
+            figsize2 = (10,11)
+            ncols,nrows = (2,2)
+
+        elif (agg == 'semiannual') | (agg =='biannual'):
+            seasons = {
+                "autwin": [9, 10, 11,12, 1, 2],
+                "springsum": [3, 4, 5,6, 7, 8],
+            }
+            figsize1 = (14,5)
+            figsize2 = (10,6)
+            ncols,nrows = (2,1)
+
+        elif agg == 'four-monthly':
+            seasons = {
+                "ONDG" : [10,11, 12, 1],
+                "FMAM" : [2,3,4,5],
+                "JJAS" : [6,7,8,9],
+            }
+            figsize1 = (16,6)
+            figsize2 = (15,6)
+            ncols,nrows = (3,1)
+
+        elif agg == 'monthly':
+            seasons = {'Jan':[1], 'Feb': [2], 'Mar': [3], 'Apr': [4], 'May': [5], 'Jun': [6],
+            'Jul': [7], 'Aug': [8], 'Sep': [9], 'Oct': [10], 'Nov': [11], 'Dec': [12]}
+            figsize1 = (7,6)
+            figsize2 = (7,6)
+            ncols,nrows = (1,1)
+
+        elif agg == 'custom':
+            seasons = seasons
+            layout_map = {1: (1, 1), 2: (1, 2), 3: (1, 3), 4: (2, 2), 5: (2, 3), 6: (2, 3)}
+            nrows, ncols = layout_map.get(len(seasons), (2, 3))
+            wid = np.round(5*ncols,1)
+            h = np.round(5*nrows,1)+0.5
+            figsize1,figsize2 =(wid+3,h),(wid,h)
+
+
+
+        # a check on the whole year
+        all_months = [m for lst in seasons.values() for m in lst]
+        unique = set(all_months)
+        missing = [m for m in range(1, 13) if m not in unique]
+        duplicates = [m for m in unique if all_months.count(m) > 1]
+
+        if missing:
+            print("allert: missing month(s):", missing)
+        if duplicates:
+            print("allert: duplicates month(s):", duplicates)
+
+
+        print("Starting correlation analysis (seasonal)...")
+        MatCorr = {}
+        for name, mlist in seasons.items():
+            idx = np.isin(months_overlap, mlist)
+            if np.count_nonzero(idx) <= 10:
+                continue
+
+            M = _compute_corr(y[idx], spi_like_set[:, idx])
+            max_corr = np.nanmax(M)
+            bk, bw = np.unravel_index(np.nanargmax(M), M.shape)
+
+            print(f" Season {name}: best R²={max_corr:.3f} (K={K_range[bk]}, Weight={wlabel[bw]})")
+
+            MatCorr[name] = {
+                "best_k": int(K_range[bk]),
+                "col_best_weight": int(bw),
+                "max_correlation": float(max_corr),
+                "R2_matrix": M,
+                "sample number": np.count_nonzero(idx)
+
+            }
+
+        # --- Plot 1: R² vs K for each weighting scheme ---
+        if agg =='monthly':
+            # ordine mesi: 'Jan'...'Dec'
+            months = list(calendar.month_abbr[1:])  # ['Jan','Feb',...,'Dec']
+
+            # vettore con i max R^2 mese per mese (NaN se manca)
+            r2max = np.array([MatCorr.get(m, {}).get('max_correlation', np.nan) for m in months], float)
+
+            # plot rapido (bar)
+            plt.figure(figsize=(7, 5))
+            plt.bar(months, r2max,0.5,alpha=0.8,facecolor='dimgrey',edgecolor='k')
+            plt.ylabel(r"$\max R^2$")
+            plt.ylim(0, 1)
+            plt.grid(axis='y', alpha=0.3)
+            plt.title(f"{self.basin_name} - Monthly max R² {self.SIDI_name} vs. {streamflow.index_name}1")
+            plt.axhline(y=0.4, linestyle='--',color='tab:orange',label='Significant limit')
+            plt.legend()
+            # plt.text(0.10,0.45, 'Significant limit', color='tab:orange',fontweight='bold',fontsize=14)
+
+            plt.tight_layout()
+            plt.show(block=False)
+
+        else:
+            if plot:
+                fig, ax = plt.subplots(figsize=figsize1, nrows=nrows, ncols=ncols)
+                ax = ax.ravel()
+                for i, name in enumerate(MatCorr.keys()):
+                    mat = MatCorr[name]['R2_matrix']
+                    for w in range(mat.shape[1]):
+                        ax[i].plot(mat[:, w], label=wlabel[w], linewidth=2)
+                    ax[i].grid()
+                    ax[i].set_xticks(np.arange(0,len(K_range),3))
+                    ax[i].set_xticklabels(K_range[0:-1:3])
+                    ax[i].tick_params(axis='x', labelsize=14)
+                    ax[i].tick_params(axis='y', labelsize=14)
+                    ax[i].set_ylabel(r"$R^2$", fontweight="bold", fontsize=16)
+                    ax[i].set_xlabel("Month-scale (K)", fontweight="bold", fontsize=16)
+                    ax[i].set_title(name, fontweight="bold", fontsize=16)
+                    if i==0:
+                        ax[i].legend(loc=3)
+                fig.suptitle(
+                    f"{self.basin_name} - Correlation Analysis: {self.SIDI_name} vs. {streamflow.index_name}1",
+                    fontsize=16, fontweight="bold"
+                )
+                plt.tight_layout()
+                plt.show(block=False)
+
+            # --- Plot 2: Scatter plots (best configuration per season) ---
+                if len(seasons)>5:
+                    if cmc is not None:
+                        c = plt.get_cmap(cmc.romaO, len(seasons))
+                    else:
+                        c = plt.get_cmap('twilight_shifted', len(seasons))
+                else:
+                    c = ['tab:olive', 'tab:brown', 'tab:orange', 'tab:cyan','tab:purple']
+                fig, ax = plt.subplots(figsize=figsize2, nrows=nrows, ncols=ncols)
+                ax = ax.ravel()
+
+                for i, (season, vals) in enumerate(MatCorr.items()):
+                    best_k = vals['best_k']
+                    best_weight = vals['col_best_weight']
+
+                    W = generate_weights(best_k)
+                    sidi = []
+                    for doy in range(spi_like_set.shape[1]):
+                        vec = spi_like_set[:best_k, doy]
+                        sidi.append(weighted_metrics(vec, W[:, best_weight])[0])
+                    sidi = np.array(sidi)
+                    SIDI = (sidi - np.nanmean(sidi)) / np.nanstd(sidi)
+
+                    idx = np.isin(months_overlap, seasons[season])
+                    valid = np.isfinite(SIDI[idx]) & np.isfinite(y[idx])
+                    if np.count_nonzero(valid) > 10:
+                        r, _ = stats.pearsonr(SIDI[idx][valid], y[idx][valid])
+                        r2 = r ** 2
+                    else:
+                        r2 = np.nan
+
+                    ax[i].plot(SIDI[idx], y[idx], 'o', color=c[i], alpha=0.4, label=f'$R^2$ = {np.round(r2, 2)} \n K ={best_k}; {wlabel[best_weight]}')
+                    ax[i].plot(np.arange(-3, 4), np.arange(-3, 4), '--', color='grey')
+                    ax[i].tick_params(axis='x', labelsize=14)
+                    ax[i].tick_params(axis='y', labelsize=14)
+                    ax[i].grid()
+                    ax[i].set_title(season, fontweight="bold", fontsize=16)
+                    ax[i].set_ylabel(f"{streamflow.index_name}1", fontweight="bold", fontsize=16)
+                    ax[i].set_xlabel(f"{self.SIDI_name}", fontweight="bold", fontsize=16)
+                    ax[i].legend(fontsize=12)
+
+                fig.suptitle(
+                    f"{self.basin_name} - {self.SIDI_name} vs. {streamflow.index_name}1 — Best seasonal configurations",
+                    fontsize=14, fontweight="bold"
+                )
+                if i < ncols*nrows-1:
+                    fig.delaxes(ax[-1])
+                plt.tight_layout()
+                plt.show(block=False)
+
+        return MatCorr
+
 
 
 class Temperature(BaseDroughtAnalysis):
-    def __init__(self, start_baseline_year, end_baseline_year, basin_name, ts=None, m_cal=None, data_path=None,
-                 shape_path=None, shape=None, K=None, weight_index=None,
-                 calculation_method =f_zscore,threshold=None, index_name = 'STI',verbose=True):
+    def __init__(self, start_baseline_year, end_baseline_year,
+                 basin_name, data_path=None, shape_path=None, ts=None, m_cal=None,
+                 shape=None, K=None, weight_index=None,
+                 calculation_method =f_kde,threshold=None, index_name = 'STI',verbose=True):
         """
         Initialize the Pet class.
 
@@ -1877,7 +3050,7 @@ class Temperature(BaseDroughtAnalysis):
 class Teleindex(BaseDroughtAnalysis):
     def __init__(self, start_baseline_year, end_baseline_year, basin_name=None,ts=None, m_cal=None, data_path=None,
                  K=None, weight_index=None,
-                 calculation_method=f_spei, threshold=None, verbose=True, index_name=''):
+                 calculation_method=f_kde, threshold=None, verbose=True, index_name=''):
 
         """
 		Initialize the Precipitation class.
