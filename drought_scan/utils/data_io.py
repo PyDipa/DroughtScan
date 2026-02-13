@@ -170,7 +170,7 @@ def import_netcdf_for_cumulative_variable(file_path, possible_names,shape,verbos
             end = f"{m_cal[-1, 1]:04d}-{m_cal[-1, 0]:02d}"
 
             expected = pd.period_range(start=start, end=end, freq="M")
-            actual = pd.PeriodIndex(year=m_cal[:, 1], month=m_cal[:, 0], freq="M")
+            actual = pd.PeriodIndex.from_fields(year=m_cal[:, 1], month=m_cal[:, 0], freq="M")
 
             # 1) duplicates (to do before)
             dup = actual[actual.duplicated()]
