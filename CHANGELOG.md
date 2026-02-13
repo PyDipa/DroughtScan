@@ -1,4 +1,26 @@
 # Changelog
+## [3.1.0] - 2025-10-10
+### added
+- KDE-based distribution fitting in `fit_distribution_stats`, including KS goodness-of-fit and AIC evaluation.
+- New correlation tools:
+  - `Precipitation.analyze_correlation_seasonal()`
+  - `Pet.analyze_correlation()`
+  - `Balance.analyze_correlation()`
+- New month-wise SPIₖ–SQI₁ correlation tool (`spi_sqi_corr`) documented in `user_guide.md`.
+- New advanced statistics documentation page: `statistics_tools.md`.
+
+### Changed
+- `f_kde` is now the default method to standardize data.
+- Added optional log-transform support in `f_kde` (via `x_log = np.log(x)`).
+
+### Fixed
+- Minor bug fixes (various).
+- Added warnings for missing timestamps in `import_netcdf_for_cumulative_variable()`.
+
+### Documentation
+- Added documentation describing KDE as an alternative method to standardize data.
+
+# Changelog
 ## [3.0.0] - 2025-10-10
 ### Added
 - **plot_spi_fit()** method in `BaseDroughtAnalysis` for visualizing SPI–raw value relationships.
