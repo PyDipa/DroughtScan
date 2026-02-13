@@ -21,7 +21,7 @@ Used by: `core.py`, `hydrology.py`.
 
 
 import numpy as np
-from scipy.stats import gamma, pearson3, norm
+from scipy.stats import gamma, pearson3, norm,gaussian_kde
 import warnings
 
 
