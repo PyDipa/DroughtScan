@@ -14,6 +14,7 @@ __all__ = [
     "find_overlap",
     "f_spi",
     "f_spei",
+    "f_kde",
     "f_zscore",
     "Qcs2Qmm",
     "Qmm2Qcs",

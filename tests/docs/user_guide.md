@@ -109,11 +109,11 @@ Below are the most impactful options, with defaults and when you might want to c
   - In the  Po River case study (see paper ), `-1` proved effective for **severe** drought identification; adjust for your basin by comparing the SIDI with some observed impact variable.
   
 - **`calculation_method` (callable)** — *index family for standardization*  
-  Default: `f_spi` (Gamma fit).  
+  Default: `f_kde` (Gamma fit).  
   Available (in `utils.py`):
   - `f_spi` → a function to standardize data according to a **Gamma** distribution. Best for **positive, right-skewed** data (e.g., precipitation). Works fine on positive near-normal as well. Generally used for the calculation of SPI.
   - `f_spei` → **Pearson III** distribution. Handles **real-valued, negative and/or skewed** data; Gnerally used for **SPEI**. Works fine on negative, positive near-normal as well, being also well suited for precipitation data.
-  - `f_kdee` → Non-parametric standardization using Gaussian Kernel Density Estimation (Silverman bandwidth) 
+  - `f_kde` → Non-parametric standardization using Gaussian Kernel Density Estimation (Silverman bandwidth) 
   - `f_zscore` → standard z-score. Best when data are **approximately Gaussian** (real-valued); no parametric skew modeling.
 
   Practical guidance:  
@@ -173,8 +173,10 @@ Switch to **SPEI-like** behavior (Pearson III) or plain z-score:
 By specifing the Index name the plots will have the proper labels. 
 
 ```python
-from drought_scan.utils import f_spei, f_zscore
+from drought_scan.utils import f_spi,f_zscore,f_spei,f_kde
 import drought_scan as DS
+from functools import partial
+
 shape_path = 'tests/data/bacino_pontelagoscuro.shp'
 prec_path  = 'tests/data/LAPrec1871.v1.1.nc'
 
@@ -198,12 +200,23 @@ ds2 = DS.Precipitation(
     index_name='SPI (Zscore)'
 )
 
+ds3 = DS.Precipitation(
+    prec_path=prec_path,
+    shape_path=shape_path,
+    start_baseline_year=1981,
+    end_baseline_year=2010,
+    basin_name='Po',
+    calculation_method=partial(f_kde, log_transform=True),   #  default is False
+    index_name='SPI (Zscore)'
+)
 # user can easly check the calibration obtained by the methods
 ref_month = 3 #reference month (march in the example)
 k = 6 # month-scale
 ds.plot_spi_fit(K=k,month=ref_month)
 
 ds2.plot_spi_fit(K=k,month=ref_month)
+
+ds3.plot_spi_fit(K=k,month=ref_month)
 ```
 
 ---
