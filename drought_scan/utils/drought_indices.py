@@ -422,7 +422,7 @@ def f_spei(balance, stride, m, m_cal, tb1, tb2,gamma_params= None):
 # ===================================================================
 #  NON-Parametric Fit (Kernel Density Estimation)
 # ===================================================================
-def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=False, kde_params=None):
+def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, kde_params=None):
     """
     SPI-like standardization using Gaussian KDE (Silverman bandwidth) instead of Gamma fit.
 
