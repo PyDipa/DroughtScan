@@ -207,7 +207,7 @@ ds3 = DS.Precipitation(
     end_baseline_year=2010,
     basin_name='Po',
     calculation_method=partial(f_kde, log_transform=True),   #  default is False
-    index_name='SPI (Zscore)'
+    index_name='SPI (f_kde) '
 )
 # user can easly check the calibration obtained by the methods
 ref_month = 3 #reference month (march in the example)

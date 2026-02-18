@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 
 from .statistics import find_overlap
-from .drought_indices import f_spi, f_spei, f_zscore
+from .drought_indices import f_spi, f_spei, f_zscore, f_kde
 from .hydrology import Qcs2Qmm, Qmm2Qcs
 from .statistics import test_standardization
 
