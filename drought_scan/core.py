@@ -294,7 +294,8 @@ class BaseDroughtAnalysis:
 
         return cdn
 
-    def plot_scan(self, optimal_k=None, weight_index=None,year_ext=None,split_plot=None, plot_order=None,saveplot=False):
+    def plot_scan(self, optimal_k=None, weight_index=None,year_ext=None,split_plot=None,
+                  plot_order=None,saveplot=False,figsize=None):
         """
             Plot the drought scan visualization, including CDN, SPI-like heatmap, and SIDI.
 
@@ -308,7 +309,8 @@ class BaseDroughtAnalysis:
 
 
             """
-        plot_overview(self, optimal_k=optimal_k, weight_index=weight_index,year_ext=year_ext,split_plot=split_plot,plot_order=plot_order)
+        plot_overview(self, optimal_k=optimal_k, weight_index=weight_index,year_ext=year_ext,
+                      split_plot=split_plot,plot_order=plot_order,figsize=figsize)
         if saveplot==True:
             self._saveplot()
 
@@ -424,7 +426,7 @@ class BaseDroughtAnalysis:
         results = rolling_trend_analysis(var=var, window=window, significance=0.05)
         return results
 
-    def plot_trends(self, windows=[12, 36, 60, 120],ax=None,year_ext=None,unit=None):
+    def plot_trends(self, windows=[12, 36, 60, 120],show_spi=False,ax=None,year_ext=None,unit=None):
         """
         Wrapper method to plot trend bars on the CDN time series for a DroughtScan-compatible object.
 
@@ -435,7 +437,7 @@ class BaseDroughtAnalysis:
         Returns:
             None. Displays a plot.
         """
-        plot_cdn_trends(self, windows,ax=ax,year_ext=year_ext,unit=unit)
+        plot_cdn_trends(self, windows,show_spi=show_spi,ax=ax,year_ext=year_ext,unit=unit)
 
     def plot_monthly_profile(self, var=None, var_name=None, cumulate=False, ax=None,highlight_years=None,season_shift=False):
         """
