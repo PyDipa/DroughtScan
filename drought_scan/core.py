@@ -294,6 +294,130 @@ class BaseDroughtAnalysis:
 
         return cdn
 
+    @staticmethod
+    def _process_grid_point(ts_ij, m_cal, K, start_baseline_year, end_baseline_year,
+                            calculation_method, M_valid, t_idx, n_weights):
+        """Standalone computation for a single grid point — picklable by joblib."""
+        from drought_scan.utils.drought_indices import (
+            generate_weights, weighted_metrics, baseline_indices
+        )
+
+        # --- replicate _calculate_spi_like_set ---
+        spiset = np.full((K, len(ts_ij)), np.nan, dtype=float)
+        for k in range(1, K + 1):
+            Spi_ts = np.full_like(ts_ij, np.nan, dtype=float)
+            for ref_month in range(1, 13):
+                indices, spi_values, coeff, _ = calculation_method(
+                    ts_ij, k, ref_month, m_cal, start_baseline_year, end_baseline_year
+                )
+                if indices is not None and spi_values is not None:
+                    Spi_ts[indices] = spi_values.copy()
+            spiset[k - 1, :] = Spi_ts
+
+        # --- replicate _spi_like_set_ensemble_mean ---
+        weights = generate_weights(K)
+        sidi_raw = np.array([
+            [weighted_metrics(spiset[:K, j], w)[0] for w in weights.T]
+            for j in range(len(m_cal))
+        ], dtype=float)
+
+        # --- replicate _calculate_SIDI ---
+        tb1_id, tb2_id = baseline_indices(m_cal, start_baseline_year, end_baseline_year)
+        baseline_mean = np.nanmean(sidi_raw[tb1_id:tb2_id + 1, :], axis=0)
+        baseline_std = np.nanstd(sidi_raw[tb1_id:tb2_id + 1, :], axis=0)
+        if np.any(baseline_std == 0):
+            return None, None
+        SIDI_ij = (sidi_raw - baseline_mean) / baseline_std
+
+        spi_out = {m: spiset[m - 1, t_idx] for m in M_valid}
+        return SIDI_ij[t_idx, :], spi_out
+
+    def compute_spatial_sidi(self, M=None, timestamp=None, K=None):
+        """
+        Compute gridded SPI at selected temporal scales and SIDI for each grid point in Pgrid.
+
+        Args:
+            M (list of int, optional): Temporal scales for SPI maps. Defaults to [1, 3, 6, 12, 18, 24].
+            timestamp (tuple, optional): (month, year) of target slice. Defaults to last timestamp.
+            K (int, optional): Max temporal scale. Overrides self.K for this computation only.
+
+        Stores in self:
+            SIDI_grid        : ndarray (n_rows, n_cols, n_weights) — all weighting schemes.
+            SPI_grid         : dict {scale: ndarray (n_rows, n_cols)}.
+            spatial_timestamp: ndarray (2,) — [month, year] of the stored snapshot.
+
+        Notes:
+            Default weight for display: weight_index=2 (see generate_weights convention).
+            Access a specific weight slice with: ds.SIDI_grid[:, :, weight_index]
+        """
+        from joblib import Parallel, delayed, cpu_count
+
+        if M is None:
+            M = [1, 3, 6, 12, 18, 24]
+
+        _K_orig = self.K
+        if K is not None:
+            self.K = K
+
+        if timestamp is None:
+            t_idx = len(self.m_cal) - 1
+        else:
+            month_t, year_t = timestamp
+            matches = np.where((self.m_cal[:, 0] == month_t) & (self.m_cal[:, 1] == year_t))[0]
+            if len(matches) == 0:
+                raise ValueError(f"Timestamp {timestamp} not found in m_cal.")
+            t_idx = int(matches[0])
+
+        M_valid = [m for m in M if m <= self.K]
+        if len(M_valid) < len(M):
+            import warnings
+            warnings.warn(f"Scales {set(M) - set(M_valid)} exceed K={self.K} and will be skipped.")
+
+        n_time, n_rows, n_cols = self.Pgrid.shape
+        n_weights = generate_weights(self.K).shape[1]
+
+        # --- pre-mask valid grid points ---
+        valid_mask = ~(np.all(np.isnan(self.Pgrid), axis=0) | (np.nanstd(self.Pgrid, axis=0) == 0))
+        valid_ij = np.argwhere(valid_mask)
+        n_valid = len(valid_ij)
+
+        n_cores = cpu_count()
+        t_per_point = 1.4  # secondi stimati dal benchmark
+        estimated_min = (n_valid * t_per_point / n_cores) / 60
+        print(f"compute_spatial_sidi: {n_valid}/{n_rows * n_cols} valid grid points.")
+        print(f"Running on {n_cores} cores — may take up to {estimated_min:.0f} min.")
+
+        # --- parallel computation ---
+        results = Parallel(n_jobs=-1)(
+            delayed(self._process_grid_point)(
+                self.Pgrid[:, i, j],
+                self.m_cal, self.K,
+                self.start_baseline_year, self.end_baseline_year,
+                self.calculation_method,
+                M_valid, t_idx, n_weights
+            )
+            for (i, j) in valid_ij
+        )
+
+        # --- reconstruct grids ---
+        SIDI_grid = np.full((n_rows, n_cols, n_weights), np.nan)
+        SPI_grid = {m: np.full((n_rows, n_cols), np.nan) for m in M_valid}
+
+        for idx, (i, j) in enumerate(valid_ij):
+            sidi_vals, spi_vals = results[idx]
+            if sidi_vals is None:
+                continue
+            SIDI_grid[i, j, :] = sidi_vals
+            for m in M_valid:
+                SPI_grid[m][i, j] = spi_vals[m]
+
+        print("compute_spatial_sidi: 100% — done.")
+
+        self.SIDI_grid = SIDI_grid
+        self.SPI_grid = SPI_grid
+        self.spatial_timestamp = self.m_cal[t_idx].copy()
+        self.K = _K_orig
+
     def plot_scan(self, optimal_k=None, weight_index=None,year_ext=None,split_plot=None,
                   plot_order=None,saveplot=False,figsize=None):
         """
