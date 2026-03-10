@@ -108,9 +108,11 @@ def baseline_indices(m_cal,start_baseline_year,end_baseline_year):
 
     return tb1_id, tb2_id
 
+_month_indices_cache = {}  # modulo-level, fuori dalla funzione
+
 def get_month_indices(month, start_year, end_year, m_cal):
     """
-    Returns the indices of m_cal where the specified month is present for the given start-year - end-year .
+        Returns the indices of m_cal where the specified month is present for the given start-year - end-year .
 
     Args:
         month (int): The month to search for (1 = January, ..., 12 = December).
@@ -122,7 +124,12 @@ def get_month_indices(month, start_year, end_year, m_cal):
 
     Returns:
         numpy.ndarray: Indices of the months matching the specified criteria.
+    NOTA Con il cache, le prime  chiamate Univoce (pes. rimo grid point di self.Pgrid) calcolano davvero, per le successive grid points restituiscono il risultato cached istantaneamente — perché month, start_year, end_year e id(m_cal) sono identici per tutti.
+
     """
+    key = (month, start_year, end_year, id(m_cal))
+    if key in _month_indices_cache:
+        return _month_indices_cache[key]
 
     try:
         idx = np.array([
@@ -130,11 +137,10 @@ def get_month_indices(month, start_year, end_year, m_cal):
             for year in range(start_year, end_year + 1)
         ])
     except IndexError:
-        raise ValueError(f"Inconsistent baseline years: define a period within the data temporal domain: {m_cal[0]} - {m_cal[-1]}. Otherwise check that the original data have not gaps in the timestamp")
-        # print(f"************ BASELINE WARNING **********')")
-        # print(f"Inconsistent baseline years: baseline must be whitin the  {m_cal[0]} - {m_cal[-1]} domain.")
-    return idx
+        raise ValueError(...)
 
+    _month_indices_cache[key] = idx
+    return idx
 
 # FOR ONLY POSITIVE & RIGHT-SKEWED DATA: (using a Gamma Function)
 # ===================================================================
@@ -224,8 +230,9 @@ def f_spi(prec,stride,m,m_cal, tb1,tb2,gamma_params=None):
         idmesi_base = get_month_indices(m, tb1, tb2, m_cal)
         a = np.array(
             [idmesi_base - j for j in np.flip(np.arange(0, stride))]).T  # Create the matrix of months to select
-        xbase = np.array([np.sum(prec[row]) if np.all(row >= 0) else np.nan for row in a])
-
+        # xbase = np.array([np.sum(prec[row]) if np.all(row >= 0) else np.nan for row in a])
+        valid_rows = np.all(a >= 0, axis=1)
+        xbase = np.where(valid_rows, np.sum(prec[a.clip(0)], axis=1), np.nan)
         # WHOLE PERIOD ----------------------------------------------
         # Get all months for the entire time period
         try:
@@ -240,9 +247,10 @@ def f_spi(prec,stride,m,m_cal, tb1,tb2,gamma_params=None):
                     idmesi_all = get_month_indices(m, t1 + 1, t2-1, m_cal)
 
         a = np.array([idmesi_all - j for j in np.flip(np.arange(0, stride))]).T  # Create the matrix of months to select
-        x = np.array(
-            [np.sum(prec[row]) if np.all(row >= 0) else np.nan for row in a])  # Precipitation for the entire period
-
+        # x = np.array(
+        #     [np.sum(prec[row]) if np.all(row >= 0) else np.nan for row in a])  # Precipitation for the entire period
+        valid_rows = np.all(a >= 0, axis=1)
+        x = np.where(valid_rows, np.sum(prec[a.clip(0)], axis=1), np.nan)
     # --------------------------- SPI -----------------------------------------
     # Calculate the monthly balance for the baseline and the entire period
     # Start with SPI: pre-allocate and calculate gamma distribution parameters
@@ -359,8 +367,9 @@ def f_spei(balance, stride, m, m_cal, tb1, tb2,gamma_params= None):
         idmesi_base = get_month_indices(m, tb1, tb2, m_cal)
         a = np.array(
             [idmesi_base - j for j in np.flip(np.arange(0, stride))]).T  # Create the matrix of months to select
-        xbase = np.array([np.sum(balance[row]) if np.all(row >= 0) else np.nan for row in a])
-
+        # xbase = np.array([np.sum(balance[row]) if np.all(row >= 0) else np.nan for row in a])
+        valid_rows = np.all(a >= 0, axis=1)
+        xbase = np.where(valid_rows, np.sum(balance[a.clip(0)], axis=1), np.nan)
         # WHOLE PERIOD ----------------------------------------------
         # Get all months for the entire time period
         try:
@@ -375,9 +384,10 @@ def f_spei(balance, stride, m, m_cal, tb1, tb2,gamma_params= None):
                     idmesi_all = get_month_indices(m, t1 + 1, t2-1, m_cal)
 
         a = np.array([idmesi_all - j for j in np.flip(np.arange(0, stride))]).T  # Create the matrix of months to select
-        x = np.array(
-            [np.sum(balance[row]) if np.all(row >= 0) else np.nan for row in a])  # Precipitation for the entire period
-
+        # x = np.array(
+        #     [np.sum(balance[row]) if np.all(row >= 0) else np.nan for row in a])  # Precipitation for the entire period
+        valid_rows = np.all(a >= 0, axis=1)
+        x = np.where(valid_rows, np.sum(balance[a.clip(0)], axis=1), np.nan)
     # ------------------------------ SPEI Calculation --------------------------------------
     # Fit Pearson distribution for Dbase
     if xbase.size < 10:
@@ -483,8 +493,9 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, kde_params=None)
     else:
         idmesi_base = get_month_indices(m, tb1, tb2, m_cal)
         a = np.array([idmesi_base - j for j in np.flip(np.arange(0, stride))]).T
-        xbase = np.array([np.sum(prec[row]) if np.all(row >= 0) else np.nan for row in a])
-
+        # xbase = np.array([np.sum(prec[row]) if np.all(row >= 0) else np.nan for row in a])
+        valid_rows = np.all(a >= 0, axis=1)
+        xbase = np.where(valid_rows, np.sum(prec[a.clip(0)], axis=1), np.nan)
         try:
             idmesi_all = get_month_indices(m, t1, t2, m_cal)
         except (IndexError, ValueError):
@@ -497,9 +508,9 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, kde_params=None)
                     idmesi_all = get_month_indices(m, t1 + 1, t2 - 1, m_cal)
 
         a = np.array([idmesi_all - j for j in np.flip(np.arange(0, stride))]).T
-        x = np.array([np.sum(prec[row]) if np.all(row >= 0) else np.nan for row in a])
-
-        # ---------------- KDE-based SPI -----------------------------------
+        # x = np.array([np.sum(prec[row]) if np.all(row >= 0) else np.nan for row in a])
+        valid_rows = np.all(a >= 0, axis=1)
+        x = np.where(valid_rows, np.sum(prec[a.clip(0)], axis=1), np.nan)
 
         # ---------------- KDE-based SPI -----------------------------------
     spi = np.full_like(x, np.nan, dtype=float)
@@ -550,9 +561,20 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, kde_params=None)
     Gx = np.full_like(x, np.nan, dtype=float)
 
     xfull = x_log if log_transform else x
-    for i, xi in enumerate(xfull):
-        if np.isfinite(xi):
-            Gx[i] = float(kde.integrate_box_1d(-np.inf, xi))
+    # # theory:
+    # for i, xi in enumerate(xfull):
+    #     if np.isfinite(xi):
+    #         Gx[i] = float(kde.integrate_box_1d(-np.inf, xi))
+    # faster way:
+    # h == Silverman bandwidth
+    h = 0.9 * np.std(xb, ddof=1) * xb.size ** (-1 / 5)
+    # h = kde.factor * np.std(xb, ddof=1)  # bandwidth scalare
+    finite_mask = np.isfinite(xfull)
+
+    # broadcasting (n_eval, n_baseline) -> media su axis=1
+    Gx[finite_mask] = norm.cdf(
+        (xfull[finite_mask, None] - xb[None, :]) / h
+    ).mean(axis=1)
 
     # --- Normal-score transform ------------------------------------------
     # clipping per evitare ±inf (≈ ±4)
@@ -655,8 +677,9 @@ def f_zscore(data, stride, m, m_cal, tb1, tb2):
         idmesi_base = get_month_indices(m, tb1, tb2, m_cal)
         a = np.array(
             [idmesi_base - j for j in np.flip(np.arange(0, stride))]).T  # Create the matrix of months to select
-        xbase = np.array([np.sum(data[row]) if np.all(row >= 0) else np.nan for row in a])
-
+        # xbase = np.array([np.sum(data[row]) if np.all(row >= 0) else np.nan for row in a])
+        valid_rows = np.all(a >= 0, axis=1)
+        xbase = np.where(valid_rows, np.sum(data[a.clip(0)], axis=1), np.nan)
         # WHOLE PERIOD ----------------------------------------------
         # Get all months for the entire time period
         try:
@@ -671,8 +694,9 @@ def f_zscore(data, stride, m, m_cal, tb1, tb2):
                     idmesi_all = get_month_indices(m, t1 + 1, t2-1, m_cal)
 
         a = np.array([idmesi_all - j for j in np.flip(np.arange(0, stride))]).T  # Create the matrix of months to select
-        x = np.array([np.sum(data[row]) if np.all(row >= 0) else np.nan for row in a])  # Data for the entire period
-
+        # x = np.array([np.sum(data[row]) if np.all(row >= 0) else np.nan for row in a])  # Data for the entire period
+        valid_rows = np.all(a >= 0, axis=1)
+        x = np.where(valid_rows, np.sum(data[a.clip(0)], axis=1), np.nan)
     # --------------------------- Z-Score -----------------------------------------
     # Calculate the monthly balance for the baseline and the entire period
     baseline_mean = np.nanmean(xbase)
