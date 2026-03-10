@@ -175,7 +175,8 @@ def highlight_drought(ax, series, color='brown' ,offset=None, threshold=None):
 
         return round(w, 1), round(h, 1)
 
-def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_plot=False, plot_order=None):
+def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_plot=False,
+                  plot_order=None,figsize=None):
     """
     Plot the drought scan visualization: Heatmap(H),  SIDI(S) and  CDN (C),
 
@@ -350,8 +351,11 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_p
 
     # -------------------- PLOTTING --------------------
     if not split_plot:
-        # unica figura con 3 pannelli nell'ordine scelto
-        fig_w, fig_h = _figure_size_for_length(len(DSO.ts))
+        # unic panel with 3 subplots
+        if figsize is None:
+            fig_w, fig_h = _figure_size_for_length(len(DSO.ts))
+        else:
+            fig_w, fig_h = figsize
         ratios = [0.8 if key == 'H' else 1.5 for key in order]
         fig, axes = plt.subplots(
             nrows=3, ncols=1, figsize=(fig_w, fig_h),
@@ -379,7 +383,10 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_p
     else:
         # 3 single plots
         for key in order:
-            fig_w, fig_h = _figure_size_for_length(len(DSO.ts))
+            if figsize is None:
+                fig_w, fig_h = _figure_size_for_length(len(DSO.ts))
+            else:
+                fig_w, fig_h = figsize
             fig, ax = plt.subplots(figsize=(fig_w, fig_h / 3), dpi=100)
             if key == 'H':
                 PANELS[key](ax, add_colorbar=True, show_xticks=True)
@@ -459,7 +466,7 @@ def plot_severe_events(DSO, tstartid, duration, deficit, max_events=None, labels
     fig.suptitle(title, fontsize=12)
     plt.show(block=False)
 
-def plot_cdn_trends(DSO, windows, ax=None,year_ext=None,unit=None):
+def plot_cdn_trends(DSO, windows, ax=None,year_ext=None,unit=None,show_spi=False):
     """
     Plot trends in the Cumulative Deviation from Normal (CDN) time series
     over multiple moving window lengths, highlighting the net change
@@ -542,6 +549,17 @@ def plot_cdn_trends(DSO, windows, ax=None,year_ext=None,unit=None):
         # combine the curves to work with a single label
         lines = [line1, line2[0]] #take only a proxy for the barharty
         labels = ['CDN' , f'trend over {window} months (moving window)']
+
+        if show_spi and window<=DSO.K:
+            ax3 = ax[i].twinx()
+            ax3.spines["right"].set_position(("axes", 1.12))
+            line3, = ax3.plot(DSO.spi_like_set[window - 1], '-',
+                              color='dimgrey', alpha=0.7,
+                              label=f'SPI{window})')
+            ax3.set_ylabel(f'SPI{window}', fontsize=12, color='dimgrey')
+            ax3.tick_params(axis='y', labelcolor='dimgrey')
+            lines.append(line3)
+            labels.append(f'SPI{window}')
 
         ax[i].legend(lines, labels, loc='upper left')
 
