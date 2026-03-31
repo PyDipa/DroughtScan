@@ -473,6 +473,11 @@ def _plot_cdf_comparison(dataset,analysis,title = ""):
                 lw=1.5, alpha=0.8, label="Empirical CDF")
     ax_pdf.hist(dataset, bins="auto", density=True,
                 color="black", alpha=0.2, label="Empirical density")
+    bar_ymax = max(p.get_height() for p in ax_pdf.patches)
+    ax_pdf.set_ylim(0, bar_ymax * 1.2)  # 20% di margine sopra
+    # -----------
+
+    ax_pdf.set(xlabel="Value", ylabel="Density", title=f"PDF — {lbl}")
 
     for ax, ylabel, ttl in zip(
         [ax_cdf, ax_pdf],
@@ -664,6 +669,12 @@ def fit_distribution_stats(data, dist= "gamma", groups=None,
             ax_pdf.hist(dataset_clean, bins="auto", density=True,
                         color="black", alpha=0.25, label="Empirical density")
             ax_pdf.plot(x_plot, pdf, color="#d6604d", lw=2, label=lbl)
+
+            bar_ymax = max(p.get_height() for p in ax_pdf.patches)
+            ax_pdf.set_ylim(0, bar_ymax * 1.2)  # 20% di margine sopra
+            # -----------
+
+            ax_pdf.set(xlabel="Value", ylabel="Density", title=f"PDF — {lbl}")
             ax_pdf.set(xlabel="Value", ylabel="Density", title=f"PDF — {lbl}")
             ax_pdf.legend()
 
