@@ -1,51 +1,49 @@
 """
 author: PyDipa
-# © 2025 Arianna Di Paola
+# © 2026 Arianna Di Paola
 # License: GNU General Public License v3.0 (GPLv3)
 
 Data Input/Output Utilities.
 
 This module provides functions for:
-- **Loading and processing meteorological data** (NetCDF, CSV).
-- **Aggregating time-series data** (e.g., daily to monthly precipitation).
+- **Loading and processing meteorological data** (NetCDF, CSV, Excel).
+- **Aggregating time-series data** (e.g., daily to monthly, with optional rolling windows).
 - **Applying spatial masks** for regional analysis.
 - **Handling missing values** in climate datasets.
 
-Main functions:
-- `import_netcdf_for_cumulative_variable()`: Reads precipitation data from NetCDF.
-- `create_mask()`: Generates a spatial mask for selected study areas.
-- `load_shape()`: Loads and reprojects shapefiles for spatial analysis.
-- `get_regex_for_date_format()`: Returns regex for matching date formats.
-- `check_datetime()`: Checks if a string matches common date formats.
-- `detect_delimiter()`: Detects delimiters in CSV files.
-- `extract_variable()`: Extracts a variable from a NetCDF dataset.
+Public functions:
+- ``import_netcdf_for_cumulative_variable()`` — read gridded NetCDF, clip to basin, aggregate monthly.
+- ``import_timeseries()`` — read a scalar time series from CSV/Excel.
+- ``load_streamflow()`` — read streamflow from CSV/Excel with auto-detection of date/value columns.
+- ``load_shape()`` — load and reproject a shapefile.
+- ``create_mask()`` — generate a spatial mask from a shapefile and a lat/lon grid.
+- ``extract_variable()`` — extract a variable from a NetCDF dataset by candidate names.
+- ``aggregate_daily_shifted()`` — aggregate daily series to custom-day-anchored periods.
+- ``aggregate_daily_shifted_grid()`` — same, for 3-D gridded data.
+- ``refit_gamma_shifted()`` — refit Gamma parameters on shifted aggregation windows.
 
-Used by: `core.py`, `drought_indices.py`.
+Used by: ``core.py``.
 """
 
 import re
 import os
-import matplotlib.pyplot as plt
-import matplotlib as mpl
-import matplotlib.font_manager as fm
-available = {f.name for f in fm.fontManager.ttflist}
-if 'Helvetica' in available:
-    mpl.rcParams['font.family'] = 'Helvetica'
-else:
-    mpl.rcParams['font.family'] = 'Arial'
+from datetime import date, datetime, timedelta
+from calendar import monthrange
+
+import numpy as np
+import pandas as pd
 import geopandas as gpd
 import regionmask
 import netCDF4 as nc
-import numpy as np
 from dateutil.relativedelta import relativedelta
-from datetime import datetime
-import pandas as pd
 
-# from datetime import datetime,timedelta
 
-# Ensure compatibility with GeoPandas
-os.environ['USE_PYGEOS'] = '0'
+# ===========================================================================
+#  ALSO: replace the diagnostic plot block (around lines 249-256) with:
 
+# ====================================
+# Precipitation from NetCFD files
+# ====================================
 
 def extract_variable(data, possible_names):
     """
@@ -91,7 +89,18 @@ def create_mask(shape,LAT, LON):
     mask = regionmask.mask_geopandas(shape, lon_grid, lat_grid)
     return np.flipud(mask)
 
-def import_netcdf_for_cumulative_variable(file_path, possible_names,shape,verbose,cumulate=True):
+
+def _find_anchor(days_arr, months_arr, years_arr, year, month, day):
+    search_range = range(day, 27, -1) if day > 28 else [day]
+    for d in search_range:
+        matches = np.where(
+            (days_arr == d) & (months_arr == month) & (years_arr == year)
+        )[0]
+        if len(matches):
+            return matches[0]
+    return None
+
+def import_netcdf_for_cumulative_variable(file_path, possible_names,shape,verbose,cumulative=True,rolling=False):
     """
     Loads precipitation oe PET data from a NetCDF file and applies spatial aggregation.
 
@@ -143,27 +152,64 @@ def import_netcdf_for_cumulative_variable(file_path, possible_names,shape,verbos
 
             # Check temporal resolution and aggregate if daily
             if np.median(days_diffs) >= 28 and np.median(days_diffs) <= 31:
+                day = None
                 pass
             else:
-                print("Data appears to have daily resolution. Aggregating to monthly.")
-                years = np.unique(m_cal[:, 1])
-                Pgrid_m = np.empty((len(years) * 12, *Pgrid.shape[1:]))
-                Pgrid_m[:] = np.nan
+                print("Data appears to have daily resolution")
 
-                for yr_idx, year in enumerate(years):
-                    for month in range(1, 13):
-                        month_indices = np.where((m_cal[:, 1] == year) & (m_cal[:, 0] == month))[0]
-                        if len(month_indices) > 0:
-                            if cumulate:
-                                monthly_sum = np.nansum(Pgrid[month_indices, :, :], axis=0)
-                                Pgrid_m[yr_idx * 12 + month - 1, :, :] = monthly_sum
-                            else:
-                                monthly_mean = np.nanmean(Pgrid[month_indices, :, :], axis=0)
-                                Pgrid_m[yr_idx * 12 + month - 1, :, :] = monthly_mean
+                if rolling:
+                    print("Aggregating with 30-day rolling windows (backwards from last day)...")
+                    day = int(dates[-1].day)
 
-                Pgrid = Pgrid_m
-                m_cal = np.array([[m, y] for y in years for m in range(1, 13)])
+                    days_arr = np.array([d.day for d in dates])
+                    months_arr = np.array([d.month for d in dates])
+                    years_arr = np.array([d.year for d in dates])
 
+                    # Costruisci anchor mese per mese a ritroso
+                    unique_months = sorted(set((d.year, d.month) for d in dates))
+                    anchor_idx = [_find_anchor(days_arr, months_arr, years_arr, y, m, day) for y, m in unique_months]
+                    anchor_idx = [i for i in anchor_idx if i is not None]
+                    # anchor_idx.append(len(dates)) for debug in need test day > actual day
+
+                    windows = list(zip(anchor_idx[:-1], anchor_idx[1:]))
+                    # check
+                    # for w in windows[-30:]:
+                    #     print(f" da {dates[w[0]]}    a    {dates[w[1]]}")
+
+                    Pgrid_r = np.empty((len(windows), *Pgrid.shape[1:]))
+                    Pgrid_r[:] = np.nan
+                    m_cal_list = []
+
+                    for i, (start, end) in enumerate(windows):
+                        chunk = Pgrid[start:end]
+                        Pgrid_r[i] = np.nansum(chunk, axis=0) if cumulative else np.nanmean(chunk, axis=0)
+                        m_cal_list.append([dates[end].month, dates[end].year])  # label = mese finale
+
+                    Pgrid = Pgrid_r.copy()
+                    m_cal = np.array(m_cal_list)
+                else:
+                    print("Aggregating to monthly (CUMULATING daily values)...") if cumulative else print(
+                        "Aggregating to monthly (MEAN of daily values)...")
+                    day = None
+                    years = np.unique(m_cal[:, 1])
+                    Pgrid_m = []
+                    m_cal_list = []
+
+                    for yr_idx, year in enumerate(years):
+                        for month in range(1, 13):
+                            month_indices = np.where((m_cal[:, 1] == year) & (m_cal[:, 0] == month))[0]
+                            if len(month_indices) > 0:
+                                m_cal_list.append([month, year])
+                                if cumulative:
+                                    monthly_sum = np.nansum(Pgrid[month_indices, :, :], axis=0)
+                                    Pgrid_m.append(monthly_sum)
+
+                                else:
+                                    monthly_mean = np.nanmean(Pgrid[month_indices, :, :], axis=0)
+                                    Pgrid_m.append(monthly_mean)
+
+                    Pgrid = np.asarray(Pgrid_m)
+                    m_cal = np.asarray(m_cal_list)
 
             # ------------------ CHECK For missing/duplicated time-stamp ------------------
             start = f"{m_cal[0, 1]:04d}-{m_cal[0, 0]:02d}"
@@ -196,14 +242,15 @@ def import_netcdf_for_cumulative_variable(file_path, possible_names,shape,verbos
                 raise ValueError(
                     f"Mismatch between mask shape {mask.shape} and grid spatial shape {Pgrid.shape[1:]}.")
 
-            if verbose==True:
-                print(f'Regional mask created: mask shape {mask.shape}, grid shape {Pgrid.shape}')
-                check = Pgrid[1, :, :] if len(np.shape(Pgrid))==3 else Pgrid[0,0,:,:]
-                plt.figure()
-                plt.imshow(check, cmap='viridis')
-                plt.imshow(mask, cmap='jet_r')
-                plt.title('Overlay of data field and river basin mask')
-                plt.show(block=False)
+            if verbose:
+                     print(f'Regional mask created: mask shape {mask.shape}, grid shape {Pgrid.shape}')
+                     import matplotlib.pyplot as plt
+                     check = Pgrid[1, :, :] if len(np.shape(Pgrid)) == 3 else Pgrid[0, 0, :, :]
+                     plt.figure()
+                     plt.imshow(check, cmap='viridis')
+                     plt.imshow(mask, cmap='jet_r')
+                     plt.title('Overlay of data field and river basin mask')
+                     plt.show(block=False)
 
             # Aggregate precipitation timeseries over the basin
             if len(np.shape(Pgrid))>3: #forecast/multi members dataset
@@ -221,8 +268,7 @@ def import_netcdf_for_cumulative_variable(file_path, possible_names,shape,verbos
     except Exception as e:
         raise RuntimeError(f"Error importing data: {e}")
 
-
-    return ts, m_cal, Pgrid
+    return ts, m_cal, Pgrid,Lat,Lon,day
 
 def load_shape(shape_path):
     """
@@ -256,9 +302,10 @@ def load_shape(shape_path):
     except Exception as e:
         raise ValueError(f"Error loading shapefile: {e}")
 
-# ---------------------------
-# Helpers for streamflow data
-# ---------------------------
+# ====================================
+# STREAMFLOW DATA
+# helpers
+# ====================================
 
 
 _DEF_NA = ['-9999', '-999.000', '@', '-', '- ', '', ' ', '--', 'NA', 'NaN', 'nan']
@@ -468,6 +515,7 @@ def _pick_date_col(df: pd.DataFrame) -> str:
         return best_col
 
     raise ValueError("Impossibile determinare una colonna data (singola, split o euristica).")
+
 def _date_related_cols(df: pd.DataFrame, date_col: str) -> set:
     """
     Return the set of columns related to date information that should be excluded
@@ -575,7 +623,7 @@ def _pick_value_col(df: pd.DataFrame, exclude_cols=None) -> str:
 
     return df.columns[0]
 
-def _coerce_to_monthly(df, date_col, value_col, min_days=20):
+def _coerce_to_monthly(df, date_col_name, value_col_name, min_days=20,rolling = False):
     """
     Coerce daily streamflow data to monthly means, applying a minimum valid-days rule.
 
@@ -585,8 +633,8 @@ def _coerce_to_monthly(df, date_col, value_col, min_days=20):
 
     Args:
         df (pd.DataFrame): Input dataframe with date and value columns.
-        date_col (str): Name of the datetime column.
-        value_col (str): Name of the numeric value column.
+        date_col_name (str): Name of the datetime column.
+        value_col_name (str): Name of the numeric value column.
         min_days (int): Minimum number of valid daily entries to accept a monthly mean.
 
     Returns:
@@ -597,34 +645,103 @@ def _coerce_to_monthly(df, date_col, value_col, min_days=20):
 
     df = df.copy()
     try: #works for stings, not for timestamp
-        format = _detect_date_format(df[date_col][0])
-        df[date_col] = pd.to_datetime(df[date_col], format=format, errors="coerce")
+        format = _detect_date_format(df[date_col_name][0])
+        df[date_col_name] = pd.to_datetime(df[date_col_name], format=format, errors="coerce")
     except AttributeError:
-       df[date_col] = pd.to_datetime(df[date_col],errors="coerce")
-    df = df.dropna(subset=[date_col, value_col])
+       df[date_col_name] = pd.to_datetime(df[date_col_name],errors="coerce")
+    df = df.dropna(subset=[date_col_name, value_col_name])
     # df = df.sort_values(date_col)
 
     # Check frequency: daily if multiple distinct days per month
-    is_daily = df[date_col].dt.day.nunique() > 4
+    is_daily = df[date_col_name].dt.day.nunique() > 4
 
     if is_daily:
-        print(f"Daily resolution detected: aggregating to monthly means (min_valid_days={min_days}).")
-        monthly = (
-            df.resample('ME', on=date_col)[value_col]
-            .agg(['mean', 'count'])  # mean = nanmean, count = non-NaN
-            .rename(columns={'mean': value_col, 'count': 'valid_days'})
-            .reset_index()
-        )
+        if rolling:
+            print("Aggregating with 30-day rolling windows (backwards from anchor day)...")
 
-        monthly.loc[monthly['valid_days'] < min_days, value_col] = pd.NA
+            dates = pd.to_datetime(df[date_col_name])
+            values = df[value_col_name].to_numpy(dtype=float)
+            day = int(dates.iloc[-1].day)  # anchor day, same logic as your other method
+
+
+            # ── fill gaps in dates/values before any anchor logic ────────────────────────
+            dates = pd.to_datetime(df[date_col_name])
+            values = df[value_col_name].to_numpy(dtype=float)
+
+            # complete daily index from first to last date
+            full_index = pd.date_range(start=dates.iloc[0], end=dates.iloc[-1], freq='D')
+
+            # find missing dates
+            missing_dates = full_index.difference(dates)
+            if len(missing_dates):
+                print(f"Found {len(missing_dates)} missing dates — filling with NaN")
+                fill_df = pd.DataFrame({
+                    date_col_name: missing_dates,
+                    value_col_name: np.nan,
+                })
+                df = (
+                    pd.concat([df[[date_col_name, value_col_name]], fill_df])
+                    .sort_values(date_col_name)
+                    .reset_index(drop=True)
+                )
+                dates = pd.to_datetime(df[date_col_name])
+                values = df[value_col_name].to_numpy(dtype=float)
+
+            # one anchor index per calendar month
+            unique_months = sorted(set((d.year, d.month) for d in dates))
+            anchor_idx = [
+                _find_anchor(dates.dt.day.values,
+                             dates.dt.month.values,
+                             dates.dt.year.values, y, m, day)
+                for y, m in unique_months
+            ]
+            anchor_idx = [i for i in anchor_idx if i is not None]
+            windows = list(zip(anchor_idx[:-1], anchor_idx[1:]))
+            # check
+            # for w in windows[-30:]:
+            #     print(f" da {dates[w[0]]}    a    {dates[w[1]]}")
+
+            rows = []
+            for i,(start,end) in enumerate(windows):
+                chunk = values[start:end]
+                valid = chunk[~np.isnan(chunk)]
+
+                if len(valid) < min_days:
+                    metric = np.nan
+                else:
+                    metric = np.nanmean(chunk)  # or np.nansum if cumulative
+
+                rows.append({
+                    date_col_name: dates.iloc[end],
+                    value_col_name: metric,
+                    'valid_days': len(valid),
+                })
+
+            monthly = pd.DataFrame(rows)
+
+
+
+        else:
+            print(f"Daily resolution detected: aggregating to monthly means (min_valid_days={min_days}).")
+            day = None
+            monthly = (
+                df.resample('ME', on=date_col_name)[value_col_name]
+                .agg(['mean', 'count'])  # mean = nanmean, count = non-NaN
+                .rename(columns={'mean': value_col_name, 'count': 'valid_days'})
+                .reset_index()
+            )
+
+            monthly.loc[monthly['valid_days'] < min_days, value_col_name] = pd.NA
+
 
     else:
         monthly = df.copy()
+        day = None
     # Build m_cal
-    ts = monthly[value_col].values
-    m_cal = np.column_stack((monthly[date_col].dt.month, monthly[date_col].dt.year))
+    ts = monthly[value_col_name].values
+    m_cal = np.column_stack((monthly[date_col_name].dt.month, monthly[date_col_name].dt.year))
 
-    return monthly, ts, m_cal
+    return monthly, ts, m_cal,day
 
 # ---------------------------
 # specific ingestion for CSV
@@ -760,7 +877,7 @@ def _read_csv_smart(file_path: str) -> pd.DataFrame:
     return df
 
 
-def _pipeline_common(df, origin_label=""):
+def _pipeline_common(df, origin_label="",rolling = False):
     """
       Standard pipeline for cleaning, detecting, and converting streamflow data to monthly format.
 
@@ -785,7 +902,7 @@ def _pipeline_common(df, origin_label=""):
     value_col_name = _pick_value_col(df, exclude_cols=exclude)
 
 
-    monthly_df, ts, m_cal = _coerce_to_monthly( df, date_col_name, value_col_name)
+    monthly_df, ts, m_cal,day = _coerce_to_monthly( df, date_col_name, value_col_name,rolling = rolling)
 
 
 
@@ -795,12 +912,12 @@ def _pipeline_common(df, origin_label=""):
     print(f"data starts from [{m_cal[0,0]} {m_cal[0,1]}] and ends on [{m_cal[-1,0]} {m_cal[-1,1]}].")
     print("#########################################################################")
 
-    return ts, m_cal
+    return ts, m_cal,day
 
 # ---------------------------
 # Unified API  + wrapper
 # ---------------------------
-def load_streamflow(file_path):
+def load_streamflow(file_path,rolling=False):
     """
     Robust loader for streamflow data from CSV or Excel files.
 
@@ -823,17 +940,17 @@ def load_streamflow(file_path):
     ext = os.path.splitext(file_path)[1].lower()
     if ext in ('.csv', '.txt'):
         df = _read_csv_smart(file_path)
-        return _pipeline_common(df, origin_label="csv")
+        return _pipeline_common(df, origin_label="csv",rolling=rolling)
     elif ext in ('.xlsx', '.xls'):
         df = pd.read_excel(file_path)
         df = df.dropna(axis=1, how='all')
-        return _pipeline_common(df, origin_label="Excel")
+        return _pipeline_common(df, origin_label="Excel",rolling=rolling)
     else:
         raise ValueError(f"Estensione non riconosciuta: {ext}")
 
-#--------------------------------------
-# Teleindex
-# ----------------------------------------
+# ====================================
+# TELEINDEX from NETCDF
+# ====================================
 
 def get_teleindex_info(data_path):
     data = nc.Dataset(data_path)
@@ -855,6 +972,7 @@ def get_teleindex_info(data_path):
                 time_values = [base_date + relativedelta(months=int(t)) for t in var[:]]
                 starting_date, ending_date = time_values[0], time_values[-1]
     return var_name,starting_date, ending_date
+
 def import_timeseries(data_path):
     var_name, starting_date, ending_date = get_teleindex_info(data_path)
     data = nc.Dataset(data_path)
@@ -870,6 +988,282 @@ def import_timeseries(data_path):
     #     print(f'discontinuità rilevate in {lista[i]} -  {Vars[i][1]}')
 
 
+# ======================================
+# Utility functions for ROLLING ESTIMATES
+# from DAILY time series
+# ======================================
+def _to_date_array(dates_daily):
+    """
+    Convert an array of dates (pandas Timestamps, np.datetime64, or
+    datetime.date) into a plain numpy array of datetime.date objects.
+    """
+    d0 = dates_daily[0]
+    if hasattr(d0, 'date') and callable(d0.date):        # pandas Timestamp
+        return np.array([d.date() for d in dates_daily])
+    if isinstance(d0, np.datetime64):
+        return np.array([
+            d.astype('datetime64[D]').item()              # → datetime.date
+            for d in dates_daily
+        ])
+    return np.asarray(dates_daily)                        # already date
+
+
+def _safe_day(year, month, day):
+    """
+    Return date(year, month, day) clamped to the last valid day of the
+    month  (handles ref_day=31 for months with 28-30 days).
+    """
+    max_d = monthrange(year, month)[1]
+    return date(year, month, min(day, max_d))
+
+
+# =====================================================================
+#  COMPUTE SHIFTED BOUNDARIES
+# =====================================================================
+def compute_shifted_boundaries(dates, ref_day):
+    """
+    Build the sorted list of right-edge boundaries for shifted months.
+
+    Each boundary is a datetime.date falling on `ref_day` (or the last
+    valid day of the month).  The returned list has N+1 elements, so
+    that boundaries[i-1]+1 … boundaries[i]  defines the i-th shifted
+    month (i = 1 … N).
+
+    Parameters
+    ----------
+    dates : array-like of datetime.date
+        Full daily date axis (sorted, ascending).
+    ref_day : int
+        Day-of-month that marks the *end* of each shifted window.
+
+    Returns
+    -------
+    boundaries : list of datetime.date
+        Sorted, length N+1.  The first element is the left sentinel
+        (one day *before* the earliest full shifted month).
+    """
+    first_date = dates[0]
+    last_date  = dates[-1]
+
+    # Start from the latest possible boundary ≤ last_date
+    y, m = last_date.year, last_date.month
+    rb = _safe_day(y, m, ref_day)
+    if rb > last_date:
+        m -= 1
+        if m == 0:
+            m, y = 12, y - 1
+        rb = _safe_day(y, m, ref_day)
+
+    boundaries = []
+    while rb >= first_date:
+        boundaries.append(rb)
+        m -= 1
+        if m == 0:
+            m, y = 12, y - 1
+        rb = _safe_day(y, m, ref_day)
+
+    # The last rb is the left sentinel (before the first full month)
+    boundaries.append(rb)
+    return sorted(boundaries)
+
+# =====================================================================
+#  AGGREGATE DAILY → SHIFTED MONTHLY  (point series)
+# =====================================================================
+def aggregate_daily_shifted(ts_daily, dates_daily, ref_day, agg_func="sum", min_valid_days=20):
+    """
+    Aggregate a daily time series into shifted monthly values.
+
+    Parameters
+    ----------
+    ts_daily : ndarray (N_days,)
+        Daily values (precipitation, streamflow, PET, …).
+    dates_daily : array-like (N_days,)
+        Corresponding dates.
+    ref_day : int
+        Day-of-month that marks the *right edge* of each shifted window.
+        Example: ref_day=18  →  "November" spans 19-Oct … 18-Nov.
+    agg_func : {"sum", "mean"}
+        "sum" for precipitation / balance, "mean" for streamflow / PET / T.
+    min_valid_days : int
+        Minimum number of non-NaN days to accept a shifted month.
+        Below this threshold a warning is emitted (value still included).
+
+    Returns
+    -------
+    ts_monthly : ndarray (N_months,)
+    m_cal : ndarray (N_months, 2)
+        Column 0 = month, column 1 = year  (of the right boundary date).
+    """
+    dates = _to_date_array(dates_daily)
+    boundaries = compute_shifted_boundaries(dates, ref_day)
+
+    ts_list   = []
+    mcal_list = []
+
+    for i in range(1, len(boundaries)):
+        left  = boundaries[i - 1] + timedelta(days=1)
+        right = boundaries[i]
+
+        mask  = (dates >= left) & (dates <= right)
+        chunk = ts_daily[mask]
+
+        # Count valid (non-NaN) values
+        if np.issubdtype(chunk.dtype, np.floating):
+            n_valid = int(np.sum(~np.isnan(chunk)))
+        else:
+            n_valid = len(chunk)
+
+        if n_valid < min_valid_days:
+            warnings.warn(
+                f"Shifted month ending {right}: only {n_valid} valid days "
+                f"(threshold={min_valid_days})."
+            )
+
+        if n_valid == 0:
+            value = np.nan
+        elif agg_func == "sum":
+            value = float(np.nansum(chunk))
+        elif agg_func == "mean":
+            value = float(np.nanmean(chunk))
+        else:
+            raise ValueError(f"Unknown agg_func: {agg_func!r}")
+
+        ts_list.append(value)
+        mcal_list.append([right.month, right.year])
+
+    return np.array(ts_list, dtype=float), np.array(mcal_list, dtype=int)
+
+# =====================================================================
+#  AGGREGATE DAILY → SHIFTED MONTHLY  (gridded 3-D)
+# =====================================================================
+def aggregate_daily_shifted_grid(Pgrid_daily,dates_daily,
+    ref_day, agg_func="sum", min_valid_days=20):
+    """
+    Like `aggregate_daily_shifted` but for gridded data.
+
+    Parameters
+    ----------
+    Pgrid_daily : ndarray (N_days, ny, nx)
+    dates_daily : array-like (N_days,)
+    ref_day, agg_func, min_valid_days : same as above.
+
+    Returns
+    -------
+    Pgrid_monthly : ndarray (N_months, ny, nx)
+    m_cal : ndarray (N_months, 2)
+    """
+    dates = _to_date_array(dates_daily)
+    boundaries = compute_shifted_boundaries(dates, ref_day)
+
+    n_months = len(boundaries) - 1
+    ny, nx   = Pgrid_daily.shape[1], Pgrid_daily.shape[2]
+    Pgrid_monthly = np.full((n_months, ny, nx), np.nan)
+    mcal_list = []
+
+    for i in range(1, len(boundaries)):
+        left  = boundaries[i - 1] + timedelta(days=1)
+        right = boundaries[i]
+        mask  = (dates >= left) & (dates <= right)
+
+        chunk = Pgrid_daily[mask, :, :]           # (n_days_in_window, ny, nx)
+        if agg_func == "sum":
+            Pgrid_monthly[i - 1] = np.nansum(chunk, axis=0)
+        else:
+            Pgrid_monthly[i - 1] = np.nanmean(chunk, axis=0)
+
+        mcal_list.append([right.month, right.year])
+
+    return Pgrid_monthly, np.array(mcal_list, dtype=int)
+
+# =====================================================================
+#  REFIT DISTRIBUTION ON SHIFTED BASELINE
+# =====================================================================
+def refit_gamma_shifted(ts_daily,dates_daily,ref_day,
+    start_baseline_year, end_baseline_year, agg_func="sum",
+):
+    """
+    Fit a Gamma distribution for each month (1–12) using shifted
+    aggregation windows over the baseline period.
+
+    For month `m` and ref_day=18 the samples are built as:
+        for each year in [start_baseline_year .. end_baseline_year]:
+            aggregate daily values from  (ref_day of month m-1)+1  to
+            ref_day of month m  →  one sample
+
+    Parameters
+    ----------
+    ts_daily : ndarray (N_days,)
+    dates_daily : array-like (N_days,)
+    ref_day : int
+    start_baseline_year, end_baseline_year : int
+    agg_func : {"sum", "mean"}
+
+    Returns
+    -------
+    gamma_params : dict
+        {month_number: (alpha, loc, beta, shift)  or  None}
+
+        `shift` is a small positive constant added to handle zeros before
+        fitting.  Pass it through so that `_compute_spi` / `f_spi` can
+        apply the same shift when transforming new data.
+
+        IMPORTANT: adapt the dict structure to match what your
+        _compute_spi / f_spi actually expect.  This skeleton uses
+        (alpha, loc, beta, shift) — you may need to adjust.
+    """
+    from scipy.stats import gamma as gamma_dist
+
+    dates = _to_date_array(dates_daily)
+    gamma_params = {}
+
+    for m in range(1, 13):
+        samples = []
+
+        for yr in range(start_baseline_year, end_baseline_year + 1):
+            # Right boundary: ref_day of month m, year yr
+            right = _safe_day(yr, m, ref_day)
+
+            # Left boundary: day after ref_day of previous month
+            prev_m = m - 1 if m > 1 else 12
+            prev_y = yr    if m > 1 else yr - 1
+            left = _safe_day(prev_y, prev_m, ref_day) + timedelta(days=1)
+
+            mask  = (dates >= left) & (dates <= right)
+            chunk = ts_daily[mask]
+
+            if len(chunk) == 0:
+                continue
+
+            val = float(np.nansum(chunk)) if agg_func == "sum" else float(np.nanmean(chunk))
+            if not np.isnan(val):
+                samples.append(val)
+
+        samples = np.array(samples)
+
+        if len(samples) < 3:
+            warnings.warn(
+                f"Month {m}: only {len(samples)} baseline samples for "
+                f"shifted fit — gamma unreliable."
+            )
+            gamma_params[m] = None
+            continue
+
+        # Handle zeros / negatives (same logic as f_spi)
+        shift = 0.0
+        if np.any(samples <= 0):
+            shift = float(np.abs(samples.min())) + 0.001
+            samples_fit = samples + shift
+        else:
+            samples_fit = samples
+
+        try:
+            alpha, loc, beta = gamma_dist.fit(samples_fit, floc=0)
+            gamma_params[m] = (alpha, loc, beta, shift)
+        except Exception as e:
+            warnings.warn(f"Month {m}: gamma fit failed ({e}).")
+            gamma_params[m] = None
+
+    return gamma_params
 
 
 # OLD WORKING SCRIPT TO INGEST CVS and EXCEL
