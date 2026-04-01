@@ -7,22 +7,25 @@
 **Drought Scan** is a Python library implementing a multi-temporal and basin-scale approach for drought analysis. It is designed to provide advanced tools for evaluating drought severity and trends at the river basin scale by integrating meteorological and hydrological data.
 
 The methodology is described in the article:  
-*Building a framework for a synoptic overview of drought* ([Read the article](https://www.sciencedirect.com/science/article/pii/S0048969724081063)).
+*Building a framework for a synoptic overview of drought* ([Read the article](https://www.sciencedirect.com/science/article/pii/S0048969724081063)),
 and is continuously developed within the activities of Drought Central ([DroughtCentral](https://droughtcentral.it)).
 
 ---
 
 ## Key Features
-- Calculation of standardized drought indices (e.g., SPI, SQI, SPEI,etc).
-- Integration of precipitation and streamflow data for basin-level analysis.
+- Calculation of standardized drought indices (e.g., SPI, SQI, SPEI, SPETI) via parametric (Gamma, Pearson III) or non-parametric (KDE) methods.
+- Integration of precipitation, streamflow, PET, temperature, and teleconnection data for basin-level analysis.
 - Multi-temporal scales for flexibility in drought assessment.
-- Possibility of generating synthetic graphs and seasonal trend analysis.
+- Spatial extension: gridded SPI/SIDI maps at every grid point within the basin.
+- Statistical diagnostics for distribution selection and goodness-of-fit evaluation.
+- Visualization tools for drought monitoring, trend detection, and seasonal analysis.
 
-
-for examples and usage notes see:
-- [User Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/user_guide.md) → Demonstrates how to initialize a Drought-Scan Object
-- [Visualization Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/visualization_guide.md) → Demonstrates how to use some visualization methods
-
+For examples and usage notes see:
+- [User Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/user_guide.md) — How to initialize and use DroughtScan objects.
+- [Visualization Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/visualization_guide.md) — Plotting methods and customization.
+- [Spatial Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/spatial_guide.md) — Gridded SPI/SIDI and trend maps.
+- [Statistical Diagnostics](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/statistics_tools.md) — Distribution fitting and standardization tools.
+- [Common Errors](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/common_errors.md) — Troubleshooting guide.
 ---
 ## Installation
 
@@ -76,66 +79,89 @@ Refer to the pyproject.toml file for more details about the DroughtScan package.
 ## What Drought-Scan Does
 
 Drought-Scan provides an **end-to-end framework** for monitoring and analyzing drought conditions at the basin scale.  
-It combines **statistical drought indices**, **quantitative analysis**  and **visualization tools**  into a single Python package.
+It combines **statistical drought indices**, **quantitative analysis**, and **visualization tools** into a single Python package.
 
 ### Core Capabilities
-- **Data handling**: Organizes meteorological and hydrological time series (precipitation, streamflow, external predictors) into a consistent calendar (`m_cal`) and spatial framework (shapefiles of provinces/basins).
+- **Data handling**: Organizes meteorological and hydrological time series (precipitation, streamflow, PET, temperature, teleconnections) into a consistent calendar (`m_cal`) and spatial framework (shapefiles).
 - **Drought indices**:
   - **SPI (Standardized Precipitation Index)** from 1 to K months (default K=36).
   - **SIDI (Standardized Integrated Drought Index)**: a weighted multi-scale index, standardized to mean 0 and variance 1.
   - **CDN (Cumulative Deviation from Normal)**: integrates long-term memory of anomalies by cumulating the standard index at 1-month scale.
   - **SQI (Standardized Streamflow Index)**: SPI-like indicator based on river discharge.
-- **Visualization**: Provides the three “pillars” of drought monitoring:
-  1. Heatmap of SPI(SQI/SPEI-like) 1–K set.
-  2. SIDI as a compact synthesis across scales.
-  3. CDN as a long-memory diagnostic.
-- **precipitation to streamflow analysis**: Allows joint analysis of precipitation- and streamflow-based indices (e.g., SIDI vs SQI) to measure the strength and the responding time of the hydrographic basin to drought events. 
+  - **SPEI / SPETI**: Balance- and PET-based drought indices.
+- **Standardization methods**: Gamma (`f_spi`), Pearson III (`f_spei`), Gaussian KDE (`f_kde`, default), z-score (`f_zscore`).
+- **Visualization**: the three "pillars" of drought monitoring (heatmap, SIDI, CDN), plus trend analysis, monthly profiles, spatial maps, and precipitation–streamflow diagnostics.
+- **Spatial extension**: Compute SPI, SIDI, and CDN trend maps at every grid point within the basin, with parallel processing.
 
-## The `DroughtScan` Object
+---
 
-When you initialize a `DroughtScan` object, it stores both the **input data** and the **derived drought indicators**.  
-It acts as the main container of the framework, holding attributes and methods for analysis, visualization, and forecasting.
+## Available Classes
 
-### Core Attributes
-- **`ts`**: monthly precipitation (or streamflow) time series.  
-- **`m_cal`**: calendar aligned with the time series.  
-- **`spi_like_set`**: set of SPI1–K series (default K=36).  
-- **`SIDI`**: Standardized Integrated Drought Index (weighted ensemble of SPI1–K).  
-- **`CDN`**: Cumulative Deviation from Normal (cumulative sum of SPI1).  
+| Class | Input | Index | Use case |
+|-------|-------|-------|----------|
+| `Precipitation` | NetCDF or arrays | SPI | Meteorological drought |
+| `Streamflow` | CSV/Excel or arrays | SQI | Hydrological drought |
+| `Pet` | NetCDF or arrays | SPETI | Evapotranspiration analysis |
+| `Balance` | NetCDF (P + PET) | SPEI | Water balance drought |
+| `Temperature` | NetCDF or arrays | STI | Temperature variability |
+| `Teleindex` | CSV/Excel or arrays | (custom) | Large-scale climate drivers |
+
+All classes share the same base (`BaseDroughtAnalysis`) and produce the same core outputs: `ts`, `m_cal`, `spi_like_set`, `SIDI`, `CDN`.
+
+---
+
+## Core Attributes
+- **`ts`**: monthly time series (precipitation, streamflow, etc.).  
+- **`m_cal`**: calendar aligned with the time series, shape (N, 2) with [month, year].  
+- **`spi_like_set`**: set of SPI-like indices at scales 1–K, shape (K, N).  
+- **`SIDI`**: Standardized Integrated Drought Index, shape (N, 5) for 5 weighting schemes.  
+- **`CDN`**: Cumulative Deviation from Normal, shape (N,).  
 - **`basin_name`**: name of the basin under analysis.  
-- **`index_name`** name of the spi-like standardized index (default = 'SPI')
-- **`shape`**: basin geometry.  
-- **`area_kmq`**: area of the basin.  
+- **`index_name`**: name of the standardized index (e.g., 'SPI', 'SQI').  
+- **`shape`**: basin geometry (GeoDataFrame).  
+- **`area_kmq`**: area of the basin in km².  
 - **`K`**: maximum SPI scale (default 36).  
-- **`threshold`**: default threshold for severe drought (−1).
-- **`Pgrid`**: input gridded data within the basin.
+- **`threshold`**: severity threshold (default −1).
+- **`Pgrid`**: input gridded data within the basin (when initialized from NetCDF).
 
+---
 
-### Main Methods
-- **`plot_scan()`**: full DS overview (heatmap, SIDI, CDN).  
-- **`plot_monthly_profile()`**:climatology plot (monthly profile) of the input variable
-- **`normal_values()`**: Compute the "normal" values of the climatology using the inverse function of the SPI-like index.
-- **`find_trends()`** Analyze trends in the CDN using rolling windows and linear regression (without any plot)
-- **`plot_trends()`**: search, quantify, and plot trends in specific moving windows of the CDN curve
-- **`severe_events()`**: list and plot severe drought events, ordered by magnitude or duration
-- **`plot_spi_fit()`** plot the fitted relationship between the SPI values and the raw variable
-- **`recalculate_SIDI()`**: recompute SIDI with custom subset (K) of spi-like set ranging from 1 to K  
+## Main Methods
 
+### All classes (BaseDroughtAnalysis)
+- **`plot_scan()`**: full overview (heatmap, SIDI, CDN).  
+- **`plot_monthly_profile()`**: climatology plot (monthly profile) of the input variable.
+- **`plot_boundary()`**: basin shapefile on an equal-area projection.
+- **`normal_values()`**: compute "normal" values of the climatology via the inverse SPI-like function.
+- **`find_trends()`**: analyze trends in CDN (or any external series) using rolling-window regression.
+- **`plot_trends()`**: visualize CDN trend bars for multiple window sizes.
+- **`severe_events()`**: list and plot severe drought events, ordered by magnitude or duration.
+- **`plot_spi_fit()`**: plot the fitted relationship between index values and the raw variable.
+- **`recalculate_SIDI()`**: recompute SIDI with a custom K.
+- **`export_scan_plot_csv()`**: export data needed to replicate `plot_scan` in external tools.
 
-ONLY FOR PRECIPITATION WITH AVAILABLE STREAMFLOW DATA:
-- **`analyze_correlation()`**: find the combination of month-scales and weights that maximize the correlaiotn between SIDI and SQI1
-- **`set_optimal_SIDI()`**: recompute SIDI with the optimal subset of the spi-like set as provied by `analyze_correlation().
-- **`plot_covariates()`**: plot the time series of the covariate: optimal_SIDI along with the target variable (generaly SQI1)
+### Precipitation, Pet, Balance (meteorological drivers)
+- **`analyze_correlation(streamflow)`**: find the K and weighting scheme that maximize correlation between SIDI and SQI₁.
+- **`analyze_correlation_seasonal(streamflow)`**: same, per-season optimization.
+- **`set_optimal_SIDI()`**: recompute SIDI with optimal parameters from `analyze_correlation`.
+- **`set_optimal_SIDI_seasonal()`**: recompute SIDI with season-specific parameters.
+- **`plot_covariates(streamflow)`**: plot optimal SIDI alongside SQI₁.
+- **`spi_sqi_corr(streamflow)`**: month-wise SPIₖ–SQI₁ correlation heatmap (R² matrix).
 
-ONLY FOR STREAMFLOW:
+### Precipitation only
+- **`spatial_maps()`**: compute gridded SPI and SIDI at a target timestamp.
+- **`spatial_trends()`**: compute pixel-wise CDN trend maps.
+- **`plot_spatial()`**: visualize spatial maps of SIDI, SPI, or CDN trends.
 
--**`gap_filling()`**:Reconstruct monthly streamflow gaps thanks to the best correlation with precipitation data found out in `analyze_correlation()`.
+### Streamflow only
+- **`gap_filling(precipitation)`**: reconstruct missing streamflow using optimized SIDI.
+- **`plot_annual_ts(DSO)`**: compare annual streamflow with an external driver.
+- **`BFI()`**: compute the Baseflow Index (daily data required).
 
--**`plot_annual_ts(DSO)`**: plot annual timeseries along with annual time series of selected Drought Scan Object (DSO) among Precipitation, Pet, and Balance
+> **Note**: internal methods (prefixed with `_`) are used for calculations and should not be called directly.  
+> For detailed reference and examples, see the [User Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/user_guide.md) and [Visualization Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/visualization_guide.md).
 
-> **Note**: internal methods (prefixed with `_`) are used for calculations and should not be called directly by the user.  
-> For a detailed reference and usage examples, see the for examples and usage notes see the 
-[User Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/user_guide.md) and  [Visualization Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/visualization_guide.md)
+---
 
 ## License
 
@@ -150,6 +176,6 @@ For inquiries: arianna.dipaola@cnr.it
 ## Authors
 
 - **Arianna Di Paola** CNR-IBE, Italy — Lead developer and maintainer; arianna.dipaola@cnr.it
-- **Massimiliano Pasqui** CNR-IBE, Italy — Feedback,   scientific guidance, methodological validation and review.
+- **Massimiliano Pasqui** CNR-IBE, Italy — Feedback, scientific guidance, methodological validation and review.
 - **Ramona Magno** CNR-IBE, Italy — Feedback, scientific guidance, methodological validation and review.
-- **Leando Rocchi** CNR-IBE, Italy — technical support
+- **Leandro Rocchi** CNR-IBE, Italy — Technical support.
