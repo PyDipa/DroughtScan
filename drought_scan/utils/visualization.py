@@ -224,8 +224,13 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_p
 
 
     # -------------------- parametri di default --------------------
+    if DSO.is_seasonal_sidi:
+        print(f"Note: SIDI is seasonally optimized — "
+              f"weight_index={weight_index} is ignored (all columns identical).")
+
     if weight_index is None:
         weight_index = 2  # log-decreasing
+
 
     # -------------------- SIDI: ricalcolo opzionale --------------------
     if optimal_k is not None:
@@ -762,11 +767,6 @@ def plot__covariates(DSO, streamflow, weight_index,year_ext=None, split_plot=Fal
     - Assumes that DSO and streamflow share at least some overlapping
       monthly timeline (`m_cal`).
     """
-
-    if not hasattr(DSO, 'optimal_k'):
-        raise TypeError(
-            "The DSO object must be optimized (and updated) to correlate with streamflow before calling this function."
-        )
 
     # Find temporal overlap
     self_indices, streamflow_indices = find_overlap(DSO.m_cal, streamflow.m_cal)
