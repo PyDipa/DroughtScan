@@ -1,0 +1,307 @@
+# Spatial Extension
+
+This section documents the **spatial analysis tools** available in Drought-Scan.  
+While the standard workflow aggregates gridded precipitation to a single basin-average time series,
+the spatial extension allows computing **SPI and SIDI at every grid point** within the basin,
+producing spatially distributed maps of drought conditions at a target date.
+
+---
+
+## 1. Overview
+
+When a `Precipitation` object is initialized from a NetCDF file, the library internally retains
+the full 3D precipitation grid (`ds.Pgrid`, shape: `n_months × n_rows × n_cols`) before spatial
+aggregation. The spatial methods leverage this grid to replicate the same SPI/SIDI pipeline
+independently at each valid grid point.
+
+Output maps are stored in the DSO and can be visualized with `plot_spatial()`.
+
+> **Note on performance**  
+> Computing SPI at K temporal scales for every grid point is computationally intensive.
+> The library automatically parallelizes the computation across all available CPU cores
+> using `joblib`, and skips masked or degenerate grid points (e.g., outside the shapefile,
+> constant series) before starting. An estimated completion time is printed at the beginning
+> of the run.
+
+---
+
+## 2. `spatial_maps`
+
+### 2.1 Purpose
+
+Computes, for each valid grid point within `ds.Pgrid`:
+
+- **SPI** at selected temporal scales (`month_scales`)
+- **SIDI** across all implemented weighting schemes
+
+All results are stored as spatial arrays in the DSO at a target timestamp.
+
+---
+
+### 2.2 Method signature
+
+```python
+ds.spatial_maps(
+    month_scales=None,
+    timestamp=None,
+    K=None
+)
+```
+
+#### Parameters
+
+- `month_scales` : list of int, optional  
+  Temporal scales for which SPI maps are stored.  
+  Default: `[1, 3, 6, 12, 18, 24]`.  
+  All values must be ≤ `K`; scales exceeding `K` are silently ignored with a warning.
+
+- `timestamp` : tuple `(month, year)`, optional  
+  Target date for the output maps.  
+  Default: last available timestamp in `ds.m_cal`.  
+  Example: `timestamp=(9, 2022)` for September 2022.
+
+- `K` : int, optional  
+  Maximum temporal scale. Overrides `ds.K` for this computation only.  
+  After the method completes, `ds.K` is restored to its original value.
+
+---
+
+### 2.3 Stored attributes
+
+After running `spatial_maps`, the following attributes are added to the DSO:
+
+- **`ds.SIDI_grid`** : ndarray, shape `(n_rows, n_cols, n_weights)`  
+  SIDI at the target timestamp for all weighting schemes.  
+  Access a specific weight with: `ds.SIDI_grid[:, :, weight_index]`  
+  Default display weight: `weight_index=2` (logarithmically decreasing).
+
+- **`ds.SPI_grid`** : dict `{scale: ndarray (n_rows, n_cols)}`  
+  SPI maps at the target timestamp for each scale in `month_scales`.  
+  Example: `ds.SPI_grid[12]` is the SPI-12 map.
+
+- **`ds.spatial_timestamp`** : ndarray `(2,)`, i.e. `[month, year]`  
+  The timestamp corresponding to the stored maps.
+
+Grid points outside the shapefile or with degenerate series (all-NaN, zero variance)
+remain `np.nan` in all output arrays.
+
+---
+
+### 2.4 Example usage
+
+```python
+import drought_scan as DS
+
+shape_path = 'tests/data/bacino_pontelagoscuro.shp'
+prec_path  = 'tests/data/LAPrec1871.v1.1.nc'
+
+ds = DS.Precipitation(
+    prec_path=prec_path,
+    shape_path=shape_path,
+    start_baseline_year=1900,
+    end_baseline_year=1950,
+    basin_name='Po'
+)
+
+# Compute spatial SIDI and SPI maps at the last available timestamp
+ds.spatial_maps()
+
+# Compute at a specific date, with custom scales and K
+ds.spatial_maps(
+    month_scales=[1, 3, 6, 12, 18, 24],
+    timestamp=(8, 2003),   # August 2003
+    K=36
+)
+
+# Inspect outputs
+print("SIDI grid shape:", ds.SIDI_grid.shape)      # (n_rows, n_cols, n_weights)
+print("SPI-12 map shape:", ds.SPI_grid[12].shape)  # (n_rows, n_cols)
+print("Timestamp:", ds.spatial_timestamp)           # [8, 2003]
+```
+
+---
+
+### 2.5 Accessing specific weighting schemes
+
+SIDI is computed for all five weighting schemes (see [User Guide](user_guide.md), Section 3, `weight_index`).
+You can extract any of them:
+
+```python
+import matplotlib.pyplot as plt
+
+# Default: logarithmically decreasing weights (weight_index=2)
+sidi_map = ds.SIDI_grid[:, :, 2]
+
+# Equal weights
+sidi_equal = ds.SIDI_grid[:, :, 0]
+```
+
+---
+
+## 3. `spatial_trends`
+
+### 3.1 Purpose
+
+Computes pixel-wise **CDN trend maps** at a target timestamp. For each valid grid point,
+the method computes the CDN (cumulative sum of SPI-1) and applies rolling trend analysis
+over each specified window. The net change (delta) is converted to mm-equivalent using
+pixel-level calibration coefficients.
+
+---
+
+### 3.2 Method signature
+
+```python
+ds.spatial_trends(
+    windows=None,
+    timestamp=None
+)
+```
+
+#### Parameters
+
+- `windows` : list of int, optional  
+  Moving window sizes in months.  
+  Default: `[24, 36, 60, 120]`.
+
+- `timestamp` : tuple `(month, year)`, optional  
+  Target date for the output maps.  
+  Default: last available timestamp in `ds.m_cal`.
+
+---
+
+### 3.3 Stored attributes
+
+After running `spatial_trends`, the following attribute is added:
+
+- **`ds.trend_grid`** : dict `{window: ndarray (n_rows, n_cols)}`  
+  mm-equivalent net change over each window at the target timestamp.  
+  Pixels with no significant trend are set to `0.0`.
+
+The `spatial_timestamp` attribute is also updated. If it differs from a previously
+stored timestamp, `SIDI_grid` and `SPI_grid` are invalidated — rerun `spatial_maps`
+for consistency.
+
+---
+
+### 3.4 Example usage
+
+```python
+# Compute CDN trend maps at the last available timestamp
+ds.spatial_trends(windows=[36, 60, 120])
+
+# Inspect
+print("Available windows:", list(ds.trend_grid.keys()))
+print("Trend 60-month shape:", ds.trend_grid[60].shape)
+```
+
+---
+
+## 4. `plot_spatial`
+
+### 4.1 Purpose
+
+Visualizes a spatial map of SIDI, SPI, or CDN trends overlaid on the basin shapefile boundary.
+The colormap is automatically centered on zero and uses a discrete drought/surplus scale.
+
+> **Note**  
+> This method requires that `spatial_maps` (for SIDI/SPI) or `spatial_trends` (for CDN)
+> has been run before.
+
+---
+
+### 4.2 Method signature
+
+```python
+ds.plot_spatial(
+    var='SIDI',
+    weight_index=2,
+    month_scale=None,
+    ax=None,
+    title=None
+)
+```
+
+#### Parameters
+
+- `var` : `'SIDI'`, `'SPI'`, or `'CDN'`, default `'SIDI'`  
+  Which index to display.
+
+- `weight_index` : int, default `2`  
+  Weighting scheme to display when `var='SIDI'`.  
+  Ignored when `var='SPI'` or `var='CDN'`.
+
+- `month_scale` : int, optional  
+  Required when `var='SPI'`: must be one of the keys in `ds.SPI_grid`.  
+  Required when `var='CDN'`: must be one of the keys in `ds.trend_grid`.
+
+- `ax` : `matplotlib.axes.Axes`, optional  
+  External axes for integration in multi-panel figures.  
+  If `None`, a new figure is created.
+
+- `title` : str, optional  
+  Custom title. If `None`, the method auto-generates a title with the index name and timestamp.
+
+#### Returns
+`matplotlib.axes.Axes`
+
+---
+
+### 4.3 Example usage
+
+```python
+# Default: SIDI map with weight_index=2
+ds.plot_spatial()
+
+# SPI-12 map
+ds.plot_spatial(var='SPI', month_scale=12)
+
+# CDN trend map (60-month window, in mm)
+ds.plot_spatial(var='CDN', month_scale=60)
+
+# Custom title
+ds.plot_spatial(var='SIDI', weight_index=0, title='SIDI (equal weights) — August 2003')
+
+# Integration in a multi-panel figure
+import matplotlib.pyplot as plt
+
+fig, axs = plt.subplots(1, 3, figsize=(18, 5))
+ds.plot_spatial(var='SIDI', ax=axs[0])
+ds.plot_spatial(var='SPI', month_scale=3,  ax=axs[1])
+ds.plot_spatial(var='SPI', month_scale=12, ax=axs[2])
+plt.tight_layout()
+```
+
+---
+
+## 5. Practical notes
+
+- **Compute once per timestamp, visualize many times.**  
+  `spatial_maps` stores results for a single target timestamp. Once computed,
+  you can call `plot_spatial` as many times as you want on different variables, scales
+  or weight schemes without recomputing — as long as you are exploring the same timestamp.
+  To change the target date, run `spatial_maps` again with a new `timestamp`.
+
+- **Baseline consistency.**  
+  The spatial computation uses the same `start_baseline_year` and `end_baseline_year` defined
+  at initialization. For spatial maps to be comparable with the basin-average SIDI,
+  keep the baseline consistent.
+
+- **Computation time.**  
+  The method prints an estimated completion time before starting, based on the number of valid
+  grid points and available CPU cores. On a standard laptop (8 cores), a basin of ~2500 valid
+  grid points at K=36 takes approximately 5–10 minutes.
+
+- **`K` override.**  
+  Passing `K` to `spatial_maps` does not permanently change `ds.K`.
+  The original value is restored after the method completes, leaving the DSO in its original state.
+
+- **Grid points outside the basin.**  
+  All grid points that fall outside the shapefile or contain degenerate series (e.g., constant
+  precipitation, all-NaN) are automatically excluded from computation and set to `np.nan`
+  in the output maps. The number of valid points processed is printed at runtime.
+
+- **Timestamp consistency between `spatial_maps` and `spatial_trends`.**  
+  If you change the timestamp between calls, the library warns you and invalidates the
+  previously stored grids. Always rerun both methods if you need maps and trends at the
+  same timestamp.

@@ -7,7 +7,8 @@ This page lists some typical errors you may encounter when initializing or runni
 ## 1. Using `f_spi` with non-positive data
 
 **Context**:  
-By default, `Precipitation` and `Streamflow` objects use `calculation_method=f_spi`, which assumes **strictly positive values** (Gamma distribution).  
+The default `calculation_method` for all classes is `f_kde` (non-parametric, since v3.1.0).
+However, if you explicitly set `calculation_method=f_spi`, this assumes **strictly positive values** (Gamma distribution).  
 
 If your time series contains **zeros or negative numbers**, you may get:  
 
@@ -20,10 +21,11 @@ ValueError: The function value at x=nan is NaN; solver cannot continue
 - If your data can be negative (e.g. anomalies, balances), switch to a different calculation method such as:  
   - `f_spei` (Pearson III)  
   - `f_zscore` (Gaussian)  
+  - `f_kde` (non-parametric, the default)
 
 ```python
 from drought_scan.utils import f_spei
-ds = DS.Precipitation(ts=my_ts, m_cal=my_mcal,shape=my_shape,  calculation_method=f_spei)
+ds = DS.Precipitation(ts=my_ts, m_cal=my_mcal, shape=my_shape, calculation_method=f_spei)
 ```
 
 ---
@@ -65,7 +67,7 @@ ISO8601           (e.g., 1960-12-31T23:59:59Z)
 ## 3. Inconsistent baseline years or timestamp gaps
 
 **Context**:  
-When initializing a class (e.g., `Precipitation`, `Streamflow`, or `DroughtScan`), you may encounter:  
+When initializing a class (e.g., `Precipitation`, `Streamflow`, `Balance`), you may encounter:  
 
 ```text
 ValueError: Inconsistent baseline years: define a period within the data temporal domain: [  m yyyy] - [  m yyyy].
@@ -81,21 +83,25 @@ If you find gaps, correct the file (e.g., add the missing dates with NaN values 
 
 ---
 ## 4. Too few data points for fitting distributions
-Context:
-Some methods (e.g., f_spi with a Gamma distribution) require a sufficiently large dataset to fit the probability distribution.
-If you provide only a very short series (say, 10 years >> 10 values per month), the fit of the monthly distribution may fail to converge.
-Solution:
+
+**Context**:
+Some methods (e.g., `f_spi` with a Gamma distribution) require a sufficiently large dataset to fit the probability distribution.
+If you provide only a very short series (say, 10 years → 10 values per month), the fit of the monthly distribution may fail to converge.
+
+**Solution**:
 Use more data whenever possible (ideally several decades of monthly values).
-If you have a short record and still want to test the system, switch to a simpler method such as f_zscore, which does not require fitting a Gamma distribution.
+If you have a short record and still want to test the system, switch to a simpler method such as `f_zscore`, which does not require fitting a parametric distribution.
 
 ```python
-from drought_scan.utils import z_score
-ds = DS.Precipitation(ts=my_ts, m_cal=my_mcal,shape=my_shape, calculation_method=f_zscore)
+from drought_scan.utils import f_zscore
+ds = DS.Precipitation(ts=my_ts, m_cal=my_mcal, shape=my_shape, calculation_method=f_zscore)
 ```
 
+Alternatively, the default `f_kde` (non-parametric) is generally more robust than Gamma on short series, though it still requires a reasonable sample size.
 
 ## 5. General advice
 
 - Always verify that your **baseline years** are included in the data (otherwise index computation may fail).  
 - Ensure that `ts` (time series) and `m_cal` (calendar) arrays have the same length and no gaps in the timestamp.  
-- When possible, **visualize the raw data** (before computing indices) to catch unexpected values.  
+- When possible, **visualize the raw data** (before computing indices) to catch unexpected values.
+- Use the diagnostic tools in [statistics_tools.md](statistics_tools.md) to verify which distribution best fits your data before choosing a `calculation_method`.
