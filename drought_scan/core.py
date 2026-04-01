@@ -2437,13 +2437,6 @@ class Pet(BaseDroughtAnalysis):
             shape_path (str, optional): Path to the shapefile defining the basin.
             shape (object, optional): Shapefile geometry (if already loaded).
             K (int, optional): Maximum temporal scale for calculations. Default is 36.
-            weight_index (int, optional): Index of the weighting scheme to use for calculations.
-                - weight_index = 0: Equal weights
-                - weight_index = 1: Linear decreasing weights
-                - weight_index = 2: Logarithmically decreasing weights (default)
-                - weight_index = 3: Linear increasing weights
-                - weight_index = 4: Logarithmically increasing weights
-
             calculation_method (callable, optional): Method to use for drought calculations. Default is f_kde.
                 Available methods (in utils.py) are:
                 f_spi:   FOR  POSITIVE & RIGHT-SKEWED DATA (uses a Gamma Function) but works fine also for positive normal distribuited sample
@@ -2522,6 +2515,10 @@ class Balance(BaseDroughtAnalysis):
             K (int, optional): Maximum temporal scale for calculations. Default is 36.
             threshold (int, optional): Threshold to define severe events. Default is -1.
             calculation_method (callable, optional): Method to use for drought calculations. Default is f_kde.
+                Available methods (in utils.py) are:
+                f_spi:   FOR  POSITIVE & RIGHT-SKEWED DATA (uses a Gamma Function) but works fine also for positive normal distribuited sample
+                f_spei:  FOR REAL VALUES & RIGHT-SKEWED (uses a Pearson III function)
+                f_zscore FOR REAL VALUES NORMAL DISTRIBUTED
             verbose (bool, optional): Whether to print initialization messages. Default is True.
         """
         self.start_baseline_year = start_baseline_year
