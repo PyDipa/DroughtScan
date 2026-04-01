@@ -735,6 +735,36 @@ def _coerce_to_monthly(df, date_col_name, value_col_name, min_days=20,rolling = 
 
 
     else:
+        # monthly = df.copy()
+        # --- Already monthly: check for gaps in the calendar ---
+        df[date_col_name] = pd.to_datetime(df[date_col_name], errors="coerce")
+        df = df.sort_values(date_col_name).reset_index(drop=True)
+
+        # Build a complete monthly index from first to last date
+        start = df[date_col_name].iloc[0].to_period('M').to_timestamp()
+        end = df[date_col_name].iloc[-1].to_period('M').to_timestamp()
+        full_index = pd.date_range(start=start, end=end, freq='MS')
+
+        # Normalize existing dates to month-start for comparison
+        existing_months = df[date_col_name].dt.to_period('M').dt.to_timestamp()
+        missing_months = full_index.difference(existing_months)
+
+        if len(missing_months) > 0:
+            print(f"******** MISSING TIMESTAMPS DETECTED ********")
+            print(f"  {len(missing_months)} missing month(s) found — filling with NaN.")
+            print(f"  Missing: {[f'{d.month:02d}/{d.year}' for d in missing_months]}")
+            print(f"*********************************************")
+
+            fill_df = pd.DataFrame({
+                date_col_name: missing_months,
+                value_col_name: np.nan,
+            })
+            df = (
+                pd.concat([df[[date_col_name, value_col_name]], fill_df])
+                .sort_values(date_col_name)
+                .reset_index(drop=True)
+            )
+
         monthly = df.copy()
         day = None
     # Build m_cal
