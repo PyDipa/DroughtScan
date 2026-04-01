@@ -1,38 +1,43 @@
 """
 author: PyDipa
-# © 2025 Arianna Di Paola
+# © 2026 Arianna Di Paola
 # License: GNU General Public License v3.0 (GPLv3)
 
 Drought Indices Computation.
 
-This module implements calculations for various **drought indices**, including:
-- **SPI (Standardized Precipitation Index)**.
-- **SIDI (Standardized Integrated Drought Index)**.
-- **CDN (Cumulative Deviation from Normal)**.
+This module implements the core standardization functions used to compute
+drought indices from monthly time series:
 
-Main functions:
-- `_calculate_spi_like_set()`: Computes SPI-based indices from precipitation data.
-- `_calculate_SIDI()`: Computes SIDI using weighted drought indicators.
-- `_calculate_CDN()`: Computes CDN for hydrological drought monitoring.
+- ``f_spi``    — Gamma-based standardization (SPI).
+- ``f_spei``   — Pearson III-based standardization (SPEI).
+- ``f_kde``    — Non-parametric KDE-based standardization.
+- ``f_zscore`` — Gaussian z-score standardization.
 
-Used by: `core.py`, `hydrology.py`.
+Supporting utilities:
+
+- ``weighted_metrics``  — weighted average and standard deviation.
+- ``generate_weights``  — weight matrices for SIDI computation.
+- ``baseline_indices``  — resolve baseline start/end indices from calendar.
+- ``get_month_indices`` — cached lookup of month positions in calendar.
+
+Used by: ``core.py``.
 """
 
-
-
 import numpy as np
-from scipy.stats import gamma, pearson3, norm,gaussian_kde
+from scipy.stats import gamma, pearson3, norm, gaussian_kde
 import warnings
 
 
-# FOR THE STANDARDIEZED INTEGRATED PRECIPITATION INDEX (SIDI)
+# ===================================================================
+#  SIDI weights
+# ===================================================================
 def weighted_metrics(values, weights):
     """
     Compute the weighted average and weighted standard deviation of a dataset.
 
     Args:
-        values (numpy.ndarray): 1D array of data values for which the weighted metrics are to be calculated.
-        weights (numpy.ndarray): 1D array of weights corresponding to the values. Must have the same shape as `values`.
+        values (numpy.ndarray): 1D array of data values.
+        weights (numpy.ndarray): 1D array of weights (same shape as `values`).
 
     Returns:
         tuple: (weighted_average, weighted_std)
@@ -43,57 +48,54 @@ def weighted_metrics(values, weights):
     if np.sum(weights) == 0:
         raise ValueError("The sum of the weights must be greater than zero.")
 
-    # Weighted average
     weighted_average = np.average(values, weights=weights)
-
-    # Weighted variance (squared standard deviation)
     weighted_variance = np.average((values - weighted_average) ** 2, weights=weights)
 
-    # Return the weighted average and the weighted standard deviation
     return weighted_average, np.sqrt(weighted_variance)
+
 
 def generate_weights(k):
     """
     Generate weight matrices for SIDI computation.
 
     Args:
-        k (int, optional): Number of temporal scales to consider. Defaults to self.K.
+        k (int): Number of temporal scales to consider.
 
     Returns:
-        ndarray: Weight matrix of shape (k, 5), where each column represents a different weight distribution:
+        ndarray: Weight matrix of shape (k, 5), where each column represents:
             - Column 0: Uniform weights
             - Column 1: Inverted linear weights
             - Column 2: Inverted geometric weights
             - Column 3: Linear weights
             - Column 4: Geometric weights
-        """
-
+    """
     if not isinstance(k, (int, np.integer)) or k <= 0:
         raise ValueError("`k` must be a positive integer.")
 
-    # Generate weights
     geom_weights = np.geomspace(1, k, k)
     linear_weights = np.linspace(1, k, k)
 
     return np.vstack([
-        np.tile(1 / k, k),  # Uniform weights
-        np.flipud(linear_weights) / np.sum(linear_weights),  # Inverted linear weights
-        np.flipud(geom_weights) / np.sum(geom_weights),  # Inverted geometric weights
-        linear_weights / np.sum(linear_weights),  # Linear weights
-        geom_weights / np.sum(geom_weights)  # Geometric weights
+        np.tile(1 / k, k),                                  # Uniform
+        np.flipud(linear_weights) / np.sum(linear_weights),  # Inverted linear
+        np.flipud(geom_weights) / np.sum(geom_weights),      # Inverted geometric
+        linear_weights / np.sum(linear_weights),              # Linear
+        geom_weights / np.sum(geom_weights),                  # Geometric
     ]).T
-# # QUI STORO LE CALIBRAZIONI DI GAMMA E PEARSON3 per lA ricostruzione dello SPI e SPEI
 
-def baseline_indices(m_cal,start_baseline_year,end_baseline_year):
+
+# ===================================================================
+#  Calendar utilities
+# ===================================================================
+def baseline_indices(m_cal, start_baseline_year, end_baseline_year):
     """
     Get indices for the baseline period based on start and end years.
 
     Returns:
-        tuple: Indices for the start and end of the baseline period.
+        tuple: (start_index, end_index) into m_cal.
     """
-    # Find indices for the start and end years
     start_indices = np.where(m_cal[:, 1] == start_baseline_year)[0]
-    end_indices = np.where(m_cal[:, 1] ==end_baseline_year)[0]
+    end_indices = np.where(m_cal[:, 1] == end_baseline_year)[0]
 
     if len(start_indices) == 0:
         raise ValueError(f"Start baseline year {start_baseline_year} not found in `m_cal`.")
@@ -108,24 +110,26 @@ def baseline_indices(m_cal,start_baseline_year,end_baseline_year):
 
     return tb1_id, tb2_id
 
-_month_indices_cache = {}  # modulo-level, fuori dalla funzione
+
+_month_indices_cache = {}
 
 def get_month_indices(month, start_year, end_year, m_cal):
     """
-        Returns the indices of m_cal where the specified month is present for the given start-year - end-year .
+    Return indices of ``m_cal`` where the specified month appears for years
+    ``start_year`` through ``end_year``.
+
+    Results are cached by (month, start_year, end_year, id(m_cal)) so that
+    repeated calls (e.g., across grid points sharing the same calendar) are
+    effectively free.
 
     Args:
-        month (int): The month to search for (1 = January, ..., 12 = December).
-        start_year (int): The starting year for the search.
-        end_year (int): The ending year for the search.
-        m_cal (numpy.ndarray): The calendar array with two columns:
-            - Column 0: Month (1-12)
-            - Column 1: Year.
+        month (int): Calendar month (1–12).
+        start_year (int): First year.
+        end_year (int): Last year.
+        m_cal (numpy.ndarray): Calendar array (N, 2) with [month, year].
 
     Returns:
-        numpy.ndarray: Indices of the months matching the specified criteria.
-    NOTA Con il cache, le prime  chiamate Univoce (pes. rimo grid point di self.Pgrid) calcolano davvero, per le successive grid points restituiscono il risultato cached istantaneamente — perché month, start_year, end_year e id(m_cal) sono identici per tutti.
-
+        numpy.ndarray: Indices into m_cal.
     """
     key = (month, start_year, end_year, id(m_cal))
     if key in _month_indices_cache:
@@ -137,579 +141,383 @@ def get_month_indices(month, start_year, end_year, m_cal):
             for year in range(start_year, end_year + 1)
         ])
     except IndexError:
-        raise ValueError(...)
+        raise ValueError(
+            f"Month {month} not found for all years in range "
+            f"{start_year}–{end_year}. Check m_cal for gaps."
+        )
 
     _month_indices_cache[key] = idx
     return idx
 
-# FOR ONLY POSITIVE & RIGHT-SKEWED DATA: (using a Gamma Function)
+
 # ===================================================================
-#  SPI Computation
+#  Shared helper: baseline & whole-period index resolution
 # ===================================================================
-def f_spi(prec,stride,m,m_cal, tb1,tb2,gamma_params=None):
+def _resolve_indices(ts, stride, m, m_cal, tb1, tb2):
     """
-    Calculate the Standardized Precipitation Index (SPI) or other SPI-like indices
-    (e.g., Standardized Streamflow Index (SQI)) for a time series of monthly data.
+    Compute baseline values (xbase), full-period values (x), and full-period
+    month indices (idmesi_all) for a given accumulation stride and reference month.
+
+    This logic is shared by f_spi, f_spei, f_kde, and f_zscore.
+
+    Parameters
+    ----------
+    ts : ndarray
+        Monthly time series (precipitation, balance, temperature, etc.).
+    stride : int
+        Accumulation period (1 = no accumulation).
+    m : int
+        Reference month (1–12).
+    m_cal : ndarray
+        Calendar array (N, 2) with [month, year].
+    tb1, tb2 : int
+        Baseline start and end years.
+
+    Returns
+    -------
+    xbase : ndarray
+        Values for the baseline period.
+    x : ndarray
+        Values for the full period.
+    idmesi_all : ndarray
+        Indices into m_cal for the full period.
+    """
+    t1 = int(m_cal[0, 1])
+    t2 = int(m_cal[-1, 1])
+
+    # --- Baseline indices ---
+    idmesi_base = get_month_indices(m, tb1, tb2, m_cal)
+
+    # --- Full-period indices (with fallback for edge years) ---
+    idmesi_all = _get_idmesi_all_with_fallback(m, t1, t2, m_cal)
+
+    if stride == 1:
+        xbase = ts[idmesi_base]
+        x = ts[idmesi_all]
+    else:
+        # Accumulate over `stride` consecutive months
+        a_base = np.array([idmesi_base - j for j in np.flip(np.arange(stride))]).T
+        valid_base = np.all(a_base >= 0, axis=1)
+        xbase = np.where(valid_base, np.sum(ts[a_base.clip(0)], axis=1), np.nan)
+
+        a_all = np.array([idmesi_all - j for j in np.flip(np.arange(stride))]).T
+        valid_all = np.all(a_all >= 0, axis=1)
+        x = np.where(valid_all, np.sum(ts[a_all.clip(0)], axis=1), np.nan)
+
+    return xbase, x, idmesi_all
+
+
+def _get_idmesi_all_with_fallback(m, t1, t2, m_cal):
+    """
+    Resolve full-period month indices with graceful fallback if the first or
+    last year is incomplete.
+    """
+    attempts = [
+        (t1, t2),
+        (t1, t2 - 1),
+        (t1 + 1, t2),
+        (t1 + 1, t2 - 1),
+    ]
+    for i, (y1, y2) in enumerate(attempts):
+        try:
+            idx = get_month_indices(m, y1, y2, m_cal)
+            if i > 0:
+                dropped = f"t1={t1},t2={t2}" if i == 0 else f"using t1={y1},t2={y2}"
+                warnings.warn(
+                    f"Month {m}: incomplete edge year(s) — {dropped}. "
+                    f"First/last year of data may be excluded for this month-scale.",
+                    RuntimeWarning, stacklevel=3
+                )
+            return idx
+        except (IndexError, ValueError):
+            continue
+
+    raise ValueError(
+        f"Cannot resolve indices for month {m} in any year range "
+        f"near [{t1}, {t2}]. Check m_cal for large gaps."
+    )
+
+
+# ===================================================================
+#  Shared helper: reverse polyfit (index → raw values)
+# ===================================================================
+def _reverse_polyfit(spi, xbase, m_cal, idmesi_all, tb1, tb2, stride, m):
+    """
+    Fit a degree-3 polynomial from standardized baseline values to raw baseline
+    values, for the inverse mapping (index → raw variable).
+
+    Returns
+    -------
+    coef : ndarray, shape (4,)
+        Polynomial coefficients. Set to NaN if fit fails.
+    """
+    years_all = m_cal[idmesi_all, 1]
+    baseline_mask = (years_all >= tb1) & (years_all <= tb2)
+    spibase = spi[baseline_mask]
+
+    # Guard: length mismatch between spibase and xbase
+    if len(spibase) != len(xbase):
+        warnings.warn(
+            f"Length mismatch: spibase={len(spibase)}, xbase={len(xbase)} "
+            f"(scale={stride}, month={m}). Reverse coefficients set to NaN.",
+            RuntimeWarning, stacklevel=2
+        )
+        return np.full(4, np.nan)
+
+    valid = np.isfinite(spibase) & np.isfinite(xbase)
+    if np.sum(valid) < 4:
+        warnings.warn(
+            f"Too few valid points for polyfit (scale={stride}, month={m}, "
+            f"n_valid={np.sum(valid)}). Reverse coefficients set to NaN.",
+            RuntimeWarning, stacklevel=2
+        )
+        return np.full(4, np.nan)
+
+    try:
+        coef = np.polyfit(spibase[valid], xbase[valid], deg=3)
+    except Exception as e:
+        warnings.warn(
+            f"polyfit failed (scale={stride}, month={m}): {e}. "
+            f"Reverse coefficients set to NaN.",
+            RuntimeWarning, stacklevel=2
+        )
+        coef = np.full(4, np.nan)
+
+    return coef
+
+
+# ===================================================================
+#  f_spi — Gamma-based (for positive, right-skewed data)
+# ===================================================================
+def f_spi(prec, stride, m, m_cal, tb1, tb2, gamma_params=None):
+    """
+    Calculate the Standardized Precipitation Index (SPI) using a Gamma distribution.
 
     Args:
-        prec (numpy.ndarray):
-            A one-dimensional array of monthly data (e.g., precipitation or streamflow) with size n (number of months).
-        stride (int):
-            The length of the SPI accumulation period (temporal frame), e.g., 18 for SPI18.
-        m (int):
-            The reference month (1-12), where 1 = January, 2 = February, etc.
-        m_cal (numpy.ndarray):
-            A calendar array corresponding to the time series, with two columns:
-            - Column 0: Month (1-12)
-            - Column 1: Year.
-        tb1 (int):
-            The starting year for the baseline period.
-        tb2 (int):
-            The ending year for the baseline period.
+        prec (numpy.ndarray): Monthly precipitation (or streamflow) series, shape (n,).
+        stride (int): Accumulation period (e.g., 18 for SPI-18).
+        m (int): Reference month (1–12).
+        m_cal (numpy.ndarray): Calendar array (n, 2) with [month, year].
+        tb1 (int): Baseline start year.
+        tb2 (int): Baseline end year.
+        gamma_params (tuple, optional): Pre-computed (alpha, loc, beta).
 
     Returns:
-        numpy.ndarray: Indices of the months considered for the SPI calculation.
-        numpy.ndarray: The calculated SPI values for each month.
-        numpy.ndarray: Coefficients of the polynomial fit used for reversing SPI to precipitation.
-        list: Estimated precipitation values corresponding to SPI values of -1.0, -1.5, and -2.0.
-
-
-    Notes:
-    ------
-    - The function computes the baseline SPI values using the specified reference month and
-      accumulation period.
-    - If the accumulation period (stride) is set to 1, the calculation is straightforward,
-      utilizing all available data for the specified month.
-    - If the accumulation period is greater than 1, the function aggregates precipitation values
-      over the defined periods.
-    - The SPI is computed based on a fitted gamma distribution to the baseline precipitation data,
-      with results transformed into a normal distribution.
-    - The output includes coefficients for reversing the SPI to estimate corresponding precipitation values.
+        tuple:
+            - idmesi_all (ndarray): month indices for the full period.
+            - spi (ndarray): standardized SPI values.
+            - coef (ndarray): degree-3 polyfit coefficients for inverse mapping.
+            - params (tuple or None): (alpha, loc, beta) if fitted, else None.
     """
+    xbase, x, idmesi_all = _resolve_indices(prec, stride, m, m_cal, tb1, tb2)
 
-
-    # Extract start and end years from the calendar
-    t1 = int(m_cal[0, 1])  # Start year
-    t2 = int(m_cal[-1, 1])  # End year
-    anni = np.unique(m_cal[:, 1]).astype(int)  # Unique years in the calendar
-    try:
-        tb1_id = np.where(anni == tb1)[0][0]  # Index of the baseline start year
-        tb2_id = np.where(anni == tb2)[0][0]  # Index of the baseline end year
-    except IndexError:
-        print('some inconsistency arise:  ')
-        print('maybe nconsistent baseline years: define a period within the data temporal domain...')
-        print('maybe inconsistent calendar: check whether some years or months miss in the calendar...')
-    # 1) Define the baseline period (e.g., 30 or 40 years)
-    # Function to obtain the indices of specific months within a time range
-
-
-    # -------- BASELINE ------------------------------------------------
-    if stride == 1:
-        # SPI at 1: directly use all data
-        idmesi_base = get_month_indices(m, tb1, tb2, m_cal)
-        xbase = prec[idmesi_base]  # Precipitation for the baseline period
-
-        # Get all months for the entire time period
-        try:
-            idmesi_all = get_month_indices(m, t1, t2, m_cal)
-        except (IndexError, ValueError):
-            try:
-                idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
-            except (IndexError, ValueError):
-                try:
-                    idmesi_all = get_month_indices(m, t1+1, t2, m_cal)
-                except (IndexError, ValueError):
-                    idmesi_all = get_month_indices(m, t1 + 1, t2-1, m_cal)
-
-
-        x = prec[idmesi_all]  # Precipitation for the entire period
-
-    else:
-        # SPI with accumulation period greater than 1
-        # Calculate the baseline
-        idmesi_base = get_month_indices(m, tb1, tb2, m_cal)
-        a = np.array(
-            [idmesi_base - j for j in np.flip(np.arange(0, stride))]).T  # Create the matrix of months to select
-        # xbase = np.array([np.sum(prec[row]) if np.all(row >= 0) else np.nan for row in a])
-        valid_rows = np.all(a >= 0, axis=1)
-        xbase = np.where(valid_rows, np.sum(prec[a.clip(0)], axis=1), np.nan)
-        # WHOLE PERIOD ----------------------------------------------
-        # Get all months for the entire time period
-        try:
-            idmesi_all = get_month_indices(m, t1, t2, m_cal)
-        except (IndexError, ValueError):
-            try:
-                idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
-            except (IndexError, ValueError):
-                try:
-                    idmesi_all = get_month_indices(m, t1+1, t2, m_cal)
-                except (IndexError, ValueError):
-                    idmesi_all = get_month_indices(m, t1 + 1, t2-1, m_cal)
-
-        a = np.array([idmesi_all - j for j in np.flip(np.arange(0, stride))]).T  # Create the matrix of months to select
-        # x = np.array(
-        #     [np.sum(prec[row]) if np.all(row >= 0) else np.nan for row in a])  # Precipitation for the entire period
-        valid_rows = np.all(a >= 0, axis=1)
-        x = np.where(valid_rows, np.sum(prec[a.clip(0)], axis=1), np.nan)
-    # --------------------------- SPI -----------------------------------------
-    # Calculate the monthly balance for the baseline and the entire period
-    # Start with SPI: pre-allocate and calculate gamma distribution parameters
     if xbase.size < 10:
         warnings.warn(
-            (
-                "SPEI baseline sample size is very small "
-                f"(n={xbase.size}). Fit may be unreliable."
-            ),
-            category=RuntimeWarning,
-            stacklevel=2
+            f"SPI baseline sample size is very small (n={xbase.size}). "
+            f"Fit may be unreliable.",
+            RuntimeWarning, stacklevel=2
         )
-    spi = np.empty(np.shape(x))
-    spi[:] = np.nan
+
+    # --- Gamma fit ---
     if gamma_params is None:
         alpha, loc, beta = gamma.fit(xbase[xbase > 0], floc=0)
     else:
         alpha, loc, beta = gamma_params
 
-    # Use the gamma distribution
+    # --- CDF with zero-inflation ---
     Gx = gamma.cdf(x, a=alpha, loc=loc, scale=beta)
-    # Calculate the proportion of zero values
-    qq = len(np.where(x == 0)[0]) / len(x)
+    qq = np.sum(x == 0) / len(x)
     Hx = qq + (1 - qq) * Gx
-    Hx = np.clip(Hx, 3.17e-5, 1 - 3.17e-5) #+-4 allowed
+    Hx = np.clip(Hx, 3.17e-5, 1 - 3.17e-5)
 
-    spi  = np.round(norm.ppf(Hx),4)
+    spi = np.round(norm.ppf(Hx), 4)
 
-    # *********** REVERSE FROM SPI TO PRECIPITATION *************************
-    spibase = spi[tb1_id:tb2_id + 1]
-    coef = np.polyfit(spibase[np.isfinite(xbase)], xbase[np.isfinite(xbase)], deg=3)
-    # Coefficients from a 5th-degree polynomial fit can be used to reverse SPI:
-    # Example:
-    # values = np.array([np.polyval(coef, spi[i]) for i in range(len(spi))])
-    # ***************************************************************
-    # After calculating SPI for month m, insert the processed values into the full SPI array
-    # Spi[idmesi_all] = spi
+    # --- Reverse mapping ---
+    coef = _reverse_polyfit(spi, xbase, m_cal, idmesi_all, tb1, tb2, stride, m)
 
-    return idmesi_all, spi, coef,(alpha, loc, beta) if gamma_params is None else None
+    return idmesi_all, spi, coef, (alpha, loc, beta) if gamma_params is None else None
 
-# FOR REAL VALUES & RIGHT-SKEWED (using Pearson III function)
+
 # ===================================================================
-#  SPEI Computation
+#  f_spei — Pearson III (for real-valued, possibly skewed data)
 # ===================================================================
-def f_spei(balance, stride, m, m_cal, tb1, tb2,gamma_params= None):
+def f_spei(balance, stride, m, m_cal, tb1, tb2, gamma_params=None):
     """
     Calculate the Standardized Precipitation Evapotranspiration Index (SPEI)
-    using precipitation and PET time series.
+    using a Pearson III distribution.
 
     Args:
-        balance(np.ndarray):
-            Monthly precipitation-evapotrampiration time series, dimension (n,).
-
-        stride (int):
-            Accumulation period for SPEI (e.g., 18 for SPEI18).
-        m (int):
-            Reference month (1-12), where 1 = January, ..., 12 = December.
-        m_cal (np.ndarray):
-            Calendar array corresponding to the time series, shape (n, 2):
-            - Column 0: Month (1-12)
-            - Column 1: Year.
-        tb1 (int):
-            Starting year for the baseline period.
-        tb2 (int):
-            Ending year for the baseline period.
+        balance (numpy.ndarray): Monthly P–PET (or any real-valued) series, shape (n,).
+        stride (int): Accumulation period.
+        m (int): Reference month (1–12).
+        m_cal (numpy.ndarray): Calendar array (n, 2) with [month, year].
+        tb1 (int): Baseline start year.
+        tb2 (int): Baseline end year.
+        gamma_params (tuple, optional): Pre-computed (c, loc, scale).
 
     Returns:
         tuple:
-            - idmesi_all (np.ndarray): Indices of the months for the entire period.
-            - spei (np.ndarray): Calculated SPEI values.
-            - coef (np.ndarray): Polynomial coefficients to reverse SPEI to D.
-
-    Raises:
-        ValueError: If the input data or indices are inconsistent.
+            - idmesi_all (ndarray): month indices for the full period.
+            - spei (ndarray): standardized SPEI values.
+            - coef (ndarray): degree-3 polyfit coefficients for inverse mapping.
+            - params (tuple or None): (c, loc, scale) if fitted, else None.
     """
+    xbase, x, idmesi_all = _resolve_indices(balance, stride, m, m_cal, tb1, tb2)
 
-
-    # t1, t2 == start and end year of the time period
-    # Extract start and end years from the calendar
-    t1 = int(m_cal[0, 1])  # Start year
-    t2 = int(m_cal[-1, 1])  # End year
-    anni = np.unique(m_cal[:, 1]).astype(int)  # Unique years in the calendar
-    try:
-        tb1_id = np.where(anni == tb1)[0][0]  # Index of the baseline start year
-        tb2_id = np.where(anni == tb2)[0][0]  # Index of the baseline end year
-    except IndexError:
-        print('Inconsistent baseline years: define a period within the data temporal domain')
-
-
-    # -------- BASELINE ------------------------------------------------
-    if stride == 1:
-        # SPI at 1: directly use all data
-        idmesi_base = get_month_indices(m, tb1, tb2, m_cal)
-        xbase = balance[idmesi_base]  # Precipitation for the baseline period
-
-        # Get all months for the entire time period
-        try:
-            idmesi_all = get_month_indices(m, t1, t2, m_cal)
-        except (IndexError, ValueError):
-            try:
-                idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
-            except (IndexError, ValueError):
-                try:
-                    idmesi_all = get_month_indices(m, t1+1, t2, m_cal)
-                except (IndexError, ValueError):
-                    idmesi_all = get_month_indices(m, t1 + 1, t2-1, m_cal)
-
-
-        x = balance[idmesi_all]  # Precipitation for the entire period
-
-    else:
-        # SPI with accumulation period greater than 1
-        # Calculate the baseline
-        idmesi_base = get_month_indices(m, tb1, tb2, m_cal)
-        a = np.array(
-            [idmesi_base - j for j in np.flip(np.arange(0, stride))]).T  # Create the matrix of months to select
-        # xbase = np.array([np.sum(balance[row]) if np.all(row >= 0) else np.nan for row in a])
-        valid_rows = np.all(a >= 0, axis=1)
-        xbase = np.where(valid_rows, np.sum(balance[a.clip(0)], axis=1), np.nan)
-        # WHOLE PERIOD ----------------------------------------------
-        # Get all months for the entire time period
-        try:
-            idmesi_all = get_month_indices(m, t1, t2, m_cal)
-        except (IndexError, ValueError):
-            try:
-                idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
-            except (IndexError, ValueError):
-                try:
-                    idmesi_all = get_month_indices(m, t1+1, t2, m_cal)
-                except (IndexError, ValueError):
-                    idmesi_all = get_month_indices(m, t1 + 1, t2-1, m_cal)
-
-        a = np.array([idmesi_all - j for j in np.flip(np.arange(0, stride))]).T  # Create the matrix of months to select
-        # x = np.array(
-        #     [np.sum(balance[row]) if np.all(row >= 0) else np.nan for row in a])  # Precipitation for the entire period
-        valid_rows = np.all(a >= 0, axis=1)
-        x = np.where(valid_rows, np.sum(balance[a.clip(0)], axis=1), np.nan)
-    # ------------------------------ SPEI Calculation --------------------------------------
-    # Fit Pearson distribution for Dbase
     if xbase.size < 10:
         warnings.warn(
-            (
-                "SPEI baseline sample size is very small "
-                f"(n={xbase.size}). Fit may be unreliable."
-            ),
-            category=RuntimeWarning,
-            stacklevel=2
+            f"SPEI baseline sample size is very small (n={xbase.size}). "
+            f"Fit may be unreliable.",
+            RuntimeWarning, stacklevel=2
         )
+
+    # --- Pearson III fit ---
     if gamma_params is None:
-        c, loc, scale = pearson3.fit(xbase[np.isfinite(xbase)])  # Fit Pearson III distribution
-        # c, loc, scale = fisk.fit(x[np.isfinite(x)])  # Fit Pearson III distribution
+        c, loc, scale = pearson3.fit(xbase[np.isfinite(xbase)])
     else:
         c, loc, scale = gamma_params
 
-    # Cumulative distribution function for D
+    # --- CDF → normal quantile ---
     fx = pearson3.cdf(x, skew=c, loc=loc, scale=scale)
-    # fx = fisk.cdf(x,c=c, loc=loc, scale=scale)
-    # Avoid "divide by zero" errors in calculations
-    fx = np.clip(fx, 3.17e-5, 1 - 3.17e-5) #+-4 allowed
+    fx = np.clip(fx, 3.17e-5, 1 - 3.17e-5)
+    spei = norm.ppf(fx, loc=0, scale=1)
 
-    spei = norm.ppf(fx,loc=0,scale=1)
+    # --- Reverse mapping ---
+    coef = _reverse_polyfit(spei, xbase, m_cal, idmesi_all, tb1, tb2, stride, m)
 
-    # plt.plot(spei, x, 'o')
-    # *********** REVERSE FROM SPEI TO D *************************
-    speibase = spei[tb1_id:tb2_id + 1]
-    coef = np.polyfit(speibase[np.isfinite(xbase)], xbase[np.isfinite(xbase)], deg=3)
-    # Coefficients from a 3th-degree polynomial fit can be used to reverse SPI:
-    # Example:
-    # val = np.polyval(coef, spei)
-    # np.polyval(coef, 0)
-    # ***************************************************************
-    # After calculating SPI for month m, insert the processed values into the full SPI array
-    # Spi[idmesi_all] = spi
-
-    return idmesi_all, spei, coef,(c, loc, scale) if gamma_params is None else None
+    return idmesi_all, spei, coef, (c, loc, scale) if gamma_params is None else None
 
 
-# FOR ALL DATA
 # ===================================================================
-#  NON-Parametric Fit (Kernel Density Estimation)
+#  f_kde — Non-parametric KDE (for any data)
 # ===================================================================
 def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, kde_params=None):
     """
-    SPI-like standardization using Gaussian KDE (Silverman bandwidth) instead of Gamma fit.
+    SPI-like standardization using Gaussian KDE (Silverman bandwidth).
 
     Args:
-        prec (np.ndarray): monthly series (n_months,)
-        stride (int): accumulation period (e.g., 18 for SPI18)
-        m (int): reference month (1-12)
-        m_cal (np.ndarray): calendar (n_months, 2) -> [month, year]
-        tb1 (int): baseline start year
-        tb2 (int): baseline end year
-        log_transform (bool): whether to use log-transform or not to the sample data
-        kde_params (dict|None): optional precomputed KDE info:
-            {
-              "kde": gaussian_kde object,
-              "qq_baseline": float (optional)
-            }
+        prec (np.ndarray): Monthly series (n,).
+        stride (int): Accumulation period.
+        m (int): Reference month (1–12).
+        m_cal (np.ndarray): Calendar (n, 2) with [month, year].
+        tb1 (int): Baseline start year.
+        tb2 (int): Baseline end year.
+        log_transform (bool): If True, apply log-transform before KDE fitting.
+        kde_params (dict or None): Optional pre-computed KDE info.
 
     Returns:
-        idmesi_all (np.ndarray): indices of months for target month m in full period
-        spi (np.ndarray): standardized index values
-        coef (np.ndarray): polyfit coefficients for inverse mapping (deg=3)
-        out_params (dict|None): if kde_params is None, returns dict with KDE + metadata; else None
+        tuple:
+            - idmesi_all (ndarray): month indices for the full period.
+            - spi (ndarray): standardized index values.
+            - coef (ndarray): degree-3 polyfit coefficients for inverse mapping.
+            - out_params (dict or None): KDE metadata if fitted, else None.
     """
+    xbase, x, idmesi_all = _resolve_indices(prec, stride, m, m_cal, tb1, tb2)
 
-    # ---- time bounds from calendar
-    t1 = int(m_cal[0, 1])
-    t2 = int(m_cal[-1, 1])
-    anni = np.unique(m_cal[:, 1]).astype(int)
-
-    try:
-        tb1_id = np.where(anni == tb1)[0][0]
-        tb2_id = np.where(anni == tb2)[0][0]
-    except IndexError:
-        raise ValueError(
-            "Baseline years not consistent with available calendar years "
-            f"({anni[0]} - {anni[-1]})."
-        )
-
-    # -------- BASELINE / WHOLE PERIOD selection (same logic as f_spi)
-    if stride == 1:
-        idmesi_base = get_month_indices(m, tb1, tb2, m_cal)
-        xbase = prec[idmesi_base]
-
-        # Whole period indices (robust to small calendar inconsistencies)
-        try:
-            idmesi_all = get_month_indices(m, t1, t2, m_cal)
-        except (IndexError, ValueError):
-            try:
-                idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
-            except (IndexError, ValueError):
-                try:
-                    idmesi_all = get_month_indices(m, t1 + 1, t2, m_cal)
-                except (IndexError, ValueError):
-                    idmesi_all = get_month_indices(m, t1 + 1, t2 - 1, m_cal)
-
-        x = prec[idmesi_all]
-
-    else:
-        idmesi_base = get_month_indices(m, tb1, tb2, m_cal)
-        a = np.array([idmesi_base - j for j in np.flip(np.arange(0, stride))]).T
-        # xbase = np.array([np.sum(prec[row]) if np.all(row >= 0) else np.nan for row in a])
-        valid_rows = np.all(a >= 0, axis=1)
-        xbase = np.where(valid_rows, np.sum(prec[a.clip(0)], axis=1), np.nan)
-        try:
-            idmesi_all = get_month_indices(m, t1, t2, m_cal)
-        except (IndexError, ValueError):
-            try:
-                idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
-            except (IndexError, ValueError):
-                try:
-                    idmesi_all = get_month_indices(m, t1 + 1, t2, m_cal)
-                except (IndexError, ValueError):
-                    idmesi_all = get_month_indices(m, t1 + 1, t2 - 1, m_cal)
-
-        a = np.array([idmesi_all - j for j in np.flip(np.arange(0, stride))]).T
-        # x = np.array([np.sum(prec[row]) if np.all(row >= 0) else np.nan for row in a])
-        valid_rows = np.all(a >= 0, axis=1)
-        x = np.where(valid_rows, np.sum(prec[a.clip(0)], axis=1), np.nan)
-
-        # ---------------- KDE-based SPI -----------------------------------
+    # --- Pre-allocate output ---
     spi = np.full_like(x, np.nan, dtype=float)
-    # Maschere finite
     finite_x = np.isfinite(x)
     finite_xbase = np.isfinite(xbase)
 
+    # --- Optional log-transform ---
     if log_transform:
-        x_log = np.log(x)
-        xbase_log = np.log(xbase)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            x_log = np.log(x)
+            xbase_log = np.log(xbase)
+        finite_x = np.isfinite(x_log)
+        finite_xbase = np.isfinite(xbase_log)
 
-    # Check minimo dati
+    # Early exit if no valid data
     if not np.any(finite_x):
-        return idmesi_all, spi, np.array([np.nan, np.nan, np.nan, np.nan]), (
+        return idmesi_all, spi, np.full(4, np.nan), (
             None if kde_params is None else None
         )
 
-    # --- KDE fit (baseline) -----------------------------------------------
+    # --- KDE fit (baseline) ---
     if kde_params is None:
         xb = xbase_log[finite_xbase] if log_transform else xbase[finite_xbase]
 
         if xb.size < 10:
             warnings.warn(
-                (
-                    "KDE baseline sample size is very small "
-                    f"(n={xb.size}). Fit may be unreliable."
-                ),
-                category=RuntimeWarning,
-                stacklevel=2
+                f"KDE baseline sample size is very small (n={xb.size}). "
+                f"Fit may be unreliable.",
+                RuntimeWarning, stacklevel=2
             )
 
         kde = gaussian_kde(xb, bw_method="silverman")
-
         out_params = {
             "kde": kde,
             "bw_factor": float(kde.factor),
             "n_fit": int(xb.size),
-            "fit_domain": "xbase (finite, full R)"
+            "fit_domain": "xbase (finite, full R)",
         }
     else:
         kde = kde_params.get("kde", None)
         if kde is None:
             raise ValueError("kde_params provided but missing key 'kde'.")
+        xb = xbase_log[finite_xbase] if log_transform else xbase[finite_xbase]
         out_params = None
 
-    # --- CDF evaluation ---------------------------------------------------
-    # CDF(x) = ∫_{-∞}^{x} KDE(t) dt
+    # --- CDF evaluation via broadcasting ---
     Gx = np.full_like(x, np.nan, dtype=float)
+    Hx = np.full_like(x, np.nan, dtype=float)
 
     xfull = x_log if log_transform else x
-    # # theory:
-    # for i, xi in enumerate(xfull):
-    #     if np.isfinite(xi):
-    #         Gx[i] = float(kde.integrate_box_1d(-np.inf, xi))
-    # faster way:
-    # h == Silverman bandwidth
-    h = 0.9 * np.std(xb, ddof=1) * xb.size ** (-1 / 5)
-    # h = kde.factor * np.std(xb, ddof=1)  # bandwidth scalare
     finite_mask = np.isfinite(xfull)
+    zero_mask = (x == 0)
 
-    # broadcasting (n_eval, n_baseline) -> media su axis=1
+    h = 0.9 * np.std(xb, ddof=1) * xb.size ** (-1 / 5)
+    qq = np.sum(zero_mask) / len(x)
+
+    # Broadcasting: (n_eval, n_baseline) → mean over axis=1
     Gx[finite_mask] = norm.cdf(
         (xfull[finite_mask, None] - xb[None, :]) / h
     ).mean(axis=1)
 
-    # --- Normal-score transform ------------------------------------------
-    # clipping per evitare ±inf (≈ ±4)
-    Gx = np.clip(Gx, 3.17e-5, 1 - 3.17e-5)
-    spi = np.round(norm.ppf(Gx), 4)
+    # --- Mixed distribution for zeros (same approach as f_spi) ---
+    Hx[finite_mask] = qq + (1 - qq) * Gx[finite_mask]
+    Hx[zero_mask] = qq
 
-    # -------- reverse fit (identico al tuo) -------------------------------
-    spibase = spi[tb1_id:tb2_id + 1]
-    coef = np.polyfit(
-        spibase[np.isfinite(xbase)],
-        xbase[np.isfinite(xbase)],
-        deg=3
-    )
+    # --- Normal-score transform ---
+    Hx = np.clip(Hx, 3.17e-5, 1 - 3.17e-5)
+    spi = np.round(norm.ppf(Hx), 4)
+
+    # --- Reverse mapping ---
+    coef = _reverse_polyfit(spi, xbase, m_cal, idmesi_all, tb1, tb2, stride, m)
 
     return idmesi_all, spi, coef, out_params
 
 
-
-
-# FOR NORMAL DISTRIBUTED DATA
 # ===================================================================
-#  Z-Score Computation
+#  f_zscore — Gaussian z-score (for normally distributed data)
 # ===================================================================
-
 def f_zscore(data, stride, m, m_cal, tb1, tb2):
     """
-    Calculate the Z-Score for a time series of monthly data using a specified baseline period.
+    Calculate the z-score for a time series of monthly data.
 
     Args:
-        data (numpy.ndarray):
-            A one-dimensional array of monthly data (e.g., temperature, precipitation, etc.) with size n.
-        stride (int):
-            The length of the accumulation period for z-score (e.g., 18 for 18-month accumulation).
-        m (int):
-            The reference month (1-12), where 1 = January, 2 = February, etc.
-        m_cal (numpy.ndarray):
-            A calendar array corresponding to the data time series, with two columns:
-            - Column 0: Month (1-12)
-            - Column 1: Year.
-        tb1 (int):
-            The starting year for the baseline period.
-        tb2 (int):
-            The ending year for the baseline period.
+        data (numpy.ndarray): Monthly series, shape (n,).
+        stride (int): Accumulation period.
+        m (int): Reference month (1–12).
+        m_cal (numpy.ndarray): Calendar (n, 2) with [month, year].
+        tb1 (int): Baseline start year.
+        tb2 (int): Baseline end year.
 
     Returns:
-        numpy.ndarray: Indices of the months considered for the z-score calculation.
-        numpy.ndarray: The calculated z-score values for each month.
-        numpy.ndarray: Coefficients of the polynomial fit used for reversing z-score to original data.
-
-    Raises:
-        ValueError: If the baseline years are inconsistent with the provided calendar.
-
-    Notes:
-    ------
-    - The function computes the baseline z-score values using the specified reference month and
-      accumulation period.
-    - If the accumulation period (stride) is set to 1, the calculation uses individual monthly data points.
-    - If the accumulation period is greater than 1, the function aggregates data values over the defined periods.
-    - The z-score is calculated as (value - mean) / standard deviation for the baseline period.
-    - The output includes coefficients for reversing the z-score to estimate the original data values.
+        tuple:
+            - idmesi_all (ndarray): month indices for the full period.
+            - zscore (ndarray): standardized z-score values.
+            - z_params (list): [baseline_mean, baseline_std].
     """
+    xbase, x, idmesi_all = _resolve_indices(data, stride, m, m_cal, tb1, tb2)
 
-    # Extract start and end years from the calendar
-    t1 = int(m_cal[0, 1])  # Start year
-    t2 = int(m_cal[-1, 1])  # End year
-    anni = np.unique(m_cal[:, 1]).astype(int)  # Unique years in the calendar
-
-    try:
-        tb1_id = np.where(anni == tb1)[0][0]  # Index of the baseline start year
-        tb2_id = np.where(anni == tb2)[0][0]  # Index of the baseline end year
-    except IndexError:
-        raise ValueError("Inconsistent baseline years: define a period within the data temporal domain.")
-
-    # Function to obtain the indices of specific months within a time range
-
-
-    # -------- BASELINE ------------------------------------------------
-    if stride == 1:
-        # Z-score for single month: directly use all data
-        idmesi_base = get_month_indices(m, tb1, tb2, m_cal)
-        xbase = data[idmesi_base]  # Data for the baseline period
-
-        # Get all months for the entire time period
-        try:
-            idmesi_all = get_month_indices(m, t1, t2, m_cal)
-        except (IndexError, ValueError):
-            try:
-                idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
-            except (IndexError, ValueError):
-                try:
-                    idmesi_all = get_month_indices(m, t1 + 1, t2, m_cal)
-                except (IndexError, ValueError):
-                    idmesi_all = get_month_indices(m, t1 + 1, t2 - 1, m_cal)
-
-        x = data[idmesi_all]  # Data for the entire period
-
-    else:
-        # Z-score with accumulation period greater than 1
-        # Calculate the baseline
-        idmesi_base = get_month_indices(m, tb1, tb2, m_cal)
-        a = np.array(
-            [idmesi_base - j for j in np.flip(np.arange(0, stride))]).T  # Create the matrix of months to select
-        # xbase = np.array([np.sum(data[row]) if np.all(row >= 0) else np.nan for row in a])
-        valid_rows = np.all(a >= 0, axis=1)
-        xbase = np.where(valid_rows, np.sum(data[a.clip(0)], axis=1), np.nan)
-        # WHOLE PERIOD ----------------------------------------------
-        # Get all months for the entire time period
-        try:
-            idmesi_all = get_month_indices(m, t1, t2, m_cal)
-        except (IndexError, ValueError):
-            try:
-                idmesi_all = get_month_indices(m, t1, t2 - 1, m_cal)
-            except (IndexError, ValueError):
-                try:
-                    idmesi_all = get_month_indices(m, t1+1, t2, m_cal)
-                except (IndexError, ValueError):
-                    idmesi_all = get_month_indices(m, t1 + 1, t2-1, m_cal)
-
-        a = np.array([idmesi_all - j for j in np.flip(np.arange(0, stride))]).T  # Create the matrix of months to select
-        # x = np.array([np.sum(data[row]) if np.all(row >= 0) else np.nan for row in a])  # Data for the entire period
-        valid_rows = np.all(a >= 0, axis=1)
-        x = np.where(valid_rows, np.sum(data[a.clip(0)], axis=1), np.nan)
-    # --------------------------- Z-Score -----------------------------------------
-    # Calculate the monthly balance for the baseline and the entire period
     baseline_mean = np.nanmean(xbase)
     baseline_std = np.nanstd(xbase)
 
-    if baseline_std !=0:
+    if baseline_std != 0:
         zscore = (x - baseline_mean) / baseline_std
     else:
         zscore = np.zeros(np.shape(x))
 
-
-    # *********** REVERSE FROM Z-Score TO ORIGINAL DATA *************************
-    z_params =[baseline_mean,baseline_std]
-
+    z_params = [baseline_mean, baseline_std]
     return idmesi_all, zscore, z_params
-
