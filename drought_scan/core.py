@@ -1881,11 +1881,9 @@ class Precipitation(BaseDroughtAnalysis):
             # tile to (time, 5) for backward compatibility with
             # consumers that do self.SIDI[:, weight_index]
             self.SIDI = np.tile(SIDI_seasonal[:, np.newaxis], (1, 5))
-            if overwrite:
-                self.SIDI = np.tile(SIDI_seasonal[:, np.newaxis], (1, 5))
-                print("Note: SIDI overwritten with seasonal optimization. "
-                      "All 5 weight columns are identical (season-specific K and weight already applied).")
-                # ... rest of seasonal_params assignment
+            print("Note: SIDI overwritten with seasonal optimization. "
+                  "All 5 weight columns are identical (season-specific K and weight already applied).")
+            # ... rest of seasonal_params assignment
             self.seasonal_params = {
                 'agg': agg,
                 'seasons': seasons_dict,
@@ -2246,7 +2244,6 @@ class Streamflow(BaseDroughtAnalysis):
         plt.show(block=False)
     # prima di usare BFI bisogna impostare la possibità che i dati di portata siano giornaliri
 
-
     def BFI(self, block_size=5, plot=True, figsize=(14, 5)):
         """
         Compute the Baseflow Index (BFI) using the Institute of Hydrology method
@@ -2525,7 +2522,7 @@ class Balance(BaseDroughtAnalysis):
         self.end_baseline_year = end_baseline_year
         self.verbose = verbose
         self.basin_name=basin_name
-        self.rolling
+        self.rolling = rolling
 
         # Load shapefile if provided
         if shape is not None:
@@ -2755,7 +2752,7 @@ class Temperature(BaseDroughtAnalysis):
         else:
             raise ValueError("Provide either ts and m_cal directly or specify data_path for gridded Temperature data in NetCDF format along with the path of the river shapefile.")
 
-        self.K = K if K is not None else 366
+        self.K = K if K is not None else 36
 
         self.threshold = 1 if threshold is None else threshold
 
