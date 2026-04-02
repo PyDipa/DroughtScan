@@ -221,13 +221,6 @@ def _get_idmesi_all_with_fallback(m, t1, t2, m_cal):
     for i, (y1, y2) in enumerate(attempts):
         try:
             idx = get_month_indices(m, y1, y2, m_cal)
-            if i > 0:
-                dropped = f"t1={t1},t2={t2}" if i == 0 else f"using t1={y1},t2={y2}"
-                warnings.warn(
-                    f"Month {m}: incomplete edge year(s) — {dropped}. "
-                    f"First/last year of data may be excluded for this month-scale.",
-                    RuntimeWarning, stacklevel=3
-                )
             return idx
         except (IndexError, ValueError):
             continue

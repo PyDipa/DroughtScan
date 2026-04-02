@@ -14,7 +14,11 @@
 - Zero-inflation mask in `f_kde` (mixed distribution for zeros, matching `f_spi`).
 - Rolling daily aggregation option (`rolling=True`) in data I/O functions.
 - Length-mismatch guard and NaN fallback in reverse polyfit (all standardization functions).
-- Warning when edge years are dropped during index resolution.
+- fill missing monthly timestamps in `_coerce_to_monthly()`
+
+When input data is already at monthly resolution, missing months are now
+detected and filled with NaN (matching the existing behavior for daily data).
+A visible warning prints which months are missing.
 - Python 3.12 compatibility confirmed.
 
 ### Changed
@@ -41,8 +45,6 @@
 - **`f_spi` polyfit handler**: bare `coef` expression in except block replaced with
   `np.full(4, np.nan)` + `warnings.warn` (was silent data corruption if polyfit failed).
 - `f_spi` warning message said "SPEI" instead of "SPI".
-- `get_month_indices`: `raise ValueError(...)` with Python `Ellipsis` object replaced
-  with descriptive error message.
 - `utils/__init__.py`: missing comma between `"plot_cdf_comparison"` and `"savefig"` in
   `__all__` (Python silently concatenated them); added lazy imports for
   `fit_distribution_stats`, `standardize_data`, `plot_cdf_comparison`.
