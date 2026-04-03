@@ -444,6 +444,54 @@ seasonal_corr = ds.analyze_correlation_seasonal(streamflow, agg='custom',
 # Apply seasonal optimization
 ds.set_optimal_SIDI_seasonal(seasonal_corr, agg='quarter', overwrite=True)
 ```
+### 8.1.2) Understanding SIDI optimization states
+
+After running `analyze_correlation` or `analyze_correlation_seasonal`, the SIDI
+can be optimized in two ways. Understanding the difference is important because
+it affects how downstream methods (plotting, gap filling, forecasting) select
+the correct SIDI.
+
+**Global optimization** (`set_optimal_SIDI`):
+a single K and weight_index are applied to all months.
+
+```python
+A = ds.analyze_correlation(streamflow)
+ds.set_optimal_SIDI(A['best_k'], A['col_best_weight'], overwrite=True)
+
+# After this call:
+#   ds.optimal_k             → int (the chosen K)
+#   ds.optimal_weight_index  → int (the chosen column of SIDI)
+#   ds.SIDI                  → shape (N, 5), read column ds.optimal_weight_index
+#   ds.is_seasonal_sidi      → False
+```
+
+**Seasonal optimization** (`set_optimal_SIDI_seasonal`):
+each season gets its own K and weight_index. The resulting SIDI is a single
+series (tiled to 5 identical columns for backward compatibility).
+
+```python
+S = ds.analyze_correlation_seasonal(streamflow, agg='quarter')
+ds.set_optimal_SIDI_seasonal(S, agg='quarter', overwrite=True)
+
+# After this call:
+#   ds.seasonal_params       → dict with per-season config
+#   ds.SIDI                  → shape (N, 5), all 5 columns identical
+#   ds.is_seasonal_sidi      → True
+#   ds.optimal_k             → does NOT exist (K varies by season)
+```
+
+**How downstream code selects SIDI:**
+
+| Method | What it reads |
+|--------|---------------|
+| `plot_scan(weight_index=w)` | `ds.SIDI[:, w]` — works in both cases |
+| `plot_covariates(streamflow)` | auto-selects from `optimal_weight_index` or seasonal |
+| `gap_filling(ds)` | requires `overwrite=True`; reads the active SIDI |
+| ESM scenarios | re-applies optimization automatically after recalculation |
+
+**Rule of thumb**: always call `set_optimal_SIDI` or `set_optimal_SIDI_seasonal`
+with `overwrite=True`. If you want to go back to the default SIDI,
+re-initialize the Precipitation object.
 
 
 ## 8.2) Streamflow Gap Filling
