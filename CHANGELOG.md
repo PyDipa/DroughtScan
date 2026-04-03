@@ -1,5 +1,14 @@
 # Changelog
-# Changelog
+## [3.2.2] - ....in progress
+-add sec 8.1.2
+- bug fix in defining threshold within plot_covariates()
+- New method _reapply_optimization() encapsulates the logic to restore
+  SIDI optimization state after spi_like_set recalculation
+- Handles three cases: seasonal (is_seasonal_sidi), global (optimal_k),
+  and no optimization (no-op)
+- Replaces scattered hasattr/optimal_k/optimal_weight_index checks
+  in ESM scenarios and any future code that recalculates indices
+
 ## [3.2.1] - 2026-04-02
 - Minor bug fixes (various).
 
