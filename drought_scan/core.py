@@ -1,6 +1,6 @@
 """
 author: PyDipa
-# © 2025 Arianna Di Paola
+# © 2026 Arianna Di Paola
 
 
 Core module for Drought Scan.
@@ -118,7 +118,6 @@ class BaseDroughtAnalysis:
 
     def _area(self):
         if isinstance(self, Teleindex):
-            # opzionale: None, 0, o raise esplicito
             return -1
         if self.shape.crs is None:
             self.shape = self.shape.set_crs('epsg:4326')
@@ -2737,7 +2736,6 @@ class Temperature(BaseDroughtAnalysis):
                 f_spi:   FOR  POSITIVE & RIGHT-SKEWED DATA (uses a Gamma Function) but works fine also for positive normal distribuited sample
                 f_spei:  FOR REAL VALUES & RIGHT-SKEWED (uses a Pearson III function)
                 f_zscore FOR REAL VALUES NORMAL DISTRIBUTED
-            threshold (float, optional): Threshold for severe events. Defaults to -1.
             verbose (bool, optional): Whether to print initialization messages. Default is True.
         """
         self.start_baseline_year = start_baseline_year
@@ -2783,7 +2781,7 @@ class Temperature(BaseDroughtAnalysis):
         if verbose:
             print("#########################################################################")
             print("Welcome to Drought Scan! \n")
-            print("The Temeprature data has been imported successfully.")
+            print("The Temperature data has been imported successfully.")
             print(f"Data range: {self.m_cal[0]} to {self.m_cal[-1]}.")
             print(" >>> .plot_scan()  — CDN, index heatmap, and SIDI overview")
             print("#########################################################################")
