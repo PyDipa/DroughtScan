@@ -156,6 +156,7 @@ def compute_extended_c2r_index(ds_object, K=60):
         _, coeff = ds_object._compute_spi(k)
         c2rspi[k - 1, :, :] = coeff
     return c2rspi
+
 def severe_events_deficits_computation(ds_object,weight_index=None):
     """
     Identify severe drought events and calculate their durations and deficits.
