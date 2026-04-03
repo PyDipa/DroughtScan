@@ -519,6 +519,19 @@ class BaseDroughtAnalysis:
 
         return SIDI
 
+    def _reapply_optimization(self):
+        """Re-apply SIDI optimization after spi_like_set recalculation."""
+        if self.is_seasonal_sidi:
+            SIDI_1d = self.recalculate_SIDI_seasonal(
+                self.seasonal_params['config'],
+                self.seasonal_params['seasons']
+            )
+            self.SIDI = np.tile(SIDI_1d[:, np.newaxis], (1, 5))
+        elif hasattr(self, 'optimal_k'):
+            self.set_optimal_SIDI(
+                self.optimal_k, self.optimal_weight_index, overwrite=True
+            )
+
     # --- Classes that should NOT call analyze_correlation -----------------
     _EXCLUDED_FROM_CORRELATION = ()  # populated after Streamflow/Temperature/Teleindex are defined
 
@@ -2483,7 +2496,7 @@ class Pet(BaseDroughtAnalysis):
         self.index_name = index_name
 
         super().__init__(self.ts, self.m_cal, self.K, self.start_baseline_year, self.end_baseline_year,
-                         self.basin_name, self.calculation_method, self.threshold, self.index_name)
+                         self.basin_name, self.calculation_method, self.threshold, self.index_name,self.day)
 
         if verbose:
             print("#########################################################################")
@@ -2840,13 +2853,13 @@ class Teleindex(BaseDroughtAnalysis):
 
         # Initialize the base class
         super().__init__(self.ts, self.m_cal, self.K, self.start_baseline_year, self.end_baseline_year,
-                         self.basin_name,self.calculation_method, self.threshold, self.index_name)
+                         self.basin_name,self.calculation_method, self.threshold, self.index_name,self.day)
 
         # Welcome and guidance messages
         if verbose:
             print("#########################################################################")
             print("Welcome to Drought Scan! \n")
-            print("The precipitation data has been imported successfully.")
+            print("The teleconnection data has been imported successfully.")
             print(f"Your data starts from {self.m_cal[0]} and ends on {self.m_cal[-1]}.")
             print("#########################################################################")
             print("Run the following class methods to access key functionalities:\n")
