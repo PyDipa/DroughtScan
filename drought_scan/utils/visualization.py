@@ -512,7 +512,9 @@ def plot_cdn_trends(DSO, windows, ax=None,year_ext=None,unit=None,show_spi=False
     normal_values = DSO.normal_values()
     coeff = DSO.c2r_index
     # average std, used to move from delta changes into mm
-    std_to_mm = np.mean([np.polyval(coeff[0, m, :], 1) - normal_values[m] for m in range(12)])
+    std_to_mm = [np.polyval(coeff[0, m, :], 1) - normal_values[m] for m in range(12)]
+    std_to_mm = np.mean(np.absolute(std_to_mm))
+
     anni = np.unique(DSO.m_cal[:, 1]).astype(int)
 
 
