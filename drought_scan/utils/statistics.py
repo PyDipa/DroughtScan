@@ -17,7 +17,7 @@ from scipy import stats
 import numpy as np
 from typing import Optional
 import matplotlib.pyplot as plt
-from datetime import datetime,timedelta
+from datetime import date,datetime,timedelta
 
 
 # ===================================================================
