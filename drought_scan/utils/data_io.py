@@ -1230,7 +1230,7 @@ def refit_gamma_shifted(ts_daily,dates_daily,ref_day,
 
     Returns
     -------
-    gamma_params : dict
+    fit_params : dict
         {month_number: (alpha, loc, beta, shift)  or  None}
 
         `shift` is a small positive constant added to handle zeros before
@@ -1244,7 +1244,7 @@ def refit_gamma_shifted(ts_daily,dates_daily,ref_day,
     from scipy.stats import gamma as gamma_dist
 
     dates = _to_date_array(dates_daily)
-    gamma_params = {}
+    fit_params = {}
 
     for m in range(1, 13):
         samples = []
@@ -1275,7 +1275,7 @@ def refit_gamma_shifted(ts_daily,dates_daily,ref_day,
                 f"Month {m}: only {len(samples)} baseline samples for "
                 f"shifted fit — gamma unreliable."
             )
-            gamma_params[m] = None
+            fit_params[m] = None
             continue
 
         # Handle zeros / negatives (same logic as f_spi)
@@ -1288,12 +1288,12 @@ def refit_gamma_shifted(ts_daily,dates_daily,ref_day,
 
         try:
             alpha, loc, beta = gamma_dist.fit(samples_fit, floc=0)
-            gamma_params[m] = (alpha, loc, beta, shift)
+            fit_params[m] = (alpha, loc, beta, shift)
         except Exception as e:
             warnings.warn(f"Month {m}: gamma fit failed ({e}).")
-            gamma_params[m] = None
+            fit_params[m] = None
 
-    return gamma_params
+    return fit_params
 
 
 # OLD WORKING SCRIPT TO INGEST CVS and EXCEL

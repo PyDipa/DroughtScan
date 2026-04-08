@@ -211,14 +211,19 @@ class BaseDroughtAnalysis:
     # =====================================================================
     # ▸ STANDARD Methods
     # =====================================================================
-    def _compute_spi(self, month_scale,gamma_params=None):
+    def _compute_spi(self, month_scale,fit_params=None):
         """
         Calculate SPI for a specific temporal scale, optionally using precomputed gamma parameters.
 
         Args:
             month_scale (int): Temporal scale for SPI (e.g., SPI-3, SPI-6).
-            gamma_params (dict, optional): Dictionary with precomputed gamma parameters {k: {m: (alpha, loc, beta)}}
-                where k is the time scale and m is the reference month (1-12).
+            fit_params (dict, optional): Precomputed parameters for the reference month,
+                keyed by month (1-12). Each value is a dict with keys:
+                - 'kde': fitted scipy gaussian_kde object
+                - 'bw_factor': bandwidth factor used in the KDE fit
+                - 'n_fit': number of samples used for fitting
+                - 'fit_domain': string describing the domain of the fit
+                If None, parameters are estimated from scratch.
 
         Returns:
             tuple:
@@ -238,21 +243,26 @@ class BaseDroughtAnalysis:
             way = 2
 
         for ref_month in range(1, 13):
-            if gamma_params is None:
-                if way==1:
-                    indices, spi_values, coeff, _ = self.calculation_method(
-                        self.ts, month_scale, ref_month, self.m_cal, self.start_baseline_year, self.end_baseline_year
-                    )
-                elif way==2:
-                    indices, spi_values, coeff = self.calculation_method(
-                        self.ts, month_scale, ref_month, self.m_cal, self.start_baseline_year, self.end_baseline_year
-                    )
-
-            else:
-                alpha, loc, beta = gamma_params[ref_month]
+            if fit_params is None:
                 indices, spi_values, coeff, _ = self.calculation_method(
-                    self.ts, month_scale, ref_month, self.m_cal, self.start_baseline_year, self.end_baseline_year,
-                    gamma_params=(alpha, loc, beta)  # Passiamo i parametri salvati
+                    self.ts, month_scale, ref_month, self.m_cal,
+                    self.start_baseline_year, self.end_baseline_year
+                )
+            else:
+                # USE SAVED PARAMS
+                # _compute_spi acts as a transparent dispatcher: it extracts the
+                # pre-fitted parameters for the current reference month and forwards
+                # them to the calculation_method without inspecting their internal
+                # structure. Type interpretation is fully delegated to each method:
+                #   - f_spi / f_spei : expects a tuple (param1, loc, param2)
+                #   - f_kde          : expects a dict  {'kde': ..., 'bw_factor': ..., ...}
+                #   - f_zscore       : expects a list  [baseline_mean, baseline_std]
+                # This keeps routing logic separate from statistical logic.
+                params = fit_params[ref_month]
+                indices, spi_values, coeff, _ = self.calculation_method(
+                    self.ts, month_scale, ref_month, self.m_cal,
+                    self.start_baseline_year, self.end_baseline_year,
+                    fit_params=params
                 )
 
 
@@ -263,19 +273,22 @@ class BaseDroughtAnalysis:
             c2rspi[ref_month - 1, :] = coeff.copy()
         return Spi_ts,c2rspi
 
-    def _calculate_spi_like_set(self,gamma_params=None):
+    def _calculate_spi_like_set(self,fit_params=None):
         """
-           Compute SPI values for all temporal scales up to K, optionally using precomputed gamma parameters.
+       Compute SPI values for all temporal scales up to K, optionally using precomputed gamma parameters.
 
-           Args:
-               gamma_params (dict, optional): Dictionary with precomputed gamma parameters {k: {m: (alpha, loc, beta)}}
-                   where k is the time scale and m is the reference month (1-12).
+       Args:
+        fit_params (dict, optional): Nested dictionary of precomputed fit parameters,
+        structured as {k: {m: params_dict}} where k is the temporal scale (1..K),
+        m is the reference month (1-12), and params_dict contains the KDE fit
+        (see _compute_spi for the expected structure of params_dict).
+        If None, parameters are estimated from scratch at each scale.
 
-           Returns:
-               tuple:
-                   - ndarray: SPI values arranged in a 2D array (scale, time).
-                   - ndarray: 6 coefficients for each scale and month (K, 12, 6).
-           """
+       Returns:
+           tuple:
+               - ndarray: SPI values arranged in a 2D array (scale, time).
+               - ndarray: 6 coefficients for each scale and month (K, 12, 6).
+        """
         # Initialize SPI set and coefficients
         spiset = np.full((self.K, len(self.ts)), np.nan, dtype=float)
         method = self.calculation_method
@@ -288,11 +301,11 @@ class BaseDroughtAnalysis:
 
         # Calculate SPI for each temporal scale
         for k in range(1, self.K + 1):
-            if gamma_params is None:
+            if fit_params is None:
                 Spi_ts, coeff = self._compute_spi(k)
             else:
-                params = gamma_params[k]
-                Spi_ts, coeff = self._compute_spi(k,gamma_params=params)
+                params = fit_params[k]
+                Spi_ts, coeff = self._compute_spi(k,fit_params=params)
             spiset[k - 1, :] = Spi_ts.copy()
             c2rspi[k - 1, :, :] = coeff.copy()
         return spiset, c2rspi

@@ -282,7 +282,7 @@ def _reverse_polyfit(spi, xbase, m_cal, idmesi_all, tb1, tb2, stride, m):
 # ===================================================================
 #  f_spi — Gamma-based (for positive, right-skewed data)
 # ===================================================================
-def f_spi(prec, stride, m, m_cal, tb1, tb2, gamma_params=None):
+def f_spi(prec, stride, m, m_cal, tb1, tb2, fit_params=None):
     """
     Calculate the Standardized Precipitation Index (SPI) using a Gamma distribution.
 
@@ -293,7 +293,7 @@ def f_spi(prec, stride, m, m_cal, tb1, tb2, gamma_params=None):
         m_cal (numpy.ndarray): Calendar array (n, 2) with [month, year].
         tb1 (int): Baseline start year.
         tb2 (int): Baseline end year.
-        gamma_params (tuple, optional): Pre-computed (alpha, loc, beta).
+        fit_params (tuple, optional): Pre-computed (alpha, loc, beta).
 
     Returns:
         tuple:
@@ -312,10 +312,10 @@ def f_spi(prec, stride, m, m_cal, tb1, tb2, gamma_params=None):
         )
 
     # --- Gamma fit ---
-    if gamma_params is None:
+    if fit_params is None:
         alpha, loc, beta = gamma.fit(xbase[xbase > 0], floc=0)
     else:
-        alpha, loc, beta = gamma_params
+        alpha, loc, beta = fit_params
 
     # --- CDF with zero-inflation ---
     Gx = gamma.cdf(x, a=alpha, loc=loc, scale=beta)
@@ -328,13 +328,13 @@ def f_spi(prec, stride, m, m_cal, tb1, tb2, gamma_params=None):
     # --- Reverse mapping ---
     coef = _reverse_polyfit(spi, xbase, m_cal, idmesi_all, tb1, tb2, stride, m)
 
-    return idmesi_all, spi, coef, (alpha, loc, beta) if gamma_params is None else None
+    return idmesi_all, spi, coef, (alpha, loc, beta) if fit_params is None else None
 
 
 # ===================================================================
 #  f_spei — Pearson III (for real-valued, possibly skewed data)
 # ===================================================================
-def f_spei(balance, stride, m, m_cal, tb1, tb2, gamma_params=None):
+def f_spei(balance, stride, m, m_cal, tb1, tb2, fit_params=None):
     """
     Calculate the Standardized Precipitation Evapotranspiration Index (SPEI)
     using a Pearson III distribution.
@@ -346,7 +346,7 @@ def f_spei(balance, stride, m, m_cal, tb1, tb2, gamma_params=None):
         m_cal (numpy.ndarray): Calendar array (n, 2) with [month, year].
         tb1 (int): Baseline start year.
         tb2 (int): Baseline end year.
-        gamma_params (tuple, optional): Pre-computed (c, loc, scale).
+        fit_params (tuple, optional): Pre-computed (c, loc, scale).
 
     Returns:
         tuple:
@@ -365,10 +365,10 @@ def f_spei(balance, stride, m, m_cal, tb1, tb2, gamma_params=None):
         )
 
     # --- Pearson III fit ---
-    if gamma_params is None:
+    if fit_params is None:
         c, loc, scale = pearson3.fit(xbase[np.isfinite(xbase)])
     else:
-        c, loc, scale = gamma_params
+        c, loc, scale = fit_params
 
     # --- CDF → normal quantile ---
     fx = pearson3.cdf(x, skew=c, loc=loc, scale=scale)
@@ -378,13 +378,13 @@ def f_spei(balance, stride, m, m_cal, tb1, tb2, gamma_params=None):
     # --- Reverse mapping ---
     coef = _reverse_polyfit(spei, xbase, m_cal, idmesi_all, tb1, tb2, stride, m)
 
-    return idmesi_all, spei, coef, (c, loc, scale) if gamma_params is None else None
+    return idmesi_all, spei, coef, (c, loc, scale) if fit_params is None else None
 
 
 # ===================================================================
 #  f_kde — Non-parametric KDE (for any data)
 # ===================================================================
-def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, kde_params=None):
+def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None):
     """
     SPI-like standardization using Gaussian KDE (Silverman bandwidth).
 
@@ -396,7 +396,7 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, kde_params=None)
         tb1 (int): Baseline start year.
         tb2 (int): Baseline end year.
         log_transform (bool): If True, apply log-transform before KDE fitting.
-        kde_params (dict or None): Optional pre-computed KDE info.
+        fit_params (dict or None): Optional pre-computed KDE info.
 
     Returns:
         tuple:
@@ -423,11 +423,11 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, kde_params=None)
     # Early exit if no valid data
     if not np.any(finite_x):
         return idmesi_all, spi, np.full(4, np.nan), (
-            None if kde_params is None else None
+            None if fit_params is None else None
         )
 
     # --- KDE fit (baseline) ---
-    if kde_params is None:
+    if fit_params is None:
         xb = xbase_log[finite_xbase] if log_transform else xbase[finite_xbase]
 
         if xb.size < 10:
@@ -445,7 +445,7 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, kde_params=None)
             "fit_domain": "xbase (finite, full R)",
         }
     else:
-        kde = kde_params.get("kde", None)
+        kde = fit_params.get("kde", None)
         if kde is None:
             raise ValueError("kde_params provided but missing key 'kde'.")
         xb = xbase_log[finite_xbase] if log_transform else xbase[finite_xbase]
@@ -484,9 +484,9 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, kde_params=None)
 # ===================================================================
 #  f_zscore — Gaussian z-score (for normally distributed data)
 # ===================================================================
-def f_zscore(data, stride, m, m_cal, tb1, tb2):
+def f_zscore(data, stride, m, m_cal, tb1, tb2,fit_params=None):
     """
-    Calculate the z-score for a time series of monthly data.
+    Calculate the Z-Score for a time series of monthly data using a specified baseline period.
 
     Args:
         data (numpy.ndarray): Monthly series, shape (n,).
@@ -495,22 +495,29 @@ def f_zscore(data, stride, m, m_cal, tb1, tb2):
         m_cal (numpy.ndarray): Calendar (n, 2) with [month, year].
         tb1 (int): Baseline start year.
         tb2 (int): Baseline end year.
+        fit_params (list, optional): Precomputed [baseline_mean, baseline_std].
+            If None, statistics are estimated from the baseline period.
 
     Returns:
         tuple:
             - idmesi_all (ndarray): month indices for the full period.
             - zscore (ndarray): standardized z-score values.
-            - z_params (list): [baseline_mean, baseline_std].
+            - z_params (list): [baseline_mean, baseline_std] used for standardization.
+            - out_params (list or None): [baseline_mean, baseline_std] if fitted
+              from scratch, else None. Consistent with the 4-tuple interface
+              of f_spi, f_spei, and f_kde.
     """
     xbase, x, idmesi_all = _resolve_indices(data, stride, m, m_cal, tb1, tb2)
 
-    baseline_mean = np.nanmean(xbase)
-    baseline_std = np.nanstd(xbase)
 
-    if baseline_std != 0:
-        zscore = (x - baseline_mean) / baseline_std
+    if fit_params is None:
+        baseline_mean = np.nanmean(xbase)
+        baseline_std = np.nanstd(xbase)
+        out_params = [baseline_mean, baseline_std]
     else:
-        zscore = np.zeros(np.shape(x))
+        baseline_mean, baseline_std = fit_params  # riuso parametri salvati
+        out_params = None
 
-    z_params = [baseline_mean, baseline_std]
-    return idmesi_all, zscore, z_params
+    zscore = (x - baseline_mean) / baseline_std if baseline_std != 0 else np.zeros_like(x)
+
+    return idmesi_all, zscore, [baseline_mean, baseline_std], out_params
