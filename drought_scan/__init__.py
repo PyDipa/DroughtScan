@@ -23,7 +23,7 @@ from importlib.metadata import version, PackageNotFoundError
 try:
     __version__ = version("droughtscan")
 except PackageNotFoundError:
-    __version__ = "3.2.1"
+    __version__ = "3.2.2"
 
 # --- Public API ---------------------------------------------------------------
 from .core import (

@@ -1,13 +1,36 @@
 # Changelog
-## [3.2.2] - ....in progress
--add sec 8.1.2
-- bug fix in defining threshold within plot_covariates()
-- New method _reapply_optimization() encapsulates the logic to restore
-  SIDI optimization state after spi_like_set recalculation
-- Handles three cases: seasonal (is_seasonal_sidi), global (optimal_k),
-  and no optimization (no-op)
-- Replaces scattered hasattr/optimal_k/optimal_weight_index checks
-  in ESM scenarios and any future code that recalculates indices
+## [3.2.2] - 2026 -04 - 09
+refactor: unify fit_params interface across all calculation methods
+
+### Refactored
+- Rename gamma_params → fit_params throughout the codebase (f_spi,
+  f_spei, f_kde, _compute_spi, _calculate_spi_like_set, _get_fit_params)
+  to reflect the method-agnostic nature of the parameter container
+- _compute_spi now acts as a transparent dispatcher: type interpretation
+  of fit_params is fully delegated to each calculation method
+- Add dispatcher comment in _compute_spi else-branch documenting
+  the delegation pattern for type interpretation
+
+### Added
+- fit_params support to f_zscore, aligning its interface with f_spi,
+  f_spei and f_kde (4-tuple return: indices, values, coeff, params)
+- `_reapply_optimization()` method in `BaseDroughtAnalysis`: encapsulates
+  SIDI re-optimization after `spi_like_set` recalculation (seasonal, global,
+  or no-op). Used internally by ESM scenarios.
+- User Guide Section 8.1.2: documents the distinction between global
+  (`optimal_k` / `optimal_weight_index`) and seasonal (`is_seasonal_sidi`)
+  SIDI optimization states.
+
+### Fixed
+- Silent failure in _compute_spi when f_zscore was used with precomputed
+  fit_params (was falling into f_spi branch, wrong unpacking)
+- `plot_covariates()`: threshold was not correctly defined when called
+  without prior optimization.
+- Minor bug fixes.
+
+### Docs
+- Update docstrings: _compute_spi, _calculate_spi_like_set,
+  _get_fit_params, f_zscore
 
 ## [3.2.1] - 2026-04-02
 - Minor bug fixes (various).
