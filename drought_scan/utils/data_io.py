@@ -71,13 +71,17 @@ def extract_variable(data, possible_names):
                 raise ValueError(f"Error extracting variable '{name}': {e}")
     # raise ValueError(f"None of {possible_names} found in NetCDF variables.")
 
-def create_mask(shape,LAT, LON):
+def create_mask(shape, LAT, LON):
     """
     Create a mask of the region defined by the shapefile.
+    If the shape is too small relative to the grid resolution,
+    falls back to a single-pixel mask at the nearest grid cell
+    to the shape's centroid.
 
     Args:
-        LAT (ndarray): Latitude grid  (2D array).
-        LON (ndarray): Longitude grid  (2D array).
+        shape: GeoDataFrame with the region geometry.
+        LAT (ndarray): Latitude grid (2D array).
+        LON (ndarray): Longitude grid (2D array).
 
     Returns:
         ndarray: Mask array where 0 indicates the region of interest.
@@ -87,8 +91,27 @@ def create_mask(shape,LAT, LON):
     lon_grid = np.linspace(np.min(LON), np.max(LON), lon_steps)
 
     mask = regionmask.mask_geopandas(shape, lon_grid, lat_grid)
-    return np.flipud(mask)
+    mask = np.flipud(mask)
 
+    # Fallback: se la maschera è tutta NaN (shape troppo piccolo per la griglia)
+    if np.all(np.isnan(mask)):
+        print(
+            "Warning: shape too small for grid resolution. "
+            "Falling back to nearest-pixel mask."
+        )
+        # Centroide dello shape (in CRS dello shape, assumiamo lat/lon)
+        centroid = shape.geometry.union_all().centroid
+        c_lat, c_lon = centroid.y, centroid.x
+
+        # Pixel più vicino al centroide
+        lat_idx = np.argmin(np.abs(lat_grid - c_lat))
+        lon_idx = np.argmin(np.abs(lon_grid - c_lon))
+
+        # Maschera con solo quel pixel = 0, tutto il resto NaN
+        mask = np.full((lat_steps, lon_steps), np.nan)
+        mask[lat_steps - 1 - lat_idx, lon_idx] = 0  # flipud-consistent
+
+    return mask
 
 def _find_anchor(days_arr, months_arr, years_arr, year, month, day):
     search_range = range(day, 27, -1) if day > 28 else [day]
