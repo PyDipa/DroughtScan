@@ -807,13 +807,14 @@ def plot__covariates(DSO, streamflow, weight_index,year_ext=None, split_plot=Fal
 
     width=_figure_size_for_length(len(x))[0]/4*3
     hight =_figure_size_for_length(len(x))[1]/3
+    colors =    ['tab:blue', 'tab:orange', 'tab:green', 'tab:pink', 'tab:purple']
 
     if split_plot:
         # --- Panel 1: SIDI vs SQI1 ---
         fig, ax = plt.subplots(figsize=(width,hight))
         highlight_drought(ax, x, offset=0,threshold=DSO.threshold)
-        ax.plot(vec, x, c='tab:blue', label=DSO.SIDI_name)
-        ax.plot(vec, y, c='tab:orange', label='SQI1')
+        ax.plot(vec, x, c=colors[weight_index], label=DSO.SIDI_name)
+        ax.plot(vec, y, c='dimgrey', label='SQI1')
         ax.set_ylim(-4, 4)
         ax.legend()
         ax.set_title(f"{DSO.basin_name}: optimal {DSO.SIDI_name} and {streamflow.index_name}1 (covariates)")
@@ -847,8 +848,8 @@ def plot__covariates(DSO, streamflow, weight_index,year_ext=None, split_plot=Fal
         # Panel 1: SIDI vs SQI1
         ax = axes[0]
         highlight_drought(ax, x, offset=0,threshold=DSO.threshold)
-        ax.plot(vec, x, c='tab:blue', label=DSO.SIDI_name)
-        ax.plot(vec, y, c='tab:orange', label=f'{streamflow.index_name} ')
+        ax.plot(vec, x, c=colors[weight_index], label=DSO.SIDI_name)
+        ax.plot(vec, y,  c='dimgrey', label=f'{streamflow.index_name} ')
         ax.set_ylim(-4, 4)
         ax.legend()
         ax.set_title(f"{DSO.basin_name}: optimal {DSO.SIDI_name} and {streamflow.index_name}  (covariates)")

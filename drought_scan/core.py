@@ -1942,7 +1942,7 @@ class Precipitation(BaseDroughtAnalysis):
         else:
             raise TypeError(
                 "The Precipitation object must be optimized with "
-                "'set_optimal_SIDI()' or 'set_optimal_SIDI_seasonal()' "
+                "'set_optimal_SIDI()' or 'set_optimal_SIDI_seasonal()' OVERWRITE = True "
                 "before calling this function."
             )
 
