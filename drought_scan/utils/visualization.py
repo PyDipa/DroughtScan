@@ -740,7 +740,7 @@ def monthly_profile(DSO,var=None, var_name=None,cumulate=False, ax=None,highligh
 #---------------------------------------------------
 # optimal SIDI and SQI1 - diagnostic tool
 # -------------------------------------------------
-def plot__covariates(DSO, streamflow, weight_index,year_ext=None, split_plot=False):
+def plot__covariates(DSO, streamflow, weight_index, year_ext=None, split_plot=False):
     """
     Plot the covariate relationship between a Precipitation-based drought index (SIDI)
     and a Streamflow-based index (SQI1), highlighting overlapping drought signals and
@@ -750,123 +750,126 @@ def plot__covariates(DSO, streamflow, weight_index,year_ext=None, split_plot=Fal
     ----------
     DSO : Precipitation
         An instance of Precipitation (subclass of BaseDroughtAnalysis) with an optimized
-        SIDI index (requires that `DSO.set_optimal_SIDI()` has been called before).
+        SIDI index (requires that `DSO.set_optimal_SIDI()` has been been called before).
     streamflow : BaseDroughtAnalysis or Streamflow
         A Streamflow object (or subclass of BaseDroughtAnalysis) providing SQI1 or similar indices.
-    weight_index : int
-        Index of the SIDI series to be compared with streamflow.
+    weight_index : int or None
+        Index (0–4) of the SIDI series to be compared with streamflow.
+        If None, column 0 is used and the SIDI line is rendered in red
+        (reserved for seasonally-optimized SIDI where all columns are identical).
+    year_ext : tuple of int, optional
+        (start_year, end_year) to restrict the x-axis.
     split_plot : bool, optional
-        If True, produces two separate subplots:
+        If True, produces two separate figures:
             (1) Optimal SIDI vs SQI1
             (2) Their difference (SQI1 - SIDI).
-        If False (default), combines both plots in a single figure with two stacked panels.
-
+        If False (default), combines both in a single figure with two stacked panels.
 
     Notes
     -----
-    - The function requires the utility functions:
-        `find_overlap`, `spi_cmap`, and `highlight_drought`.
-    - Assumes that DSO and streamflow share at least some overlapping
-      monthly timeline (`m_cal`).
+    - Requires utility functions: `find_overlap`, `spi_cmap`, `highlight_drought`.
+    - Assumes DSO and streamflow share at least some overlapping monthly timeline (`m_cal`).
     """
 
-    # Find temporal overlap
+    # --- Resolve plot index and color ---
+    colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:pink', 'tab:purple']
+    _plot_index = 0 if weight_index is None else weight_index
+    _color      = 'red' if weight_index is None else colors[weight_index]
+
+    # --- Temporal overlap ---
     self_indices, streamflow_indices = find_overlap(DSO.m_cal, streamflow.m_cal)
     if len(self_indices) == 0 or len(streamflow_indices) == 0:
         raise ValueError("No overlapping data found between Precipitation and Streamflow.")
 
-    # Subset to overlapping calendar
+    # --- Subset to overlapping calendar ---
     m_cal = DSO.m_cal[self_indices, :]
-    vec = np.arange(len(m_cal))
+    vec   = np.arange(len(m_cal))
 
-    # Extract series
-    x = DSO.SIDI[:, weight_index][self_indices]              # SIDI
-    y = streamflow.spi_like_set[0][streamflow_indices]       # SQI1
-    delta = y - x                                            # Difference
+    # --- Extract series ---
+    x     = DSO.SIDI[:, _plot_index][self_indices]          # SIDI
+    y     = streamflow.spi_like_set[0][streamflow_indices]  # SQI1
+    delta = y - x                                           # Difference
 
-    # Colormap for delta shading
-    cmap = spi_cmap().reversed() if DSO.threshold > 0 else spi_cmap()
+    # --- Colormap for delta shading ---
+    cmap   = spi_cmap().reversed() if DSO.threshold > 0 else spi_cmap()
     bounds = np.array([-3, -2.5, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 2.5, 3])
-    norm = mpl.colors.BoundaryNorm(bounds, cmap.N)
+    norm   = mpl.colors.BoundaryNorm(bounds, cmap.N)
 
-    # Prepare labels for years
-    gen_id = np.where(m_cal[:,0]==1)[0][0]
+    # --- Year tick labels ---
+    gen_id      = np.where(m_cal[:, 0] == 1)[0][0]
     year_labels = np.arange(m_cal[gen_id, 1], m_cal[-1, 1] + 1)
-    year_ticks = np.arange(gen_id, len(m_cal), 12)
+    year_ticks  = np.arange(gen_id, len(m_cal), 12)
 
     def _apply_xlim(ax):
         if year_ext is None:
-            ax.set_xlim(0,len(x))
+            ax.set_xlim(0, len(x))
         else:
             try:
                 x1 = np.where(m_cal[:, 1] == year_ext[0])[0][0]
                 x2 = np.where(m_cal[:, 1] == year_ext[1])[0][-1]
             except IndexError:
-                raise IndexError("provide a tuple of years for xlim within the actual time domain")
+                raise IndexError("provide a tuple of years within the actual time domain")
             ax.set_xlim(x1, x2)
 
-    width=_figure_size_for_length(len(x))[0]/4*3
-    hight =_figure_size_for_length(len(x))[1]/3
-    colors =    ['tab:blue', 'tab:orange', 'tab:green', 'tab:pink', 'tab:purple','tab:red']
+    width = _figure_size_for_length(len(x))[0] / 4 * 3
+    hight = _figure_size_for_length(len(x))[1] / 3
 
+    # ================================================================
+    # Figure 1: timeseries + delta
+    # ================================================================
     if split_plot:
         # --- Panel 1: SIDI vs SQI1 ---
-        fig, ax = plt.subplots(figsize=(width,hight))
-        highlight_drought(ax, x, offset=0,threshold=DSO.threshold)
-        ax.plot(vec, x, c=colors[weight_index], label=DSO.SIDI_name)
+        fig, ax = plt.subplots(figsize=(width, hight))
+        highlight_drought(ax, x, offset=0, threshold=DSO.threshold)
+        ax.plot(vec, x, c=_color,    label=DSO.SIDI_name)
         ax.plot(vec, y, c='dimgrey', label='SQI1')
         ax.set_ylim(-4, 4)
         ax.legend()
         ax.set_title(f"{DSO.basin_name}: optimal {DSO.SIDI_name} and {streamflow.index_name}1 (covariates)")
         ax.set_xticks(year_ticks)
         ax.set_xticklabels(year_labels, rotation=90, fontweight='bold')
-        # ax.grid(axis='y')
         _apply_xlim(ax)
         fig.tight_layout()
 
-        # --- Panel 2: Difference (delta) ---
-        fig, ax = plt.subplots(figsize=(width,hight))
-        highlight_drought(ax, x, offset=0,threshold=DSO.threshold)
+        # --- Panel 2: delta ---
+        fig, ax = plt.subplots(figsize=(width, hight))
+        highlight_drought(ax, x, offset=0, threshold=DSO.threshold)
         ax.plot(vec, delta, 'gray', linewidth=1, alpha=0.3)
         for j in range(len(delta) - 1):
             ax.fill_between([vec[j], vec[j + 1]],
                             [delta[j], delta[j + 1]],
                             color=cmap(norm(delta[j])), alpha=1)
-        _apply_xlim(ax)
-        ax.set_title(f"{DSO.basin_name}: {streamflow.index_name}1  minus optimal {DSO.SIDI_name}")
+        ax.set_title(f"{DSO.basin_name}: {streamflow.index_name}1 minus optimal {DSO.SIDI_name}")
         ax.set_xticks(year_ticks)
         ax.set_xticklabels(year_labels, rotation=90, fontweight='bold')
-        ax.axhline(y=-1,linestyle="--",color='gray',alpha=0.7)
-        ax.axhline(y=1, linestyle="--", color='gray',alpha=0.7)
+        ax.axhline(y=-1, linestyle='--', color='gray', alpha=0.7)
+        ax.axhline(y=1,  linestyle='--', color='gray', alpha=0.7)
         _apply_xlim(ax)
         fig.tight_layout()
 
     else:
-        # --- Single figure with two stacked subplots ---
-        fig, axes = plt.subplots(2, 1, figsize=(width,hight*2), sharex=True)
+        # --- Single figure, two stacked panels ---
+        fig, axes = plt.subplots(2, 1, figsize=(width, hight * 2), sharex=True)
 
-        # Panel 1: SIDI vs SQI1
         ax = axes[0]
-        highlight_drought(ax, x, offset=0,threshold=DSO.threshold)
-        ax.plot(vec, x, c=colors[weight_index], label=DSO.SIDI_name)
-        ax.plot(vec, y,  c='dimgrey', label=f'{streamflow.index_name}1')
+        highlight_drought(ax, x, offset=0, threshold=DSO.threshold)
+        ax.plot(vec, x, c=_color,    label=DSO.SIDI_name)
+        ax.plot(vec, y, c='dimgrey', label=f'{streamflow.index_name}1')
         ax.set_ylim(-4, 4)
         ax.legend()
-        ax.set_title(f"{DSO.basin_name}: optimal {DSO.SIDI_name} and {streamflow.index_name}  (covariates)")
+        ax.set_title(f"{DSO.basin_name}: optimal {DSO.SIDI_name} and {streamflow.index_name} (covariates)")
         ax.grid(axis='y')
         _apply_xlim(ax)
 
-        # Panel 2: Difference (delta)
         ax = axes[1]
-        highlight_drought(ax, x, offset=0,threshold=DSO.threshold)
+        highlight_drought(ax, x, offset=0, threshold=DSO.threshold)
         ax.plot(vec, delta, 'gray', linewidth=1, alpha=0.3)
         for j in range(len(delta) - 1):
             ax.fill_between([vec[j], vec[j + 1]],
                             [delta[j], delta[j + 1]],
                             color=cmap(norm(delta[j])), alpha=1)
-
         ax.set_ylim(-4, 4)
-        ax.set_title(f"{DSO.basin_name}: {streamflow.index_name}  minus optimal {DSO.SIDI_name}")
+        ax.set_title(f"{DSO.basin_name}: {streamflow.index_name} minus optimal {DSO.SIDI_name}")
         ax.set_xticks(year_ticks)
         ax.set_xticklabels(year_labels, rotation=90, fontweight='bold')
         ax.grid(axis='y')
@@ -875,9 +878,12 @@ def plot__covariates(DSO, streamflow, weight_index,year_ext=None, split_plot=Fal
 
     plt.show()
 
-    # --- Second figure: timeseries + scatter ---
-    scatter_size = hight  # pannello quadrato
-    ts_width = width - scatter_size  # timeseries prende il resto
+    # ================================================================
+    # Figure 2: timeseries + scatter
+    # ================================================================
+    scatter_size = hight
+    assert width > scatter_size, "Figure width too small for scatter panel — increase series length."
+    ts_width = width - scatter_size
 
     fig2, axes2 = plt.subplots(
         1, 2,
@@ -885,12 +891,10 @@ def plot__covariates(DSO, streamflow, weight_index,year_ext=None, split_plot=Fal
         gridspec_kw={'width_ratios': [ts_width / scatter_size, 1]}
     )
 
-    # left panel: timeseries (as in Fig.1)
+    # Left: timeseries
     ax_ts = axes2[0]
-    # highlight_drought(ax_ts, x, offset=0, threshold=DSO.threshold)
-    ax_ts.plot(vec, y, c='k', label=f'{streamflow.index_name}1',linewidth=0.7)
-    ax_ts.plot(vec, x, c=colors[weight_index], label=DSO.SIDI_name,linewidth=0.7)
-
+    ax_ts.plot(vec, y, c='k',    label=f'{streamflow.index_name}1', linewidth=0.7)
+    ax_ts.plot(vec, x, c=_color, label=DSO.SIDI_name,               linewidth=0.7)
     ax_ts.set_ylim(-4, 4)
     ax_ts.legend()
     ax_ts.set_title(f"{DSO.basin_name}: {DSO.SIDI_name} vs {streamflow.index_name}")
@@ -899,9 +903,9 @@ def plot__covariates(DSO, streamflow, weight_index,year_ext=None, split_plot=Fal
     ax_ts.grid(axis='y')
     _apply_xlim(ax_ts)
 
-    # right panel: scatter plot
+    # Right: scatter
     ax_sc = axes2[1]
-    ax_sc.scatter(x, y, c=colors[weight_index],alpha=0.7, edgecolors='none', s=15)
+    ax_sc.scatter(x, y, c=_color, alpha=0.7, edgecolors='none', s=15)
     ax_sc.set_xlabel(DSO.SIDI_name)
     ax_sc.set_ylabel(streamflow.index_name)
     ax_sc.set_xlim(-4, 4)

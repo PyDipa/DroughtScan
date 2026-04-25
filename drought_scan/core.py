@@ -32,6 +32,11 @@ import pandas as pd
 from functools import partial
 from scipy import stats
 
+
+
+
+
+
 # --- drought_indices --------------------------------------------------------
 from drought_scan.utils.drought_indices import (
     baseline_indices,
@@ -1025,6 +1030,1452 @@ class BaseDroughtAnalysis:
 
         return R2
 
+    # ──────────────────────────────────────────────────────────────────────────────
+    # BENCHMARKING D(SPI) | SIDI
+    def benchmark_convolution(self, streamflow, var=None, Kmax=None, plot=True,
+                              agg=None, seasons=None):
+        """
+        Unified linear convolution benchmark via OLS (Benchmark A and B).
+
+        Estimates the rainfall-runoff relationship by fitting a discrete linear
+        convolution model with memory up to K months. Two modes are available,
+        selected via the `var` parameter:
+
+        **var='P' — Benchmark A: Unit Hydrograph on raw precipitation**
+
+            Q(t) ≈ Σ_{j=0}^{K-1} h(j) · P(t-j) + intercept
+
+        **var='SPI' — Benchmark B: Impulse response on standardized anomalies**
+
+            SQI_1(t) ≈ Σ_{j=0}^{K-1} h(j) · SPI_1(t-j) + intercept
+
+        CONCEPTUAL POSITIONING
+        ----------------------
+        The comparison of R²_adj across var='P', var='SPI', and the parametric
+        SIDI-based model disentangles three sources of predictive power:
+            (i)  distributional non-linearity of SPI at scale 1  (A → B gain)
+            (ii) multi-scale aggregation of standardized anomalies (B → SIDI gain)
+            (iii) combined effect                                  (A → SIDI gain)
+
+        For each K in [1, ..., Kmax], a separate OLS model is fitted. The optimal
+        K is selected as argmax(R²_adj), following the same criterion as
+        analyze_correlation().
+
+        Parameters
+        ----------
+        streamflow : BaseDroughtAnalysis
+            Streamflow object with .ts, .spi_like_set, and .m_cal attributes.
+        var : str or None, optional
+            'P'   — Benchmark A: raw precipitation vs streamflow (default).
+            'SPI' — Benchmark B: SPI_1 anomalies vs SQI_1.
+            None defaults to 'P'.
+        Kmax : int, optional
+            Maximum lag (months) to test. Defaults to self.K.
+        plot : bool, optional
+            If True, plots R²_adj vs K and the estimated impulse response h(j).
+            Default is True.
+        agg : {'quarter', 'semiannual', 'four-monthly', 'monthly', 'custom'} or None
+            Temporal aggregation scheme for seasonal analysis.
+            If None (default), the analysis is run on all data together.
+        seasons : dict, optional
+            Custom month mapping when ``agg='custom'`` or when passing a dict
+            directly (sets agg='custom' automatically). If None and agg is None,
+            no seasonal split is performed.
+
+        Returns
+        -------
+        If seasons is None and agg is None:
+            dict with keys:
+                'R2_adj'          : np.ndarray, shape (Kmax,)
+                'optimal_K'       : int
+                'K_range'         : np.ndarray
+                'beta'            : np.ndarray, shape (optimal_K + 1,)
+                'condition_number': float
+        Else:
+            dict keyed by season name, each value being the same dict as above,
+            with an additional key 'sample_number'.
+
+        Notes
+        -----
+        - Requires temporal overlap between self.m_cal and streamflow.m_cal.
+        - NaN values in either input or output series are excluded row-wise.
+        - The guard `len(rows) < K + 2` skips degenerate configurations.
+        - For physically interpretable ordinates when condition_number >> 30,
+          consider ridge regression.
+
+        References
+        ----------
+        Sherman, L.K. (1932). Streamflow from rainfall by the unit-graph method.
+            Engineering News-Record, 108, 501-505.
+        Chow, V.T., Maidment, D.R., Mays, L.W. (1988). Applied Hydrology.
+            McGraw-Hill, New York.
+        McKee, T.B., Doesken, N.J., Kleist, J. (1993). The relationship of drought
+            frequency and duration to time scales. Proc. 8th Conference on Applied
+            Climatology, 179-183.
+        Vicente-Serrano, S.M., López-Moreno, J.I., Beguería, S., et al. (2012).
+            Accurate computation of a streamflow drought index. Journal of
+            Hydrologic Engineering, 17(2), 318-332.
+        """
+
+        self._check_correlation_eligible()
+
+        if var is None:
+            var = 'P'
+        if var not in ('P', 'SPI'):
+            raise ValueError("`var` must be 'P' or 'SPI'.")
+        if Kmax is None:
+            Kmax = self.K
+
+        if seasons is not None:
+            agg = 'custom'
+
+        # --- Temporal overlap ---
+        self_indices, streamflow_indices = find_overlap(self.m_cal, streamflow.m_cal)
+        if len(self_indices) == 0 or len(streamflow_indices) == 0:
+            raise ValueError("No overlapping data found between the two objects.")
+
+        if var == 'P':
+            driver = self.ts[self_indices]
+            target = streamflow.ts[streamflow_indices] #streamflow.spi_like_set[0, streamflow_indices]#
+            x_label = 'P'
+            y_label = 'Q'
+            title_A = 'Benchmark A — Unit Hydrograph OLS'
+            title_B = 'Unit Hydrograph estimated by OLS'
+            y_label_beta = 'h(j) — beta OLS'
+            x_label_beta = 'lag (months)'
+        else:  # 'SPI'
+            driver = self.spi_like_set[0, self_indices]
+            target = streamflow.spi_like_set[0, streamflow_indices]
+            x_label = 'SPI_1'
+            y_label = 'SQI_1'
+            title_A = 'Benchmark B — SPI_1 lag convolution OLS'
+            title_B = 'Impulse response on SPI_1 estimated by OLS'
+            y_label_beta = 'h(j) — beta OLS'
+            x_label_beta = 'lag (months)'
+
+        m_cal_overlap = np.array([self.m_cal[i] for i in self_indices])
+        months_overlap = np.array([m[0] for m in m_cal_overlap], dtype=int)
+
+        K_range = np.arange(1, Kmax + 1)
+        n = len(driver)
+
+        def _run_benchmark(driver_sub, target_sub, season_mask=None):
+            """OLS convolution for a given data subset. Returns the full result dict."""
+            MatCorr = []
+            for K in K_range:
+                rows, y_rows = [], []
+                for t in range(K - 1, len(driver_sub)):
+                    if season_mask is not None and not season_mask[t]:
+                        continue
+                    if np.isnan(target_sub[t]):
+                        continue
+                    lag_vec = driver_sub[t - K + 1:t + 1][::-1]
+                    if np.any(np.isnan(lag_vec)):
+                        continue
+                    rows.append(lag_vec)
+                    y_rows.append(target_sub[t])
+
+                if len(rows) < K + 2:
+                    MatCorr.append(np.nan)
+                    continue
+
+                X = np.column_stack([np.array(rows), np.ones(len(rows))])
+                y_v = np.array(y_rows)
+                beta, _, _, _ = np.linalg.lstsq(X, y_v, rcond=None)
+                y_hat = X @ beta
+                ss_res = np.sum((y_v - y_hat) ** 2)
+                ss_tot = np.sum((y_v - y_v.mean()) ** 2)
+                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+                n_v, p = len(y_v), K
+                MatCorr.append(1 - (1 - r2) * (n_v - 1) / (n_v - p - 1))
+
+            MatCorr = np.array(MatCorr)
+            best_ki = np.nanargmax(MatCorr)
+            best_K = K_range[best_ki]
+
+            rows, y_rows, t_idx = [], [], []
+            for t in range(best_K - 1, len(driver_sub)):
+                if season_mask is not None and not season_mask[t]:
+                    continue
+                if np.isnan(target_sub[t]):
+                    continue
+                lag_vec = driver_sub[t - best_K + 1:t + 1][::-1]
+                if np.any(np.isnan(lag_vec)):
+                    continue
+                rows.append(lag_vec)
+                y_rows.append(target_sub[t])
+                t_idx.append(t)
+
+            X_opt = np.column_stack([np.array(rows), np.ones(len(rows))])
+            y_opt = np.array(y_rows)
+            beta_opt, _, _, sv = np.linalg.lstsq(X_opt, y_opt, rcond=None)
+            cond_num = float(np.max(sv) / np.min(sv[sv > 0])) if len(sv) > 0 else np.nan
+
+            if cond_num > 30:
+                import warnings
+                warnings.warn(
+                    f"benchmark_convolution (var='{var}'): condition number = {cond_num:.1f} > 30. "
+                    f"Multicollinearity at K={best_K} — beta coefficients may be unstable.",
+                    UserWarning
+                )
+
+            return {
+                'R2_adj': MatCorr,
+                'optimal_K': int(best_K),
+                'K_range': K_range,
+                'beta': beta_opt,
+                'condition_number': cond_num,
+            }
+
+        def _monotonic_plateau(x):
+            """
+            Returns the index of the last element in the initial monotonic
+            increasing sequence of x. Used to identify the plateau of R²_adj
+            vs K, stopping before overfitting or numerical noise takes over.
+            """
+            last = 0
+            for i in range(1, len(x)):
+                if np.isfinite(x[i]) and x[i] >= x[i - 1]:
+                    last = i
+                else:
+                    break
+            return last
+
+        # ---------------------------------------------------------------
+        # CASE 1: no seasonal split — original behaviour
+        # ---------------------------------------------------------------
+        if agg is None:
+            print("Starting correlation analysis...")
+            result = _run_benchmark(driver, target)
+
+            if plot:
+                # best_K = result['optimal_K']
+                beta_opt = result['beta']
+                MatCorr = result['R2_adj']
+                plateau_idx = _monotonic_plateau(MatCorr)
+                best_K = K_range[plateau_idx]
+
+                fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+                axes[0].plot(K_range, MatCorr, 'k-o', lw=2)
+                axes[0].axvline(best_K, color='r', ls='--', label=f'optimal K={best_K}')
+                axes[0].set_xlabel('K (lag months)')
+                axes[0].set_ylabel('R²_adj')
+                axes[0].set_title(title_A)
+                axes[0].legend()
+                axes[0].grid(alpha=0.3)
+
+                axes[1].bar(range(best_K), beta_opt[:-1],
+                            color='grey', edgecolor='k', linewidth=0.5)
+                axes[1].axhline(0, color='k', lw=0.8, ls='--')
+                axes[1].set_xlabel(x_label_beta)
+                axes[1].set_ylabel(y_label_beta)
+                axes[1].set_title(f'{title_B} (K={best_K})')
+                axes[1].grid(alpha=0.3, axis='y')
+                plt.tight_layout()
+                plt.show()
+
+            return result
+
+        # ---------------------------------------------------------------
+        # CASE 2: seasonal split
+        # ---------------------------------------------------------------
+        seasons_dict = self._build_seasons_dict(agg, seasons)
+
+        # year coverage check (same guard as analyze_correlation_seasonal)
+        all_months = [m for lst in seasons_dict.values() for m in lst]
+        unique = set(all_months)
+        missing = [m for m in range(1, 13) if m not in unique]
+        duplicates = [m for m in unique if all_months.count(m) > 1]
+        if missing:
+            print("Alert: missing month(s):", missing)
+        if duplicates:
+            print("Alert: duplicate month(s):", duplicates)
+
+        print("Starting correlation analysis (seasonal)...")
+        results = {}
+        for name, mlist in seasons_dict.items():
+            idx = np.isin(months_overlap, mlist)
+            if np.count_nonzero(idx) <= Kmax + 2:
+                print(f" Season {name}: insufficient data, skipped.")
+                continue
+            res = _run_benchmark(driver, target, season_mask=idx)
+            res['sample_number'] = int(np.count_nonzero(idx))
+            print(f" Season {name}: best R²_adj={res['R2_adj'][res['optimal_K'] - 1]:.3f} "
+                  f"(K={res['optimal_K']})")
+            results[name] = res
+
+        if plot:
+            n_seasons = len(results)
+            if n_seasons == 0:
+                return results
+
+            fig, axes = plt.subplots(nrows=n_seasons, ncols=2,
+                                     figsize=(14, 5 * n_seasons))
+            if n_seasons == 1:
+                axes = axes[np.newaxis, :]  # uniform indexing
+
+            for i, (season, res) in enumerate(results.items()):
+                # best_K = res['optimal_K']
+                beta_opt = res['beta']
+                MatCorr = res['R2_adj']
+                plateau_idx = _monotonic_plateau(MatCorr)
+                best_K = K_range[plateau_idx]
+
+                axes[i, 0].plot(K_range, MatCorr, 'k-o', lw=2)
+                axes[i, 0].axvline(best_K, color='r', ls='--', label=f'optimal K={best_K}')
+                axes[i, 0].set_xlabel('K (lag months)')
+                axes[i, 0].set_ylabel('R²_adj')
+                axes[i, 0].set_title(f'{title_A} — {season}')
+                axes[i, 0].legend()
+                axes[i, 0].grid(alpha=0.3)
+
+                axes[i, 1].bar(range(best_K), beta_opt[:best_K],
+                               color='grey', edgecolor='k', linewidth=0.5)
+                axes[i, 1].axhline(0, color='k', lw=0.8, ls='--')
+                axes[i, 1].set_xlabel(x_label_beta)
+                axes[i, 1].set_ylabel(y_label_beta)
+                axes[i, 1].set_title(f'{title_B} — {season} (K={best_K})')
+                axes[i, 1].grid(alpha=0.3, axis='y')
+
+            plt.tight_layout()
+            plt.show()
+
+        return results
+
+    def Dspi_free(self, streamflow, Kmax=None, plot=True):
+        """
+        Benchmark B: Linear convolution of standardized anomalies via OLS.
+
+        This benchmark estimates the relationship between precipitation anomalies at
+        increasing temporal scales and standardized streamflow (SQI1) by fitting:
+
+            SQI1(t) ≈ Σ_{k=1}^{K} h(k) · SPI_k(t) + intercept
+
+        where SPI_k(t) is the k-scale SPI-like index at time t (from self.spi_like_set),
+        and SQI1(t) = streamflow.spi_like_set[0] is the standardized streamflow index
+        at scale 1. Weights h(k) are estimated freely via OLS.
+
+        Unlike Benchmark A, there is no temporal lag: all predictors are evaluated at
+        the same time t. The hydrological memory is implicitly encoded in the SPI
+        accumulation scales — SPI_3(t) already contains the standardized anomaly of
+        the last 3 months of precipitation. Adding SPI_k as a predictor is equivalent
+        to asking: "does the k-month accumulated anomaly carry additional information
+        about streamflow beyond shorter scales?"
+
+        For each K in [1, ..., Kmax], a separate OLS model is fitted using
+        [SPI_1(t), ..., SPI_K(t)] as predictors. The optimal K is selected as
+        argmax(R²_adj), following the same criterion as analyze_correlation().
+
+        Note: since SPI_k is a moving average of SPI_1, predictors are structurally
+        correlated — multicollinearity increases with K. R²_adj remains valid for
+        model selection; individual beta coefficients may be unstable at large K.
+
+        Parameters
+        ----------
+        streamflow : BaseDroughtAnalysis
+            Streamflow object with .spi_like_set and .m_cal attributes.
+        Kmax : int, optional
+            Maximum number of SPI scales to test. Defaults to self.K.
+        plot : bool, optional
+            If True, plots R²_adj vs K and the estimated weights h(k).
+            Default is True.
+
+        Returns
+        -------
+        dict with keys:
+            'R2_adj'          : np.ndarray, shape (Kmax,)
+                Adjusted R² for each K in K_range.
+            'optimal_K'       : int
+                K value maximising R²_adj.
+            'K_range'         : np.ndarray
+                Array of tested K values [1, ..., Kmax].
+            'beta'            : np.ndarray, shape (optimal_K + 1,)
+                OLS coefficients at optimal K (last element is the intercept).
+            'condition_number': float
+                Condition number of the design matrix at optimal K.
+                Values >> 30 indicate multicollinearity among SPI scales.
+
+        Notes
+        -----
+        - Requires temporal overlap between self.m_cal and streamflow.m_cal.
+        - NaN values in either SQI1 or any SPI_k are excluded row-wise.
+        - Kmax is capped at min(self.K, streamflow.spi_like_set.shape[0]).
+
+        References
+        ----------
+        McKee, T.B., Doesken, N.J., Kleist, J. (1993). The relationship of drought
+            frequency and duration to time scales. Proc. 8th Conference on Applied
+            Climatology, 179-183.
+        Van Loon, A.F. (2015). Hydrological drought explained.
+            WIREs Water, 2(4), 359-392. doi:10.1002/wat2.1085
+        """
+        self._check_correlation_eligible()
+
+        if Kmax is None:
+            Kmax = self.K
+        Kmax = min(Kmax, self.spi_like_set.shape[0], streamflow.spi_like_set.shape[0])
+
+        # --- Temporal overlap ---
+        self_indices, streamflow_indices = find_overlap(self.m_cal, streamflow.m_cal)
+        if len(self_indices) == 0 or len(streamflow_indices) == 0:
+            raise ValueError("No overlapping data found between the two objects.")
+
+        SQI1 = streamflow.spi_like_set[0, streamflow_indices]
+        SPIset = self.spi_like_set[:, self_indices]
+        n = SPIset.shape[1]
+
+        K_range = np.arange(1, Kmax + 1)
+        MatCorr = []
+
+        print("Starting correlation analysis...")
+
+        for K in K_range:
+            # predittori: [SPI_1(t), SPI_2(t), ..., SPI_K(t)]
+            X_block = SPIset[0:K, :].T  # shape (n, K)
+
+            valid = ~np.isnan(SQI1)
+            for k in range(K):
+                valid &= ~np.isnan(SPIset[k, :])
+
+            if valid.sum() < K + 2:
+                MatCorr.append(np.nan)
+                continue
+
+            X = np.column_stack([X_block[valid], np.ones(valid.sum())])
+            y = SQI1[valid]
+
+            beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+            y_hat = X @ beta
+            ss_res = np.sum((y - y_hat) ** 2)
+            ss_tot = np.sum((y - y.mean()) ** 2)
+            r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+            n_v, p = valid.sum(), K
+            MatCorr.append(1 - (1 - r2) * (n_v - 1) / (n_v - p - 1))
+
+        # --- K ottimale ---
+        MatCorr = np.array(MatCorr)
+        best_ki = np.nanargmax(MatCorr)
+        best_K = K_range[best_ki]
+
+        # --- Ricomputa al K ottimale ---
+        X_block_opt = SPIset[0:best_K, :].T
+        valid_opt = ~np.isnan(SQI1)
+        for k in range(best_K):
+            valid_opt &= ~np.isnan(SPIset[k, :])
+
+        X_opt = np.column_stack([X_block_opt[valid_opt], np.ones(valid_opt.sum())])
+        y_opt = SQI1[valid_opt]
+        beta_opt, _, _, sv = np.linalg.lstsq(X_opt, y_opt, rcond=None)
+        cond_num = float(np.max(sv) / np.min(sv[sv > 0])) if len(sv) > 0 else np.nan
+
+        y_pred = np.full(n, np.nan)
+        y_pred[valid_opt] = X_opt @ beta_opt
+        residuals = SQI1 - y_pred
+
+        if cond_num > 30:
+            import warnings
+            warnings.warn(
+                f"Benchmark B: condition number = {cond_num:.1f} > 30. "
+                f"SPI scales are structurally correlated — "
+                f"beta coefficients unstable at K={best_K}.",
+                UserWarning
+            )
+
+        if plot:
+            import matplotlib.pyplot as plt
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+            # Sinistra: R²_adj vs K
+            axes[0].plot(K_range, MatCorr, 'k-o', lw=2)
+            axes[0].axvline(best_K, color='r', ls='--', label=f'optimal K={best_K}')
+            axes[0].set_xlabel('K (number of SPI scales)')
+            axes[0].set_ylabel('R²_adj')
+            axes[0].set_title('Benchmark B — SPI convolution OLS')
+            axes[0].legend()
+            axes[0].grid(alpha=0.3)
+
+            # Destra: pesi stimati h(k)
+            axes[1].bar(K_range[:best_K], beta_opt[:-1],
+                        color='grey', edgecolor='k', linewidth=0.5)
+            axes[1].axhline(0, color='k', lw=0.8, ls='--')
+            axes[1].set_xlabel('SPI scale k')
+            axes[1].set_ylabel('h(k) — beta OLS')
+            axes[1].set_title(f'SPI scale weights estimated by OLS (K={best_K})')
+            axes[1].grid(alpha=0.3, axis='y')
+
+            plt.tight_layout()
+            plt.show()
+
+        return {
+            'R2_adj': MatCorr,
+            'optimal_K': int(best_K),
+            'K_range': K_range,
+            'beta': beta_opt,
+            'condition_number': cond_num,
+        }
+
+    #--------------------------------------------------------------------------------
+    # HELPER: Nash-IUH kernel  (parametric, 2 free params)
+
+    # HELPER: linear convolution R²
+    @staticmethod
+    def _convolve_r2(driver: np.ndarray, target: np.ndarray,
+                     kernel: np.ndarray, season_mask: np.ndarray = None) -> float:
+        """
+        Convolve driver with kernel, fit intercept via OLS, return R².
+        NaN rows are excluded.
+        """
+        n = len(driver)
+        K = len(kernel)
+        y_hat = np.full(n, np.nan)
+        for t in range(K - 1, n):
+            # the weighted sum of past rainfall:
+            # sum ( kernel x last K monhts of precipitation) == scalar product with np.dot
+            y_hat[t] = np.dot(kernel, driver[t - K + 1: t + 1][::-1])
+
+        # apply seasonal mask AFTER convolution on full series
+        if season_mask is not None:
+            y_hat = y_hat[season_mask]
+            target = target[season_mask]
+
+        mask = np.isfinite(target) & np.isfinite(y_hat)
+        if mask.sum() < 5:
+            return np.nan
+        # fit a moel where X is the weighted sum of last precipitation + intercept
+        X = np.column_stack([y_hat[mask], np.ones(mask.sum())])
+        y = target[mask]
+        beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+        # y - (X @ beta) == observed-simulated == residuals!
+        # (X * beta).sum(axis=1) == X @ beta  # True
+        sim = X @ beta
+        ss_res = np.sum((y - sim) ** 2) # sum of squares
+        ss_tot = np.sum((y - y.mean()) ** 2)
+        rsquare = float(1 - ss_res / ss_tot) if ss_tot > 0 else np.nan
+        return rsquare
+
+    @staticmethod
+    def _nash_kernel(n: float, k: float, K: int) -> np.ndarray:
+        """
+        Discrete Nash IUH kernel (Gamma pdf sampled at lags 1..L).
+        The result is a weightingh scheme woth bell-shape
+
+        Parameters
+        ----------
+        n : float   shape parameter  (> 0)
+        k : float   scale parameter  (months, > 0)
+        K : int     kernel length (months)
+
+        Returns
+        -------
+        h : ndarray, shape (K,), sums to 1
+        """
+        from scipy.stats import gamma as gamma_dist
+        t = np.arange(1, K + 1, dtype=float)
+        h = gamma_dist.pdf(t, a=n, scale=k)
+        s = h.sum()
+        # /s serves to nornalize thw weights!
+        return h / s if s > 0 else np.ones(K) / K
+
+    # --------------------------------------------------------------------------------
+    # METHOD 1 — benchmark_nash
+    def benchmark_nash(self, streamflow, K=None, plot=True,
+                       agg=None, seasons=None):
+        """
+        This method predicts the standardized streamflow anomaly SQI_1(t) from raw precipitation P(t-j)
+        via a parametric kernel. Standardization of the target makes R² directly comparable to D(SPI).
+        The kernel shape retains its physical interpretation;
+        amplitude is absorbed by the OLS intercept and slope during fitting.
+
+        Nash IUH benchmark: parametric convolution with a Gamma kernel.
+
+        Idea: The discharge at time t is the weighted sum of past precipitation, where the weights form a lagged bell-shaped curve—recent
+        rainfall matters little (the basin must "fill"), rainfall from a few months ago matters more,
+        and rainfall from a long time ago matters little (memory runs out) >> GAMMA SHAPE!
+        Nash proposed modeling this curve with a discrete Gamma distribution, characterized by two physical parameters:
+
+        n — bell-shaped (small n = fast and asymmetric response; large n = slow and symmetric response)
+        k — time scale in months (larger k = longer memory)
+
+        Streamflow is modelled as:
+
+            SQI1(t) = intercept + Σ_{j=0}^{L-1} h(j; n, k) · P(t-j)
+
+        where h is the discrete Nash IUH (Gamma pdf), and the two shape
+        parameters (n, k) plus the kernel length L are jointly optimised
+        to maximise R² against observed monthly streamflow.
+
+
+
+        Optimisation strategy
+        ---------------------
+        For each L in [2, ..., K], scipy.optimize.minimize (Nelder-Mead)
+        is run from multiple starting points to find the global optimum
+        in (n, k). The best (K, n, k) triplet is retained.
+
+        This is the standard implementation of the Nash (1957) IUH for
+        monthly data: only P (raw precipitation) and Q are required.
+
+        Parameters
+        ----------
+        streamflow : BaseDroughtAnalysis
+            Streamflow object with .ts and .m_cal attributes.
+        K : int, optional
+            Maximum kernel length (months) to test. Defaults to self.K.
+        plot : bool, default True
+            Plot R² surface and best-fit scatter.
+        agg : str or None
+            Seasonal aggregation scheme (same API as benchmark_convolution).
+        seasons : dict, optional
+            Custom season dict (sets agg='custom').
+
+        Returns
+        -------
+        dict (no seasonal split) or dict-of-dicts (seasonal split) with keys:
+            'optimal_L'  : int
+            'optimal_n'  : float
+            'optimal_k'  : float
+            'R2'         : float
+            'kernel'     : ndarray, shape (optimal_L,)
+            'sample_number' : int  (only in seasonal mode)
+
+        References
+        ----------
+        Nash, J.E. (1957). The form of the instantaneous unit hydrograph.
+            IAHS Publ., 45(3), 114-121.
+        """
+        from scipy.optimize import minimize
+
+        self._check_correlation_eligible()
+
+        if K is None:
+            K = self.K
+        if seasons is not None:
+            agg = 'custom'
+
+        # --- temporal overlap ---
+        self_idx, sf_idx = find_overlap(self.m_cal, streamflow.m_cal)
+        if len(self_idx) == 0:
+            raise ValueError("No overlapping data found.")
+
+        driver = self.ts[self_idx]
+        target = streamflow.spi_like_set[0, sf_idx]
+        m_cal_overlap = np.array([self.m_cal[i] for i in self_idx])
+        months_overlap = np.array([m[0] for m in m_cal_overlap], dtype=int)
+
+        def _optimize_nash(driver, target, season_mask=None):
+            """Optimise Nash IUH for a given data subset.
+            the challange is figure out the two paramters definish the best gamma-shaped kernel
+            testing incresing kernle from 1 to K"""
+
+
+
+            best = {'R2': -np.inf, 'L': None, 'n': None, 'k': None}
+
+            for L in range(2, K + 1):
+                def neg_r2(params):
+                    """Scipy minimize look to the minima!
+                    we pass -R² so the minimum corresponds to the maximum of R².
+                    """
+                    n_, k_ = params
+                    if n_ <= 0 or k_ <= 0 or n_ > 20 or k_ > K:
+                        return 1.0  # infeasible
+                    # given possible n_ and k_, build the bell-shaped kernel of lenght L,
+                    h = self._nash_kernel(n_, k_, L)
+                    # now fit the convolutional model and estimate the R2
+                    r2 = self._convolve_r2(driver, target, h,season_mask=season_mask)
+                    return -r2 if np.isfinite(r2) else 1.0
+
+                # grid of starting points: (n, k) ∈ {1,2,4} × {1,2,4}
+                # Starting grid (n, k) ∈ {1,2,4} × {1,2,4}: covers the physically plausible
+                # space for monthly data. n=1 is a pure exponential (reactive basin), n=4 is
+                # a broad bell (slow/inertial basin); k=1..4 months spans typical Mediterranean
+                # memory scales. The grid is intentionally coarse — Nelder-Mead refines locally
+                # from each starting point, so we only need seeds spread across the domain,
+                # not a dense coverage. For basins with very long memory (k>>4, e.g. deep
+                # aquifers), consider replacing k_grid with [1.0, Lmax/8, Lmax/4].
+                for n0 in [1.0, 2.0, 4.0]:
+                    for k0 in [1.0, 2.0, 4.0]:
+                        # Minimize moves [n, k] (the params defininf the shape of the bell-kernle
+                        # in the parameter space looking for where -R² is lowest
+                        res = minimize(neg_r2, x0=[n0, k0],
+                                       method='Nelder-Mead',
+                                       options={'xatol': 1e-4, 'fatol': 1e-4,
+                                                'maxiter': 2000})
+                        r2 = -res.fun
+                        if r2 > best['R2']:
+                            best.update({'R2': r2, 'L': L,
+                                         'n': res.x[0], 'k': res.x[1]})
+
+            #
+            kernel = self._nash_kernel(best['n'], best['k'], best['L'])
+            print(f"  Nash IUH: R²={best['R2']:.3f}  "
+                  f"L={best['L']}  n={best['n']:.2f}  k={best['k']:.2f}")
+            return {
+                'optimal_K': best['L'],
+                'optimal_n': best['n'],
+                'optimal_k': best['k'],
+                'R2': best['R2'],
+                'kernel': kernel,
+            }
+
+        # ── no seasonal split ──────────────────────────────────────────────────
+        if agg is None:
+            print("Starting Nash IUH benchmark...")
+            # overall best triplet (K*, n*, k*).
+            # K* optimal lenght of the kernel (how many months we have to look backwards)
+            # n*,k* = optimal two-params defining the gamma-shape of the kernel
+            result = _optimize_nash(driver, target)
+
+            if plot:
+                K = result['optimal_K']
+                h = result['kernel']
+                mask = np.isfinite(target)
+                y_hat = np.full(len(driver), np.nan)
+                for t in range(K - 1, len(driver)):
+                    y_hat[t] = np.dot(h, driver[t - K + 1: t + 1][::-1])
+                # fit intercept for plot
+                vm = np.isfinite(y_hat) & mask
+                X = np.column_stack([y_hat[vm], np.ones(vm.sum())])
+                beta, _, _, _ = np.linalg.lstsq(X, target[vm], rcond=None)
+
+                fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+                lags = np.arange(1, K + 1)
+                axes[0].bar(lags, h, color='grey', edgecolor='k', lw=0.5)
+                axes[0].set_xlabel('Lag (months)')
+                axes[0].set_ylabel('Weight h(j)')
+                axes[0].set_title(
+                    f'Nash IUH kernel  (n={result["optimal_n"]:.2f}, '
+                    f'k={result["optimal_k"]:.2f}, K={K})')
+                axes[0].grid(alpha=0.3, axis='y')
+
+                Q_fit = X @ beta
+                axes[1].plot(Q_fit, target[vm], 'o', color='grey',
+                             alpha=0.5, label=f'R²={result["R2"]:.3f}')
+                axes[1].plot(
+                    [target[vm].min(), target[vm].max()],
+                    [target[vm].min(), target[vm].max()],
+                    '--', color='grey')
+                axes[1].set_xlabel('Q simulated')
+                axes[1].set_ylabel('Q observed')
+                axes[1].set_title('Nash IUH — best fit')
+                axes[1].legend()
+                axes[1].grid(alpha=0.3)
+                plt.tight_layout()
+                plt.show()
+
+            return result
+
+        # ── seasonal split ─────────────────────────────────────────────────────
+        seasons_dict = self._build_seasons_dict(agg, seasons)
+        all_months = [m for lst in seasons_dict.values() for m in lst]
+        missing = [m for m in range(1, 13) if m not in all_months]
+        if missing:
+            print("Alert: missing month(s):", missing)
+
+        print("Starting Nash IUH benchmark (seasonal)...")
+        results = {}
+        for name, mlist in seasons_dict.items():
+            idx = np.isin(months_overlap, mlist)
+            if np.count_nonzero(idx) < 10:
+                print(f"  Season {name}: insufficient data, skipped.")
+                continue
+            print(f"  Season {name}:", end=' ')
+            res = _optimize_nash(driver, target, idx)
+            res['sample_number'] = int(np.count_nonzero(idx))
+            results[name] = res
+
+        if plot and results:
+            n_seasons = len(results)
+            fig, axes = plt.subplots(nrows=n_seasons, ncols=2,
+                                     figsize=(14, 5 * n_seasons))
+            if n_seasons == 1:
+                axes = axes[np.newaxis, :]
+            for i, (season, res) in enumerate(results.items()):
+                K = res['optimal_K']
+                h = res['kernel']
+                lags = np.arange(1, K + 1)
+                axes[i, 0].bar(lags, h, color='grey',
+                               edgecolor='k', lw=0.5)
+                axes[i, 0].set_xlabel('Lag (months)')
+                axes[i, 0].set_ylabel('Weight h(j)')
+                axes[i, 0].set_title(
+                    f'{season} — Nash IUH  '
+                    f'(n={res["optimal_n"]:.2f}, k={res["optimal_k"]:.2f}, '
+                    f'K={K})')
+                axes[i, 0].grid(alpha=0.3, axis='y')
+
+                idx = np.isin(months_overlap, seasons_dict[season])
+                # convolve on the full contiguous series, then filter by season
+                y_hat_full = np.full(len(driver), np.nan)
+                for t in range(K - 1, len(driver)):
+                    y_hat_full[t] = np.dot(h, driver[t - K + 1: t + 1][::-1])
+                vm = np.isfinite(y_hat_full[idx]) & np.isfinite(target[idx])
+                # riapplica OLS per riscalare y_hat come fa _convolve_r2
+                X = np.column_stack([y_hat_full[idx][vm], np.ones(vm.sum())])
+                beta, _, _, _ = np.linalg.lstsq(X, target[idx][vm], rcond=None)
+                Q_fit = X @ beta
+                axes[i, 1].plot(Q_fit, target[idx][vm], 'o',
+                                color='grey', alpha=0.5,
+                                label=f'R²={res["R2"]:.3f}')
+
+                axes[i, 1].plot(
+                    [target[idx][vm].min(), target[idx][vm].max()],
+                    [target[idx][vm].min(), target[idx][vm].max()],
+                    '--', color='grey')
+                axes[i, 1].set_title(f'{season} — best fit')
+                axes[i, 1].legend()
+                axes[i, 1].grid(alpha=0.3)
+
+            plt.tight_layout()
+            plt.show()
+
+        return results
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # METHOD 2 — benchmark_ihacres
+    # ──────────────────────────────────────────────────────────────────────────────
+    def benchmark_ihacres_old(self, streamflow, K=None, plot=True,
+                          agg=None, seasons=None):
+        """
+        This method predicts the standardized streamflow anomaly SQI_1(t) from raw precipitation P(t-j)
+        via a parametric kernel. Standardization of the target makes R² directly comparable to D(SPI).
+        The kernel shape retains its physical interpretation;
+        amplitude is absorbed by the OLS intercept and slope during fitting.
+
+        IHACRES-inspired two-component benchmark (fast + slow routing).
+        Idea: The basin response is not a single process but the superposition
+        of two components with different velocities:
+        IHACRES uses  two decreasing exponentials, mixed in proportion "alpha".
+
+        Thus, monthly streamflow is modelled as the weighted sum of two linear
+        reservoir responses convolved with raw precipitation:
+
+            SQI1(t) = alpha * Q_fast(t) + (1 - alpha) * Q_slow(t) + intercept
+
+        e.g.,   alpha = 0.8 → basin dominated by rapid response.
+                alpha = 0.2 → basin dominated by baseflow
+
+        where:
+            Q_fast(t) = Σ_{j=0}^{K-1} h_fast(j; tau_f) · P(t-j)
+            Q_slow(t) = Σ_{j=0}^{K-1} h_slow(j; tau_s) · P(t-j)
+
+        and h(j; tau) = exp(-j/tau) / Σ exp(-i/tau)  is a single-reservoir
+        (exponential) kernel — the Nash IUH with n=1.
+
+        Free parameters: tau_f, tau_s, alpha  (3 params total, K fixed by search).
+        Constraints: 0 < tau_f < tau_s,  0 < alpha < 1.
+
+        Physical interpretation
+        -----------------------
+        This is the linear routing module of IHACRES (Jakeman & Hornberger,
+        1993) applied directly to monthly P without the non-linear loss
+        module (which requires temperature or PET). At monthly scale the
+        loss non-linearity is secondary, and R² relative to the free-kernel
+        OLS benchmark captures the residual unexplained variance attributable
+        to ET and storage non-linearities.
+
+        Parameters
+        ----------
+        streamflow : BaseDroughtAnalysis
+            Streamflow object with .ts and .m_cal attributes.
+        K: int, optional
+            Maximum kernel length (months). Defaults to self.K.
+        plot : bool, default True
+        agg : str or None
+            Seasonal aggregation (same API as benchmark_convolution).
+        seasons : dict, optional
+
+        Returns
+        -------
+        dict (or dict-of-dicts in seasonal mode) with keys:
+            'optimal_K'    : int
+            'optimal_tau_f': float   fast time constant (months)
+            'optimal_tau_s': float   slow time constant (months)
+            'optimal_alpha': float   fast-component weight
+            'R2'           : float
+            'kernel_fast'  : ndarray
+            'kernel_slow'  : ndarray
+            'sample_number': int  (seasonal mode only)
+
+        References
+        ----------
+        Jakeman, A.J., Hornberger, G.M. (1993). How much complexity is
+            warranted in a rainfall-runoff model?
+            Water Resources Research, 29(8), 2637-2649.
+        """
+        self._check_correlation_eligible()
+        from scipy.optimize import minimize
+
+        if K is None:
+            K = self.K
+        if seasons is not None:
+            agg = 'custom'
+
+        self_idx, sf_idx = find_overlap(self.m_cal, streamflow.m_cal)
+        if len(self_idx) == 0:
+            raise ValueError("No overlapping data found.")
+
+        driver = self.ts[self_idx]
+        target = streamflow.spi_like_set[0, sf_idx]
+        m_cal_overlap = np.array([self.m_cal[i] for i in self_idx])
+        months_overlap = np.array([m[0] for m in m_cal_overlap], dtype=int)
+
+        def _exp_kernel(tau: float, K: int) -> np.ndarray:
+            """This is the Nash IUH with n=1—a single linear reservoir.
+            The response decays exponentially with time constant τ.
+            With small τ it decays quickly (fast), with large τ it decays slowly (slow)."""
+            j = np.arange(K, dtype=float)
+            h = np.exp(-j / tau)
+            # the resulting weights must be normalized:
+            return h / h.sum()
+
+        def _run_ihacres(drv, tgt,season_mask=None):
+            """Optimise IHACRES two-component model for a given subset."""
+            best = {'R2': -np.inf, 'K': None,
+                    'tau_f': None, 'tau_s': None, 'alpha': None}
+
+            for L in range(2, K + 1):
+
+                def neg_r2(params):
+                    """Scipy minimize look to the minima!
+                    we pass -R² so the minimum corresponds to the maximum of R².
+                    """
+                    # Three free parameters. The physical constraints are:
+                    # tau_f > 0 — the fast constant must be positive
+                    # tau_s > tau_f — the slow component must be slower than the fast one
+                    # without it, the optimizer might invert them or make them coincide
+                    # 0 < alpha < 1 — the mixture must be a convex combination
+                    tau_f, tau_s, alpha = params
+                    # hard constraints via penalty
+                    if tau_f <= 0 or tau_s <= tau_f or alpha <= 0 or alpha >= 1:
+                        return 1.0
+                    h_f = _exp_kernel(tau_f, L)
+                    h_s = _exp_kernel(tau_s, L)
+                    n = len(drv)
+                    Q_fast = np.full(n, np.nan)
+                    Q_slow = np.full(n, np.nan)
+                    # ---------------------------------
+                    # Same UH/Nash convolution principle, but done twice — once with h_fast, once with h_slow — and then mixed:
+                    for t in range(L - 1, n):
+                        seg = drv[t - L + 1: t + 1][::-1]
+                        Q_fast[t] = np.dot(h_f, seg)
+                        Q_slow[t] = np.dot(h_s, seg)
+                    Q_sim = alpha * Q_fast + (1 - alpha) * Q_slow
+                    # Poi filtra per stagione se richiesto
+                    if season_mask is not None:
+                        Q_sim = Q_sim[season_mask]
+                        tgt_loc = tgt[season_mask]
+                    else:
+                        tgt_loc = tgt
+
+                    mask = np.isfinite(tgt_loc) & np.isfinite(Q_sim)
+                    if mask.sum() < 5:
+                        return 1.0
+                    # fit intercept
+                    X = np.column_stack([Q_sim[mask], np.ones(mask.sum())])
+                    y = tgt_loc[mask]
+                    beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+                    ss_res = np.sum((y - X @ beta) ** 2)
+                    ss_tot = np.sum((y - y.mean()) ** 2)
+                    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else -1.0
+                    return -r2 if np.isfinite(r2) else 1.0
+
+                # starting grid: tau_f ∈ {1,2}, tau_s ∈ {4,8,12}, alpha ∈ {0.3,0.6}
+                for tf0 in [1.0, 2.0]:
+                    for ts0 in [4.0, 8.0, 12.0]:
+                        for a0 in [0.3, 0.6]:
+                            res = minimize(neg_r2, x0=[tf0, ts0, a0],
+                                           method='Nelder-Mead',
+                                           options={'xatol': 1e-4, 'fatol': 1e-4,
+                                                    'maxiter': 3000})
+                            r2 = -res.fun
+                            if r2 > best['R2']:
+                                tf, ts, a = res.x
+                                best.update({'R2': r2, 'K': L,
+                                             'tau_f': tf, 'tau_s': ts,
+                                             'alpha': a})
+
+            h_f = _exp_kernel(best['tau_f'], best['K'])
+            h_s = _exp_kernel(best['tau_s'], best['K'])
+            print(f"  IHACRES: R²={best['R2']:.3f}  K={best['K']}  "
+                  f"τ_fast={best['tau_f']:.1f}  τ_slow={best['tau_s']:.1f}  "
+                  f"α={best['alpha']:.2f}")
+            return {
+                'optimal_K': best['K'],
+                'optimal_tau_f': best['tau_f'],
+                'optimal_tau_s': best['tau_s'],
+                'optimal_alpha': best['alpha'],
+                'R2': best['R2'],
+                'kernel_fast': h_f,
+                'kernel_slow': h_s,
+            }
+
+        # ── no seasonal split ──────────────────────────────────────────────────
+        if agg is None:
+            print("Starting IHACRES benchmark...")
+            result = _run_ihacres(driver, target)
+
+            if plot:
+                K = result['optimal_K']
+                h_f = result['kernel_fast']
+                h_s = result['kernel_slow']
+                alpha = result['optimal_alpha']
+                n = len(driver)
+                Q_fast = np.full(n, np.nan)
+                Q_slow = np.full(n, np.nan)
+                for t in range(K - 1, n):
+                    seg = driver[t - K + 1: t + 1][::-1]
+                    Q_fast[t] = np.dot(h_f, seg)
+                    Q_slow[t] = np.dot(h_s, seg)
+                Q_sim = alpha * Q_fast + (1 - alpha) * Q_slow
+                mask = np.isfinite(target) & np.isfinite(Q_sim)
+                X = np.column_stack([Q_sim[mask], np.ones(mask.sum())])
+                beta, _, _, _ = np.linalg.lstsq(X, target[mask], rcond=None)
+                Q_fit = X @ beta
+
+                fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+                lags = np.arange(1, K + 1)
+                width = 0.3
+                axes[0].bar(lags - width / 2, h_f, width=width, alpha=0.7,
+                            color='tab:orange',edgecolor='grey',
+                            label=f'fast τ={result["optimal_tau_f"]:.1f}')
+                axes[0].bar(lags + width / 2, h_s, width=width, alpha=0.7,
+                            color='tab:blue',edgecolor='grey',
+                            label=f'slow τ={result["optimal_tau_s"]:.1f}')
+                axes[0].set_xlabel('Lag (months)')
+                axes[0].set_ylabel('Weight h(j)')
+                axes[0].set_title(
+                    f'IHACRES kernels  α={result["optimal_alpha"]:.2f}  K={K}')
+                axes[0].legend()
+                axes[0].grid(alpha=0.3, axis='y')
+
+                axes[1].plot(Q_fit, target[mask], 'o',
+                             color='grey', alpha=0.5,
+                             label=f'R²={result["R2"]:.3f}')
+                axes[1].plot(
+                    [target[mask].min(), target[mask].max()],
+                    [target[mask].min(), target[mask].max()],
+                    '--', color='grey')
+                axes[1].set_xlabel('Q simulated')
+                axes[1].set_ylabel('Q observed')
+                axes[1].set_title('IHACRES — best fit')
+                axes[1].legend()
+                axes[1].grid(alpha=0.3)
+                plt.tight_layout()
+                plt.show()
+
+            return result
+
+        # ── seasonal split ─────────────────────────────────────────────────────
+        seasons_dict = self._build_seasons_dict(agg, seasons)
+        all_months = [m for lst in seasons_dict.values() for m in lst]
+        missing = [m for m in range(1, 13) if m not in all_months]
+        if missing:
+            print("Alert: missing month(s):", missing)
+
+        print("Starting IHACRES benchmark (seasonal)...")
+        results = {}
+        for name, mlist in seasons_dict.items():
+            idx = np.isin(months_overlap, mlist)
+            if np.count_nonzero(idx) < 15:
+                print(f"  Season {name}: insufficient data, skipped.")
+                continue
+            print(f"  Season {name}:", end=' ')
+            res = _run_ihacres(driver, target, season_mask=idx)
+            res['sample_number'] = int(np.count_nonzero(idx))
+            results[name] = res
+
+        if plot and results:
+            n_seasons = len(results)
+            fig, axes = plt.subplots(nrows=n_seasons, ncols=2,
+                                     figsize=(14, 5 * n_seasons))
+            if n_seasons == 1:
+                axes = axes[np.newaxis, :]
+            for i, (season, res) in enumerate(results.items()):
+                K = res['optimal_K']
+                h_f = res['kernel_fast']
+                h_s = res['kernel_slow']
+                alpha = res['optimal_alpha']
+                lags = np.arange(1, K + 1)
+                width = 0.3
+                axes[i, 0].bar(lags - width / 2, h_f, width=width, alpha=0.7,
+                               color='tab:orange', edgecolor='grey',
+                               label=f'fast τ={res["optimal_tau_f"]:.1f}')
+                axes[i, 0].bar(lags + width / 2, h_s, width=width, alpha=0.7,
+                               color='tab:blue', edgecolor='grey',
+                               label=f'slow τ={res["optimal_tau_s"]:.1f}')
+                axes[i, 0].set_xlabel('Lag (months)')
+                axes[i, 0].set_ylabel('Weight h(j)')
+                axes[i, 0].set_title(f'{season} — IHACRES  α={alpha:.2f}  K={K}')
+                axes[i, 0].legend()
+                axes[i, 0].grid(alpha=0.3, axis='y')
+
+                # convolve on full contiguous series, then filter by season
+                idx = np.isin(months_overlap, seasons_dict[season])
+                Q_fast_full = np.full(len(driver), np.nan)
+                Q_slow_full = np.full(len(driver), np.nan)
+                for t in range(K - 1, len(driver)):
+                    seg = driver[t - K + 1: t + 1][::-1]
+                    Q_fast_full[t] = np.dot(h_f, seg)
+                    Q_slow_full[t] = np.dot(h_s, seg)
+                Q_sim_full = alpha * Q_fast_full + (1 - alpha) * Q_slow_full
+
+                # apply OLS rescaling on seasonal subset
+                vm = np.isfinite(Q_sim_full[idx]) & np.isfinite(target[idx])
+                X = np.column_stack([Q_sim_full[idx][vm], np.ones(vm.sum())])
+                beta, _, _, _ = np.linalg.lstsq(X, target[idx][vm], rcond=None)
+                Q_fit = X @ beta
+
+                axes[i, 1].plot(Q_fit, target[idx][vm], 'o',
+                                color='grey', alpha=0.5,
+                                label=f'R²={res["R2"]:.3f}')
+                axes[i, 1].plot(
+                    [target[idx][vm].min(), target[idx][vm].max()],
+                    [target[idx][vm].min(), target[idx][vm].max()],
+                    '--', color='grey')
+                axes[i, 1].set_title(f'{season} — best fit')
+                axes[i, 1].legend()
+                axes[i, 1].grid(alpha=0.3)
+
+            plt.tight_layout()
+            plt.show()
+
+        return results
+
+    def benchmark_ihacres(self, streamflow, K=None, plot=True,
+                          agg=None, seasons=None):
+        """
+        This method predicts the standardized streamflow anomaly SQI_1(t) from raw precipitation P(t-j)
+        via a parametric kernel. Standardization of the target makes R² directly comparable to D(SPI).
+        The kernel shape retains its physical interpretation;
+        amplitude is absorbed by the OLS intercept and slope during fitting.
+
+        IHACRES-inspired two-component benchmark (fast + slow routing).
+        Idea: The basin response is not a single process but the superposition
+        of two components with different velocities:
+        IHACRES uses  two decreasing exponentials, mixed in proportion "alpha".
+
+        Thus, monthly streamflow is modelled as the weighted sum of two linear
+        reservoir responses convolved with raw precipitation:
+
+            SQI1(t) = alpha * Q_fast(t) + (1 - alpha) * Q_slow(t) + intercept
+
+        e.g.,   alpha = 0.8 → basin dominated by rapid response.
+                alpha = 0.2 → basin dominated by baseflow
+
+        where:
+            Q_fast(t) = Σ_{j=0}^{K-1} h_fast(j; tau_f) · P(t-j)
+            Q_slow(t) = Σ_{j=0}^{K-1} h_slow(j; tau_s) · P(t-j)
+
+        and h(j; tau) = exp(-j/tau) / Σ exp(-i/tau)  is a single-reservoir
+        (exponential) kernel — the Nash IUH with n=1.
+
+        Free parameters: tau_f, tau_s, alpha  (3 params total, K fixed by search).
+        Constraints: 0 < tau_f < tau_s,  0 < alpha < 1.
+
+        Physical interpretation
+        -----------------------
+        This is the linear routing module of IHACRES (Jakeman & Hornberger,
+        1993) applied directly to monthly P without the non-linear loss
+        module (which requires temperature or PET). At monthly scale the
+        loss non-linearity is secondary, and R² relative to the free-kernel
+        OLS benchmark captures the residual unexplained variance attributable
+        to ET and storage non-linearities.
+
+        Parameters
+        ----------
+        streamflow : BaseDroughtAnalysis
+            Streamflow object with .ts and .m_cal attributes.
+        K: int, optional
+            Maximum kernel length (months). Defaults to self.K.
+        plot : bool, default True
+        agg : str or None
+            Seasonal aggregation (same API as benchmark_convolution).
+        seasons : dict, optional
+
+        Returns
+        -------
+        dict (or dict-of-dicts in seasonal mode) with keys:
+            'optimal_K'    : int
+            'optimal_tau_f': float   fast time constant (months)
+            'optimal_tau_s': float   slow time constant (months)
+            'optimal_alpha': float   fast-component weight
+            'R2'           : float
+            'kernel_fast'  : ndarray
+            'kernel_slow'  : ndarray
+            'sample_number': int  (seasonal mode only)
+
+        References
+        ----------
+        Jakeman, A.J., Hornberger, G.M. (1993). How much complexity is
+            warranted in a rainfall-runoff model?
+            Water Resources Research, 29(8), 2637-2649.
+        """
+        self._check_correlation_eligible()
+        from scipy.optimize import minimize
+
+
+        if K is None:
+            K = self.K
+        if seasons is not None:
+            agg = 'custom'
+
+        self_idx, sf_idx = find_overlap(self.m_cal, streamflow.m_cal)
+        if len(self_idx) == 0:
+            raise ValueError("No overlapping data found.")
+
+        driver = self.ts[self_idx]
+        target = streamflow.spi_like_set[0, sf_idx]
+        m_cal_overlap = np.array([self.m_cal[i] for i in self_idx])
+        months_overlap = np.array([m[0] for m in m_cal_overlap], dtype=int)
+
+        def _exp_kernel(tau: float, K: int) -> np.ndarray:
+            """This is the Nash IUH with n=1—a single linear reservoir.
+            The response decays exponentially with time constant τ.
+            With small τ it decays quickly (fast), with large τ it decays slowly (slow)."""
+            j = np.arange(K, dtype=float)
+            h = np.exp(-j / tau)
+            # the resulting weights must be normalized:
+            return h / h.sum()
+
+        def _run_ihacres(drv, tgt, season_mask=None):
+            """Optimise IHACRES two-component model for a given data subset.
+
+            Fix 1: vectorized convolution via np.convolve (≈50-100× faster).
+            Fix 2: reduced multi-start grid (3 physically-motivated seeds).
+            Fix 3: hard bounds on tau_f, tau_s, alpha via L-BFGS-B instead of
+                   Nelder-Mead with penalty. Prevents collapse of tau_f → 0 and
+                   ensures tau_s > tau_f + delta_min.
+            """
+            from scipy.optimize import minimize
+
+            best = {'R2': -np.inf, 'K': None,
+                    'tau_f': None, 'tau_s': None, 'alpha': None}
+
+            # --- Hard bounds (physical constraints) ---
+            TAU_F_MIN = 0.5  # fast reservoir: at least 0.5 months
+            TAU_F_MAX = 6.0  # fast reservoir: at most 6 months
+            TAU_S_MIN = 2.0  # slow reservoir: at least 2 months
+            # TAU_S_MAX set dynamically as 2*K to allow long memory
+            ALPHA_MIN = 0.05  # at least 5% fast component
+            ALPHA_MAX = 0.95  # at most 95% fast component
+            DELTA_MIN = 1.0  # slow reservoir must exceed fast by at least 1 month
+
+            def neg_r2_factory(L_):
+                def neg_r2(params):
+                    tau_f, tau_s, alpha = params
+
+                    # Soft separation penalty (additional to bounds, keeps tau_s > tau_f)
+                    if tau_s - tau_f < DELTA_MIN:
+                        return 1.0 + (DELTA_MIN - (tau_s - tau_f))
+
+                    h_f = _exp_kernel(tau_f, L_)
+                    h_s = _exp_kernel(tau_s, L_)
+
+                    n = len(drv)
+                    Q_fast = np.convolve(drv, h_f[::-1], mode='full')[:n]
+                    Q_slow = np.convolve(drv, h_s[::-1], mode='full')[:n]
+                    Q_fast[:L_ - 1] = np.nan
+                    Q_slow[:L_ - 1] = np.nan
+                    Q_sim = alpha * Q_fast + (1 - alpha) * Q_slow
+
+                    if season_mask is not None:
+                        Q_sim = Q_sim[season_mask]
+                        tgt_loc = tgt[season_mask]
+                    else:
+                        tgt_loc = tgt
+
+                    mask = np.isfinite(tgt_loc) & np.isfinite(Q_sim)
+                    if mask.sum() < 5:
+                        return 1.0
+                    X = np.column_stack([Q_sim[mask], np.ones(mask.sum())])
+                    y = tgt_loc[mask]
+                    beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+                    ss_res = np.sum((y - X @ beta) ** 2)
+                    ss_tot = np.sum((y - y.mean()) ** 2)
+                    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else -1.0
+                    return -r2 if np.isfinite(r2) else 1.0
+
+                return neg_r2
+
+            starting_points = [
+                (1.0, 4.0, 0.7),
+                (2.0, 8.0, 0.5),
+                (2.0, 12.0, 0.3),
+            ]
+
+            for L_ in range(2, K + 1):
+                neg_r2 = neg_r2_factory(L_)
+                # bounds: tau_f ∈ [0.5, 6], tau_s ∈ [2, 2*K], alpha ∈ [0.05, 0.95]
+                bounds = [
+                    (TAU_F_MIN, TAU_F_MAX),
+                    (TAU_S_MIN, 2.0 * K),
+                    (ALPHA_MIN, ALPHA_MAX),
+                ]
+                for tf0, ts0, a0 in starting_points:
+                    # Clip starting point within bounds
+                    tf0_c = np.clip(tf0, TAU_F_MIN, TAU_F_MAX)
+                    ts0_c = np.clip(ts0, max(TAU_S_MIN, tf0_c + DELTA_MIN), 2.0 * K)
+                    a0_c = np.clip(a0, ALPHA_MIN, ALPHA_MAX)
+
+                    res = minimize(neg_r2, x0=[tf0_c, ts0_c, a0_c],
+                                   method='L-BFGS-B',
+                                   bounds=bounds,
+                                   options={'ftol': 1e-6, 'maxiter': 300})
+                    r2 = -res.fun
+                    if r2 > best['R2']:
+                        best.update({'R2': r2, 'K': L_,
+                                     'tau_f': res.x[0],
+                                     'tau_s': res.x[1],
+                                     'alpha': res.x[2]})
+
+            h_f = _exp_kernel(best['tau_f'], best['K'])
+            h_s = _exp_kernel(best['tau_s'], best['K'])
+            print(f"  IHACRES: R²={best['R2']:.3f}  K={best['K']}  "
+                  f"τ_fast={best['tau_f']:.2f}  τ_slow={best['tau_s']:.2f}  "
+                  f"α={best['alpha']:.2f}")
+            return {
+                'optimal_K': best['K'],
+                'optimal_tau_f': best['tau_f'],
+                'optimal_tau_s': best['tau_s'],
+                'optimal_alpha': best['alpha'],
+                'R2': best['R2'],
+                'kernel_fast': h_f,
+                'kernel_slow': h_s,
+            }
+        # ── no seasonal split ──────────────────────────────────────────────────
+        if agg is None:
+            print("Starting IHACRES benchmark...")
+            result = _run_ihacres(driver, target)
+
+            if plot:
+                K = result['optimal_K']
+                h_f = result['kernel_fast']
+                h_s = result['kernel_slow']
+                alpha = result['optimal_alpha']
+                n = len(driver)
+                Q_fast = np.full(n, np.nan)
+                Q_slow = np.full(n, np.nan)
+                for t in range(K - 1, n):
+                    seg = driver[t - K + 1: t + 1][::-1]
+                    Q_fast[t] = np.dot(h_f, seg)
+                    Q_slow[t] = np.dot(h_s, seg)
+                Q_sim = alpha * Q_fast + (1 - alpha) * Q_slow
+                mask = np.isfinite(target) & np.isfinite(Q_sim)
+                X = np.column_stack([Q_sim[mask], np.ones(mask.sum())])
+                beta, _, _, _ = np.linalg.lstsq(X, target[mask], rcond=None)
+                Q_fit = X @ beta
+
+                fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+                lags = np.arange(1, K + 1)
+                width = 0.3
+                axes[0].bar(lags - width / 2, h_f, width=width, alpha=0.7,
+                            color='tab:orange',edgecolor='grey',
+                            label=f'fast τ={result["optimal_tau_f"]:.1f}')
+                axes[0].bar(lags + width / 2, h_s, width=width, alpha=0.7,
+                            color='tab:blue',edgecolor='grey',
+                            label=f'slow τ={result["optimal_tau_s"]:.1f}')
+                axes[0].set_xlabel('Lag (months)')
+                axes[0].set_ylabel('Weight h(j)')
+                axes[0].set_title(
+                    f'IHACRES kernels  α={result["optimal_alpha"]:.2f}  K={K}')
+                axes[0].legend()
+                axes[0].grid(alpha=0.3, axis='y')
+
+                axes[1].plot(Q_fit, target[mask], 'o',
+                             color='grey', alpha=0.5,
+                             label=f'R²={result["R2"]:.3f}')
+                axes[1].plot(
+                    [target[mask].min(), target[mask].max()],
+                    [target[mask].min(), target[mask].max()],
+                    '--', color='grey')
+                axes[1].set_xlabel('Q simulated')
+                axes[1].set_ylabel('Q observed')
+                axes[1].set_title('IHACRES — best fit')
+                axes[1].legend()
+                axes[1].grid(alpha=0.3)
+                plt.tight_layout()
+                plt.show()
+
+            return result
+
+        # ── seasonal split ─────────────────────────────────────────────────────
+        seasons_dict = self._build_seasons_dict(agg, seasons)
+        all_months = [m for lst in seasons_dict.values() for m in lst]
+        missing = [m for m in range(1, 13) if m not in all_months]
+        if missing:
+            print("Alert: missing month(s):", missing)
+
+        print("Starting IHACRES benchmark (seasonal)...")
+        results = {}
+        for name, mlist in seasons_dict.items():
+            idx = np.isin(months_overlap, mlist)
+            if np.count_nonzero(idx) < 15:
+                print(f"  Season {name}: insufficient data, skipped.")
+                continue
+            print(f"  Season {name}:", end=' ')
+            res = _run_ihacres(driver, target, season_mask=idx)
+            res['sample_number'] = int(np.count_nonzero(idx))
+            results[name] = res
+
+        if plot and results:
+            n_seasons = len(results)
+            fig, axes = plt.subplots(nrows=n_seasons, ncols=2,
+                                     figsize=(14, 5 * n_seasons))
+            if n_seasons == 1:
+                axes = axes[np.newaxis, :]
+            for i, (season, res) in enumerate(results.items()):
+                K = res['optimal_K']
+                h_f = res['kernel_fast']
+                h_s = res['kernel_slow']
+                alpha = res['optimal_alpha']
+                lags = np.arange(1, K + 1)
+                width = 0.3
+                axes[i, 0].bar(lags - width / 2, h_f, width=width, alpha=0.7,
+                               color='tab:orange', edgecolor='grey',
+                               label=f'fast τ={res["optimal_tau_f"]:.1f}')
+                axes[i, 0].bar(lags + width / 2, h_s, width=width, alpha=0.7,
+                               color='tab:blue', edgecolor='grey',
+                               label=f'slow τ={res["optimal_tau_s"]:.1f}')
+                axes[i, 0].set_xlabel('Lag (months)')
+                axes[i, 0].set_ylabel('Weight h(j)')
+                axes[i, 0].set_title(f'{season} — IHACRES  α={alpha:.2f}  K={K}')
+                axes[i, 0].legend()
+                axes[i, 0].grid(alpha=0.3, axis='y')
+
+                # convolve on full contiguous series, then filter by season
+                idx = np.isin(months_overlap, seasons_dict[season])
+                Q_fast_full = np.full(len(driver), np.nan)
+                Q_slow_full = np.full(len(driver), np.nan)
+                for t in range(K - 1, len(driver)):
+                    seg = driver[t - K + 1: t + 1][::-1]
+                    Q_fast_full[t] = np.dot(h_f, seg)
+                    Q_slow_full[t] = np.dot(h_s, seg)
+                Q_sim_full = alpha * Q_fast_full + (1 - alpha) * Q_slow_full
+
+                # apply OLS rescaling on seasonal subset
+                vm = np.isfinite(Q_sim_full[idx]) & np.isfinite(target[idx])
+                X = np.column_stack([Q_sim_full[idx][vm], np.ones(vm.sum())])
+                beta, _, _, _ = np.linalg.lstsq(X, target[idx][vm], rcond=None)
+                Q_fit = X @ beta
+
+                axes[i, 1].plot(Q_fit, target[idx][vm], 'o',
+                                color='grey', alpha=0.5,
+                                label=f'R²={res["R2"]:.3f}')
+                axes[i, 1].plot(
+                    [target[idx][vm].min(), target[idx][vm].max()],
+                    [target[idx][vm].min(), target[idx][vm].max()],
+                    '--', color='grey')
+                axes[i, 1].set_title(f'{season} — best fit')
+                axes[i, 1].legend()
+                axes[i, 1].grid(alpha=0.3)
+
+            plt.tight_layout()
+            plt.show()
+
+        return results
+
+
     def _calculate_CDN(self):
         """
         Compute the Cumulative Deviation from Normal (CDN).
@@ -1923,30 +3374,42 @@ class Precipitation(BaseDroughtAnalysis):
         else:
             return SIDI_seasonal
 
-    def plot_covariates(self, streamflow, year_ext=None,split_plot=False):
+    def plot_covariates(self, streamflow, year_ext=None, split_plot=False):
+        """
+        Plot the covariate relationship between the optimized SIDI and a Streamflow-based index.
 
-        if not isinstance(streamflow, BaseDroughtAnalysis):
-            raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
+        Parameters
+        ----------
+        streamflow : BaseDroughtAnalysis or Streamflow
+            Streamflow object providing SQI1 or similar indices.
+        year_ext : tuple of int, optional
+            (start_year, end_year) to restrict the x-axis.
+        split_plot : bool, optional
+            If True, produces separate figures for each panel. Default False.
 
+        Raises
+        ------
+        TypeError
+            If streamflow is not a BaseDroughtAnalysis instance, or if the
+            Precipitation object has not been optimized.
+        """
         if not isinstance(streamflow, BaseDroughtAnalysis):
             raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
 
         if self.is_seasonal_sidi:
-            # All 5 columns are identical — any weight_index works
-            print(f"Note: SIDI is seasonally optimized — "
-                  f"weight_index is ignored (all columns identical).")
-            weight_index = 0
-
+            print(f"Note: SIDI is seasonally optimized — weight_index is ignored (all columns identical).")
+            weight_index = None  # colonna 0, colore rosso
         elif hasattr(self, 'optimal_weight_index'):
             weight_index = self.optimal_weight_index
         else:
             raise TypeError(
                 "The Precipitation object must be optimized with "
-                "'set_optimal_SIDI()' or 'set_optimal_SIDI_seasonal()' OVERWRITE = True "
+                "'set_optimal_SIDI()' or 'set_optimal_SIDI_seasonal()' OVERWRITE=True "
                 "before calling this function."
             )
 
-        plot__covariates(self,streamflow=streamflow,weight_index=weight_index,year_ext=year_ext,split_plot=split_plot)
+        plot__covariates(self, streamflow=streamflow, weight_index=weight_index,
+                         year_ext=year_ext, split_plot=split_plot)
 
 class Streamflow(BaseDroughtAnalysis):
     def __init__(self, start_baseline_year, end_baseline_year,basin_name,
