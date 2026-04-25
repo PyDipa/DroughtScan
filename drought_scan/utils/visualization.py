@@ -807,7 +807,7 @@ def plot__covariates(DSO, streamflow, weight_index,year_ext=None, split_plot=Fal
 
     width=_figure_size_for_length(len(x))[0]/4*3
     hight =_figure_size_for_length(len(x))[1]/3
-    colors =    ['tab:blue', 'tab:orange', 'tab:green', 'tab:pink', 'tab:purple']
+    colors =    ['tab:blue', 'tab:orange', 'tab:green', 'tab:pink', 'tab:purple','tab:red']
 
     if split_plot:
         # --- Panel 1: SIDI vs SQI1 ---
@@ -849,7 +849,7 @@ def plot__covariates(DSO, streamflow, weight_index,year_ext=None, split_plot=Fal
         ax = axes[0]
         highlight_drought(ax, x, offset=0,threshold=DSO.threshold)
         ax.plot(vec, x, c=colors[weight_index], label=DSO.SIDI_name)
-        ax.plot(vec, y,  c='dimgrey', label=f'{streamflow.index_name} ')
+        ax.plot(vec, y,  c='dimgrey', label=f'{streamflow.index_name}1')
         ax.set_ylim(-4, 4)
         ax.legend()
         ax.set_title(f"{DSO.basin_name}: optimal {DSO.SIDI_name} and {streamflow.index_name}  (covariates)")
@@ -873,4 +873,44 @@ def plot__covariates(DSO, streamflow, weight_index,year_ext=None, split_plot=Fal
         _apply_xlim(ax)
         plt.tight_layout()
 
+    plt.show()
+
+    # --- Second figure: timeseries + scatter ---
+    scatter_size = hight  # pannello quadrato
+    ts_width = width - scatter_size  # timeseries prende il resto
+
+    fig2, axes2 = plt.subplots(
+        1, 2,
+        figsize=(width, scatter_size),
+        gridspec_kw={'width_ratios': [ts_width / scatter_size, 1]}
+    )
+
+    # left panel: timeseries (as in Fig.1)
+    ax_ts = axes2[0]
+    # highlight_drought(ax_ts, x, offset=0, threshold=DSO.threshold)
+    ax_ts.plot(vec, y, c='k', label=f'{streamflow.index_name}1',linewidth=0.7)
+    ax_ts.plot(vec, x, c=colors[weight_index], label=DSO.SIDI_name,linewidth=0.7)
+
+    ax_ts.set_ylim(-4, 4)
+    ax_ts.legend()
+    ax_ts.set_title(f"{DSO.basin_name}: {DSO.SIDI_name} vs {streamflow.index_name}")
+    ax_ts.set_xticks(year_ticks)
+    ax_ts.set_xticklabels(year_labels, rotation=90, fontweight='bold')
+    ax_ts.grid(axis='y')
+    _apply_xlim(ax_ts)
+
+    # right panel: scatter plot
+    ax_sc = axes2[1]
+    ax_sc.scatter(x, y, c=colors[weight_index],alpha=0.7, edgecolors='none', s=15)
+    ax_sc.set_xlabel(DSO.SIDI_name)
+    ax_sc.set_ylabel(streamflow.index_name)
+    ax_sc.set_xlim(-4, 4)
+    ax_sc.set_ylim(-4, 4)
+    ax_sc.axhline(0, color='gray', linewidth=0.7, linestyle='--')
+    ax_sc.axvline(0, color='gray', linewidth=0.7, linestyle='--')
+    ax_sc.set_aspect('equal', adjustable='box')
+    ax_sc.set_title("Scatter")
+    ax_sc.grid(True, alpha=0.3)
+
+    fig2.tight_layout()
     plt.show()
