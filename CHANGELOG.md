@@ -1,4 +1,29 @@
 # Changelog
+## [3.3.0]  
+
+### Added
+- Benchmarking suite for D(SPI)/SIDI predictive skill evaluation:
+  - `benchmark_convolution()`: OLS linear convolution (Benchmark A: raw P; Benchmark B: SPI_1 anomalies), with optional seasonal split
+  - `Dspi_free()`: OLS regression on multi-scale SPI predictors [SPI_1..SPI_K]
+  - `benchmark_nash()`: parametric Nash IUH (Gamma kernel, params n and k) via Nelder-Mead
+  - `benchmark_ihacres()`: two-component IHACRES routing (fast + slow exponential kernels) via L-BFGS-B
+  - `_eval_metrics()`: shared helper returning R², RMSE, MAE, KGE, bias, POD and FAR on drought events (threshold SPI ≤ −1)
+  
+fix(mask): restore (reinstate) centroid-based nearest-pixel fallback in create_mask():
+when regionmask returns all-NaN (shape smaller than grid resolution),
+the mask defaults to the closest grid cell to the shape centroid.
+ 
+improve the colors in plot_covariate, now it depends on the weight_index
+
+- plot_covariates (method): resolves weight_index from self,
+  handles seasonal SIDI (None sentinel, red color) and
+  optimal_weight_index; raises TypeError if not optimized
+- plot__covariates (func): accepts weight_index=None for
+  seasonal case (_plot_index=0, _color='red'); replaces
+  magic number 5 sentinel with None for semantic clarity
+- add Figure 2: timeseries + square scatter panel with
+  _color consistent across both figures"
+
 ## [3.2.2] - 2026 -04 - 09
 refactor: unify fit_params interface across all calculation methods
 
