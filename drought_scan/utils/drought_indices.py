@@ -131,7 +131,9 @@ def get_month_indices(month, start_year, end_year, m_cal):
     Returns:
         numpy.ndarray: Indices into m_cal.
     """
-    key = (month, start_year, end_year, id(m_cal))
+    key = (month, start_year, end_year, m_cal.tobytes())
+    # # try the follwoing to b faster:
+    # key = (month, start_year, end_year, hash(m_cal.tobytes()))
     if key in _month_indices_cache:
         return _month_indices_cache[key]
 
