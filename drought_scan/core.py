@@ -1147,10 +1147,10 @@ class BaseDroughtAnalysis:
         else:  # 'SPI'
             driver = self.spi_like_set[0, self_indices]
             target = streamflow.spi_like_set[0, streamflow_indices]
-            x_label = 'SPI_1'
-            y_label = 'SQI_1'
-            title_A = 'Benchmark B — SPI_1 lag convolution OLS'
-            title_B = 'Impulse response on SPI_1 estimated by OLS'
+            x_label = 'SPI1'
+            y_label = 'SQI1'
+            title_A = 'Benchmark B — SPI1 lag convolution OLS'
+            title_B = 'Impulse response on SPI1 estimated by OLS'
             y_label_beta = 'h(j) — beta OLS'
             x_label_beta = 'lag (months)'
 
@@ -1799,7 +1799,7 @@ class BaseDroughtAnalysis:
             #
             kernel = self._nash_kernel(best['n'], best['k'], best['L'])
             print(f"  Nash IUH: R²={best['R2']:.3f}  "
-                  f"L={best['L']}  n={best['n']:.2f}  k={best['k']:.2f}")
+                  f"L={best['L']}  n={best['n']:.2f}   τ={best['k']:.2f}")
 
             # After best is identified, recompute simulated series for metrics
             kernel = self._nash_kernel(best['n'], best['k'], best['L'])
@@ -1861,7 +1861,7 @@ class BaseDroughtAnalysis:
                 axes[0].set_ylabel('Weight h(j)')
                 axes[0].set_title(
                     f'Nash IUH kernel  (n={result["optimal_n"]:.2f}, '
-                    f'k={result["optimal_k"]:.2f}, K={K})')
+                    f' τ={result["optimal_k"]:.2f}, K={K})')
                 axes[0].grid(alpha=0.3, axis='y')
 
                 Q_fit = X @ beta
@@ -1916,7 +1916,7 @@ class BaseDroughtAnalysis:
                 axes[i, 0].set_ylabel('Weight h(j)')
                 axes[i, 0].set_title(
                     f'{season} — Nash IUH  '
-                    f'(n={res["optimal_n"]:.2f}, k={res["optimal_k"]:.2f}, '
+                    f'(n={res["optimal_n"]:.2f}, τ={res["optimal_k"]:.2f}, '
                     f'K={K})')
                 axes[i, 0].grid(alpha=0.3, axis='y')
 
