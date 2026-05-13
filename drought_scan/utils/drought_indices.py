@@ -137,16 +137,18 @@ def get_month_indices(month, start_year, end_year, m_cal):
     if key in _month_indices_cache:
         return _month_indices_cache[key]
 
-    try:
-        idx = np.array([
-            np.where((m_cal[:, 0] == month) & (m_cal[:, 1] == year))[0][0]
-            for year in range(start_year, end_year + 1)
-        ])
-    except IndexError:
-        raise ValueError(
-            f"Month {month} not found for all years in range "
-            f"{start_year}–{end_year}. Check m_cal for gaps."
-        )
+    idx_list = []
+    for year in range(start_year, end_year + 1):
+        matches = np.where((m_cal[:, 0] == month) & (m_cal[:, 1] == year))[0]
+        if matches.size == 0:
+            raise ValueError(
+                f"Month {month} not found for year {year} \n"
+                f"m_cal spans {int(m_cal[:, 1].min())}–{int(m_cal[:, 1].max())}.\n "
+                f"! Adjust baseline boundaries or check for gaps in m_cal."
+            )
+        idx_list.append(matches[0])
+    idx = np.array(idx_list)
+
 
     _month_indices_cache[key] = idx
     return idx
