@@ -656,11 +656,11 @@ def monthly_profile(DSO,var=None, var_name=None,cumulate=False, ax=None,highligh
     if not cumulate:
         for month in range(1, 13):
             monthly_data = x[(months == month) & baseline_mask]
-            monthly_means[month - 1] = np.mean(monthly_data)
-            perc_25[month - 1] = np.percentile(monthly_data, 25)
-            perc_75[month - 1] = np.percentile(monthly_data, 75)
-            perc_10[month - 1] = np.percentile(monthly_data, 10)
-            perc_90[month - 1] = np.percentile(monthly_data, 90)
+            monthly_means[month - 1] = np.nanmean(monthly_data)
+            perc_25[month - 1] = np.nanpercentile(monthly_data, 25)
+            perc_75[month - 1] = np.nanpercentile(monthly_data, 75)
+            perc_10[month - 1] = np.nanpercentile(monthly_data, 10)
+            perc_90[month - 1] = np.nanpercentile(monthly_data, 90)
     else:
         annual_cumsum = {year: np.zeros(12) for year in unique_years}
         for year in unique_years:
