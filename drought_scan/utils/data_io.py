@@ -639,7 +639,7 @@ def _pick_value_col(df: pd.DataFrame, exclude_cols=None) -> str:
         if c in excl_set:
             continue
         s = pd.to_numeric(df[c], errors='coerce')
-        if s.notna().mean() > 0.5: #at least 50% of data mush be numeric and finite!
+        if s.notna().mean() > 0.4: #at least 50% of data mush be numeric and finite!
             candidates.append((c, s.notna().mean()))
     if candidates:
         return sorted(candidates, key=lambda x: x[1], reverse=True)[0][0]
