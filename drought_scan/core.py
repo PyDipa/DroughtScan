@@ -1059,8 +1059,9 @@ class BaseDroughtAnalysis:
             (iii) combined effect                                  (A → SIDI gain)
 
         For each K in [1, ..., Kmax], a separate OLS model is fitted. The optimal
-        K is selected as argmax(R²_adj), following the same criterion as
-        analyze_correlation().
+        K is selected at the end of the initial monotonic-increasing plateau of
+        R²_adj vs K (via `_monotonic_plateau`), to stop before overfitting or
+        numerical noise takes over at large K.
 
         Parameters
         ----------
@@ -1088,10 +1089,11 @@ class BaseDroughtAnalysis:
         If seasons is None and agg is None:
             dict with keys:
                 'R2_adj'          : np.ndarray, shape (Kmax,)
-                'optimal_K'       : int
+                'optimal_K'       : int   (plateau index, 1-based)
                 'K_range'         : np.ndarray
                 'beta'            : np.ndarray, shape (optimal_K + 1,)
                 'condition_number': float
+                'metrics'         : dict
         Else:
             dict keyed by season name, each value being the same dict as above,
             with an additional key 'sample_number'.
@@ -1101,6 +1103,9 @@ class BaseDroughtAnalysis:
         - Requires temporal overlap between self.m_cal and streamflow.m_cal.
         - NaN values in either input or output series are excluded row-wise.
         - The guard `len(rows) < K + 2` skips degenerate configurations.
+        - `optimal_K` follows the plateau criterion (first end of monotonic-
+          increasing sequence in R²_adj), not the global maximum. This stabilises
+          beta against multicollinearity at large K.
         - For physically interpretable ordinates when condition_number >> 30,
           consider ridge regression.
 
@@ -1137,7 +1142,7 @@ class BaseDroughtAnalysis:
 
         if var == 'P':
             driver = self.ts[self_indices]
-            target = streamflow.ts[streamflow_indices] #streamflow.spi_like_set[0, streamflow_indices]#
+            target = streamflow.ts[streamflow_indices]  # streamflow.spi_like_set[0, streamflow_indices]#
             x_label = 'P'
             y_label = 'Q'
             title_A = 'Benchmark A — Unit Hydrograph OLS'
@@ -1159,6 +1164,20 @@ class BaseDroughtAnalysis:
 
         K_range = np.arange(1, Kmax + 1)
         n = len(driver)
+
+        def _monotonic_plateau(x):
+            """
+            Returns the index of the last element in the initial monotonic
+            increasing sequence of x. Used to identify the plateau of R²_adj
+            vs K, stopping before overfitting or numerical noise takes over.
+            """
+            last = 0
+            for i in range(1, len(x)):
+                if np.isfinite(x[i]) and x[i] >= x[i - 1]:
+                    last = i
+                else:
+                    break
+            return last
 
         def _run_benchmark(driver_sub, target_sub, season_mask=None):
             """OLS convolution for a given data subset. Returns the full result dict."""
@@ -1191,8 +1210,13 @@ class BaseDroughtAnalysis:
                 MatCorr.append(1 - (1 - r2) * (n_v - 1) / (n_v - p - 1))
 
             MatCorr = np.array(MatCorr)
-            best_ki = np.nanargmax(MatCorr)
-            best_K = K_range[best_ki]
+
+            # === FIX: plateau-based selection instead of global argmax ===
+            # Aligns `result['optimal_K']` with the K shown by the plot,
+            # and stabilises beta against multicollinearity at large K.
+            plateau_idx = _monotonic_plateau(MatCorr)
+            best_K = int(K_range[plateau_idx])
+            # =============================================================
 
             rows, y_rows, t_idx = [], [], []
             for t in range(best_K - 1, len(driver_sub)):
@@ -1226,26 +1250,12 @@ class BaseDroughtAnalysis:
 
             return {
                 'R2_adj': MatCorr,
-                'optimal_K': int(best_K),
+                'optimal_K': best_K,
                 'K_range': K_range,
                 'beta': beta_opt,
                 'condition_number': cond_num,
-                'metrics': metrics,  # <-- NUOVO
+                'metrics': metrics,
             }
-
-        def _monotonic_plateau(x):
-            """
-            Returns the index of the last element in the initial monotonic
-            increasing sequence of x. Used to identify the plateau of R²_adj
-            vs K, stopping before overfitting or numerical noise takes over.
-            """
-            last = 0
-            for i in range(1, len(x)):
-                if np.isfinite(x[i]) and x[i] >= x[i - 1]:
-                    last = i
-                else:
-                    break
-            return last
 
         # ---------------------------------------------------------------
         # CASE 1: no seasonal split — original behaviour
@@ -1255,11 +1265,9 @@ class BaseDroughtAnalysis:
             result = _run_benchmark(driver, target)
 
             if plot:
-                # best_K = result['optimal_K']
+                best_K = result['optimal_K']
                 beta_opt = result['beta']
                 MatCorr = result['R2_adj']
-                plateau_idx = _monotonic_plateau(MatCorr)
-                best_K = K_range[plateau_idx]
 
                 fig, axes = plt.subplots(1, 2, figsize=(10, 3))
                 axes[0].plot(K_range, MatCorr, 'k-o', lw=2)
@@ -1321,11 +1329,9 @@ class BaseDroughtAnalysis:
                 axes = axes[np.newaxis, :]  # uniform indexing
 
             for i, (season, res) in enumerate(results.items()):
-                # best_K = res['optimal_K']
+                best_K = res['optimal_K']
                 beta_opt = res['beta']
                 MatCorr = res['R2_adj']
-                plateau_idx = _monotonic_plateau(MatCorr)
-                best_K = K_range[plateau_idx]
 
                 axes[i, 0].plot(K_range, MatCorr, 'k-o', lw=2)
                 axes[i, 0].axvline(best_K, color='r', ls='--', label=f'optimal K={best_K}')
@@ -1348,9 +1354,10 @@ class BaseDroughtAnalysis:
 
         return results
 
-    def Dspi_free(self, streamflow, Kmax=None, plot=True):
+    def Dspi_free(self, streamflow, Kmax=None, plot=True,
+                  agg=None, seasons=None):
         """
-        Benchmark B: Linear convolution of standardized anomalies via OLS.
+        Benchmark B-multi: Linear convolution of standardized anomalies via OLS.
 
         This benchmark estimates the relationship between precipitation anomalies at
         increasing temporal scales and standardized streamflow (SQI1) by fitting:
@@ -1369,8 +1376,10 @@ class BaseDroughtAnalysis:
         about streamflow beyond shorter scales?"
 
         For each K in [1, ..., Kmax], a separate OLS model is fitted using
-        [SPI_1(t), ..., SPI_K(t)] as predictors. The optimal K is selected as
-        argmax(R²_adj), following the same criterion as analyze_correlation().
+        [SPI_1(t), ..., SPI_K(t)] as predictors. The optimal K is selected at the
+        end of the initial monotonic-increasing plateau of R²_adj vs K (see
+        `_monotonic_plateau`), to avoid distant peaks induced by overfitting or
+        numerical noise at large K.
 
         Note: since SPI_k is a moving average of SPI_1, predictors are structurally
         correlated — multicollinearity increases with K. R²_adj remains valid for
@@ -1385,27 +1394,35 @@ class BaseDroughtAnalysis:
         plot : bool, optional
             If True, plots R²_adj vs K and the estimated weights h(k).
             Default is True.
+        agg : {'quarter', 'semiannual', 'four-monthly', 'monthly', 'custom'} or None
+            Temporal aggregation scheme for seasonal analysis.
+            If None (default), the analysis is run on all data together.
+        seasons : dict, optional
+            Custom month mapping when ``agg='custom'`` or when passing a dict
+            directly (sets agg='custom' automatically). If None and agg is None,
+            no seasonal split is performed.
 
         Returns
         -------
-        dict with keys:
-            'R2_adj'          : np.ndarray, shape (Kmax,)
-                Adjusted R² for each K in K_range.
-            'optimal_K'       : int
-                K value maximising R²_adj.
-            'K_range'         : np.ndarray
-                Array of tested K values [1, ..., Kmax].
-            'beta'            : np.ndarray, shape (optimal_K + 1,)
-                OLS coefficients at optimal K (last element is the intercept).
-            'condition_number': float
-                Condition number of the design matrix at optimal K.
-                Values >> 30 indicate multicollinearity among SPI scales.
+        If seasons is None and agg is None:
+            dict with keys:
+                'R2_adj'          : np.ndarray, shape (Kmax,)
+                'optimal_K'       : int   (first plateau index, 1-based)
+                'K_range'         : np.ndarray
+                'beta'            : np.ndarray, shape (optimal_K + 1,)
+                'condition_number': float
+                'metrics'         : dict
+        Else:
+            dict keyed by season name, each value being the same dict as above,
+            with an additional key 'sample_number'.
 
         Notes
         -----
         - Requires temporal overlap between self.m_cal and streamflow.m_cal.
         - NaN values in either SQI1 or any SPI_k are excluded row-wise.
         - Kmax is capped at min(self.K, streamflow.spi_like_set.shape[0]).
+        - `optimal_K` selection follows the plateau criterion (first end of
+          monotonic-increasing sequence in R²_adj), not the global maximum.
 
         References
         ----------
@@ -1421,6 +1438,9 @@ class BaseDroughtAnalysis:
             Kmax = self.K
         Kmax = min(Kmax, self.spi_like_set.shape[0], streamflow.spi_like_set.shape[0])
 
+        if seasons is not None:
+            agg = 'custom'
+
         # --- Temporal overlap ---
         self_indices, streamflow_indices = find_overlap(self.m_cal, streamflow.m_cal)
         if len(self_indices) == 0 or len(streamflow_indices) == 0:
@@ -1428,104 +1448,205 @@ class BaseDroughtAnalysis:
 
         SQI1 = streamflow.spi_like_set[0, streamflow_indices]
         SPIset = self.spi_like_set[:, self_indices]
-        n = SPIset.shape[1]
+        m_cal_overlap = np.array([self.m_cal[i] for i in self_indices])
+        months_overlap = np.array([m[0] for m in m_cal_overlap], dtype=int)
 
         K_range = np.arange(1, Kmax + 1)
-        MatCorr = []
 
-        print("Starting correlation analysis...")
+        def _monotonic_plateau(x):
+            """
+            Returns the index of the last element in the initial monotonic
+            increasing sequence of x. Used to identify the plateau of R²_adj
+            vs K, stopping before overfitting or numerical noise takes over.
+            """
+            last = 0
+            for i in range(1, len(x)):
+                if np.isfinite(x[i]) and x[i] >= x[i - 1]:
+                    last = i
+                else:
+                    break
+            return last
 
-        for K in K_range:
-            # predittori: [SPI_1(t), SPI_2(t), ..., SPI_K(t)]
-            X_block = SPIset[0:K, :].T  # shape (n, K)
+        def _run_dspi_free(SPIset_sub, SQI1_sub, season_mask=None):
+            """OLS multi-scale regression for a given data subset.
+            Returns the full result dict. Same logic as the all-data case;
+            `season_mask` restricts the rows entering the OLS fit."""
+            MatCorr = []
 
-            valid = ~np.isnan(SQI1)
-            for k in range(K):
-                valid &= ~np.isnan(SPIset[k, :])
+            for K in K_range:
+                # predictors: [SPI_1(t), SPI_2(t), ..., SPI_K(t)]
+                X_block = SPIset_sub[0:K, :].T  # shape (n, K)
 
-            if valid.sum() < K + 2:
-                MatCorr.append(np.nan)
+                valid = ~np.isnan(SQI1_sub)
+                for k in range(K):
+                    valid &= ~np.isnan(SPIset_sub[k, :])
+                if season_mask is not None:
+                    valid &= season_mask
+
+                if valid.sum() < K + 2:
+                    MatCorr.append(np.nan)
+                    continue
+
+                X = np.column_stack([X_block[valid], np.ones(valid.sum())])
+                y = SQI1_sub[valid]
+
+                beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+                y_hat = X @ beta
+                ss_res = np.sum((y - y_hat) ** 2)
+                ss_tot = np.sum((y - y.mean()) ** 2)
+                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+                n_v, p = valid.sum(), K
+                MatCorr.append(1 - (1 - r2) * (n_v - 1) / (n_v - p - 1))
+
+            MatCorr = np.array(MatCorr)
+            if np.all(np.isnan(MatCorr)):
+                return None
+
+            # === FIX: plateau-based selection instead of global argmax ===
+            # Take the end of the initial monotonic-increasing run as optimal K.
+            # This avoids distant peaks driven by overfitting/numerical noise
+            # at large K, where condition_number explodes and beta becomes
+            # unstable but R²_adj may still spuriously creep up.
+            plateau_idx = _monotonic_plateau(MatCorr)
+            best_K = int(K_range[plateau_idx])
+            # =============================================================
+
+            # Recompute at optimal K
+            X_block_opt = SPIset_sub[0:best_K, :].T
+            valid_opt = ~np.isnan(SQI1_sub)
+            for k in range(best_K):
+                valid_opt &= ~np.isnan(SPIset_sub[k, :])
+            if season_mask is not None:
+                valid_opt &= season_mask
+
+            X_opt = np.column_stack([X_block_opt[valid_opt], np.ones(valid_opt.sum())])
+            y_opt = SQI1_sub[valid_opt]
+            beta_opt, _, _, sv = np.linalg.lstsq(X_opt, y_opt, rcond=None)
+            cond_num = float(np.max(sv) / np.min(sv[sv > 0])) if len(sv) > 0 else np.nan
+
+            if cond_num > 30:
+                import warnings
+                warnings.warn(
+                    f"Dspi_free: condition number = {cond_num:.1f} > 30. "
+                    f"SPI scales are structurally correlated — "
+                    f"beta coefficients unstable at K={best_K}.",
+                    UserWarning
+                )
+
+            y_pred_opt = X_opt @ beta_opt
+            metrics = self._eval_metrics(y_opt, y_pred_opt)
+
+            return {
+                'R2_adj': MatCorr,
+                'optimal_K': best_K,
+                'K_range': K_range,
+                'beta': beta_opt,
+                'condition_number': cond_num,
+                'metrics': metrics,
+            }
+
+        # ---------------------------------------------------------------
+        # CASE 1: no seasonal split
+        # ---------------------------------------------------------------
+        if agg is None:
+            print("Starting correlation analysis...")
+            result = _run_dspi_free(SPIset, SQI1)
+
+            if plot and result is not None:
+                MatCorr = result['R2_adj']
+                best_K = result['optimal_K']
+                beta_opt = result['beta']
+
+                fig, axes = plt.subplots(1, 2, figsize=(10, 3))
+                axes[0].plot(K_range, MatCorr, 'k-o', lw=2)
+                axes[0].axvline(best_K, color='r', ls='--', label=f'optimal K={best_K}')
+                axes[0].set_xlabel('K (number of SPI scales)')
+                axes[0].set_ylabel('R²_adj')
+                axes[0].set_title('Dspi_free — SPI multi-scale OLS')
+                axes[0].legend()
+                axes[0].grid(alpha=0.3)
+
+                axes[1].bar(K_range[:best_K], beta_opt[:-1],
+                            color='grey', edgecolor='k', linewidth=0.5)
+                axes[1].axhline(0, color='k', lw=0.8, ls='--')
+                axes[1].set_xlabel('SPI scale k')
+                axes[1].set_ylabel('h(k) — beta OLS')
+                axes[1].set_title(f'SPI scale weights estimated by OLS (K={best_K})')
+                axes[1].grid(alpha=0.3, axis='y')
+
+                plt.tight_layout()
+                plt.show()
+
+            return result
+
+        # ---------------------------------------------------------------
+        # CASE 2: seasonal split
+        # ---------------------------------------------------------------
+        seasons_dict = self._build_seasons_dict(agg, seasons)
+
+        # year coverage check (same guard as analyze_correlation_seasonal)
+        all_months = [m for lst in seasons_dict.values() for m in lst]
+        unique = set(all_months)
+        missing = [m for m in range(1, 13) if m not in unique]
+        duplicates = [m for m in unique if all_months.count(m) > 1]
+        if missing:
+            print("Alert: missing month(s):", missing)
+        if duplicates:
+            print("Alert: duplicate month(s):", duplicates)
+
+        print("Starting correlation analysis (seasonal)...")
+        results = {}
+        for name, mlist in seasons_dict.items():
+            idx = np.isin(months_overlap, mlist)
+            if np.count_nonzero(idx) <= Kmax + 2:
+                print(f" Season {name}: insufficient data, skipped.")
                 continue
-
-            X = np.column_stack([X_block[valid], np.ones(valid.sum())])
-            y = SQI1[valid]
-
-            beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-            y_hat = X @ beta
-            ss_res = np.sum((y - y_hat) ** 2)
-            ss_tot = np.sum((y - y.mean()) ** 2)
-            r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-            n_v, p = valid.sum(), K
-            MatCorr.append(1 - (1 - r2) * (n_v - 1) / (n_v - p - 1))
-
-        # --- K ottimale ---
-        MatCorr = np.array(MatCorr)
-        best_ki = np.nanargmax(MatCorr)
-        best_K = K_range[best_ki]
-
-        # --- Ricomputa al K ottimale ---
-        X_block_opt = SPIset[0:best_K, :].T
-        valid_opt = ~np.isnan(SQI1)
-        for k in range(best_K):
-            valid_opt &= ~np.isnan(SPIset[k, :])
-
-        X_opt = np.column_stack([X_block_opt[valid_opt], np.ones(valid_opt.sum())])
-        y_opt = SQI1[valid_opt]
-        beta_opt, _, _, sv = np.linalg.lstsq(X_opt, y_opt, rcond=None)
-        cond_num = float(np.max(sv) / np.min(sv[sv > 0])) if len(sv) > 0 else np.nan
-
-        y_pred = np.full(n, np.nan)
-        y_pred[valid_opt] = X_opt @ beta_opt
-        residuals = SQI1 - y_pred
-
-        if cond_num > 30:
-            import warnings
-            warnings.warn(
-                f"Benchmark B: condition number = {cond_num:.1f} > 30. "
-                f"SPI scales are structurally correlated — "
-                f"beta coefficients unstable at K={best_K}.",
-                UserWarning
-            )
+            res = _run_dspi_free(SPIset, SQI1, season_mask=idx)
+            if res is None:
+                print(f" Season {name}: all-NaN R² grid, skipped.")
+                continue
+            res['sample_number'] = int(np.count_nonzero(idx))
+            print(f" Season {name}: best R²_adj={res['R2_adj'][res['optimal_K'] - 1]:.3f} "
+                  f"(K={res['optimal_K']})")
+            results[name] = res
 
         if plot:
-            import matplotlib.pyplot as plt
-            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+            n_seasons = len(results)
+            if n_seasons == 0:
+                return results
 
-            # Sinistra: R²_adj vs K
-            axes[0].plot(K_range, MatCorr, 'k-o', lw=2)
-            axes[0].axvline(best_K, color='r', ls='--', label=f'optimal K={best_K}')
-            axes[0].set_xlabel('K (number of SPI scales)')
-            axes[0].set_ylabel('R²_adj')
-            axes[0].set_title('Benchmark B — SPI convolution OLS')
-            axes[0].legend()
-            axes[0].grid(alpha=0.3)
+            fig, axes = plt.subplots(nrows=n_seasons, ncols=2,
+                                     figsize=(10, 3 * n_seasons))
+            if n_seasons == 1:
+                axes = axes[np.newaxis, :]
 
-            # Destra: pesi stimati h(k)
-            axes[1].bar(K_range[:best_K], beta_opt[:-1],
-                        color='grey', edgecolor='k', linewidth=0.5)
-            axes[1].axhline(0, color='k', lw=0.8, ls='--')
-            axes[1].set_xlabel('SPI scale k')
-            axes[1].set_ylabel('h(k) — beta OLS')
-            axes[1].set_title(f'SPI scale weights estimated by OLS (K={best_K})')
-            axes[1].grid(alpha=0.3, axis='y')
+            for i, (season, res) in enumerate(results.items()):
+                MatCorr = res['R2_adj']
+                best_K = res['optimal_K']
+                beta_opt = res['beta']
+
+                axes[i, 0].plot(K_range, MatCorr, 'k-o', lw=2)
+                axes[i, 0].axvline(best_K, color='r', ls='--', label=f'optimal K={best_K}')
+                axes[i, 0].set_xlabel('K (number of SPI scales)')
+                axes[i, 0].set_ylabel('R²_adj')
+                axes[i, 0].set_title(f'Dspi_free — SPI multi-scale OLS — {season}')
+                axes[i, 0].legend()
+                axes[i, 0].grid(alpha=0.3)
+
+                axes[i, 1].bar(K_range[:best_K], beta_opt[:-1],
+                               color='grey', edgecolor='k', linewidth=0.5)
+                axes[i, 1].axhline(0, color='k', lw=0.8, ls='--')
+                axes[i, 1].set_xlabel('SPI scale k')
+                axes[i, 1].set_ylabel('h(k) — beta OLS')
+                axes[i, 1].set_title(f'SPI scale weights — {season} (K={best_K})')
+                axes[i, 1].grid(alpha=0.3, axis='y')
 
             plt.tight_layout()
             plt.show()
 
-        y_pred_opt = X_opt @ beta_opt
-        metrics = self._eval_metrics(y_opt, y_pred_opt)
+        return results
 
-        return {
-            'R2_adj': MatCorr,
-            'optimal_K': int(best_K),
-            'K_range': K_range,
-            'beta': beta_opt,
-            'condition_number': cond_num,
-            'metrics': metrics,  # <-- NUOVO
-        }
-
-
-    #--------------------------------------------------------------------------------
+        #--------------------------------------------------------------------------------
     # HELPER: Nash-IUH kernel  (parametric, 2 free params)
 
     # HELPER: linear convolution R²
