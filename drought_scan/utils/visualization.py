@@ -471,7 +471,7 @@ def plot_severe_events(DSO, tstartid, duration, deficit, max_events=None, labels
     fig.suptitle(title, fontsize=12)
     plt.show(block=False)
 
-def plot_cdn_trends(DSO, windows, ax=None,year_ext=None,unit=None,show_spi=False):
+def plot_cdn_trends(DSO, windows, figsize=(14,10),ax=None,year_ext=None,unit=None,show_spi=False):
     """
     Plot trends in the Cumulative Deviation from Normal (CDN) time series
     over multiple moving window lengths, highlighting the net change
@@ -500,7 +500,7 @@ def plot_cdn_trends(DSO, windows, ax=None,year_ext=None,unit=None,show_spi=False
     colors = [cmap(i % cmap.N) for i in range(len(windows))]
 
     if ax is None:
-        fig, ax = plt.subplots(figsize=(14, 10), ncols=1, nrows=len(windows))
+        fig, ax = plt.subplots(figsize=figsize, ncols=1, nrows=len(windows))
         ax = ax.ravel()
     else:
         if len(windows) == 1:

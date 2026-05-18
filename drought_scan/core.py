@@ -2988,7 +2988,7 @@ class BaseDroughtAnalysis:
                                name=name)
         return tstartid, tendid, duration, deficit
 
-    def plot_trends(self, windows=[12, 36, 60, 120],show_spi=False,ax=None,year_ext=None,unit=None):
+    def plot_trends(self, windows=[12, 36, 60, 120],figsize=None,show_spi=False,ax=None,year_ext=None,unit=None):
         """
         Wrapper method to plot trend bars on the CDN time series for a DroughtScan-compatible object.
 
@@ -2999,7 +2999,9 @@ class BaseDroughtAnalysis:
         Returns:
             None. Displays a plot.
         """
-        plot_cdn_trends(self, windows,show_spi=show_spi,ax=ax,year_ext=year_ext,unit=unit)
+        if figsize is None:
+            figsize=(14,10)
+        plot_cdn_trends(self, windows,figsize=figsize,show_spi=show_spi,ax=ax,year_ext=year_ext,unit=unit)
 
     def plot_monthly_profile(self, var=None, var_name=None, cumulate=False, ax=None,highlight_years=None,season_shift=False):
         """
