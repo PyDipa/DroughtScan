@@ -3030,7 +3030,7 @@ class BaseDroughtAnalysis:
 
         monthly_profile(self, var=var,var_name=var_name, cumulate=cumulate,ax=ax, highlight_years=highlight_years, season_shift=season_shift)
 
-    def plot_spatial(self, var='SIDI', weight_index=2, month_scale = None, ax=None, title=None):
+    def plot_spatial(self, var='SIDI', weight_index=2, month_scale = None, ax=None, title=None,cmap=None):
         """
         Plot a spatial map of SIDI or SPI from compute_spatial_sidi output.
 
@@ -3038,18 +3038,21 @@ class BaseDroughtAnalysis:
             var (str): 'SIDI' or 'SPI' or CDN. Default 'SIDI'.
             weight_index (int): Weight slice for SIDI. Default 2.
             ax (matplotlib.axes.Axes, optional): Existing axes. If None, creates new figure.
-            cmap (str): Colormap. Default 'RdBu'.
+            cmap (str): Colormap. Default is red-2-green palette using the coulors by Crimeri as used in the heatmap
             title (str, optional): Custom title.
 
         Returns:
             matplotlib.axes.Axes
         """
         import matplotlib.pyplot as plt
-        from matplotlib.colors import BoundaryNorm
+        from matplotlib.colors import BoundaryNorm,ListedColormap
         # from matplotlib.colors import TwoSlopeNorm
 
         from drought_scan.utils.visualization import spi_cmap
-        cmap = spi_cmap().reversed() if self.threshold > 0 else spi_cmap()
+        if cmap is None:
+            cmap = spi_cmap().reversed() if self.threshold > 0 else spi_cmap()
+        elif isinstance(cmap, str):
+            cmap = plt.get_cmap(cmap)
         bounds = np.array([-3, -2.5, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 2.5, 3])
         b_norm = BoundaryNorm(bounds, cmap.N)
 
