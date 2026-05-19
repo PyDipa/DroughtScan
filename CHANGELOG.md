@@ -1,4 +1,30 @@
 # Changelog
+## [3.4.0] - 2026 - 05 - 19
+
+### Fixed
+- `plot_sptatial()`:fixed custum cmpa option
+- `plot_trends()`:fixed custum figsize option
+- `benchmark_convolution()`: `optimal_K` in the returned dict was based on
+  `np.nanargmax(MatCorr)` while the diagnostic plot used `_monotonic_plateau`,
+  causing a silent inconsistency between plotted K and downstream
+  `beta` / `condition_number` / `metrics`. Both sites now use the plateau
+  criterion. `MatCorr` grid unchanged; only the selection index changes.
+
+### Changed
+- `benchmark_convolution()`: `_monotonic_plateau` defined once at method top,
+  removed duplicate inline definitions in plot blocks.
+- `Dspi_free()`: `optimal_K` now plateau-based (was argmax), consistent with
+  `benchmark_convolution()`. Stabilises `beta` against multicollinearity
+  at large K.
+
+### Added
+- `Dspi_free()`: seasonal split API (`agg`, `seasons` arguments), aligned
+  with `benchmark_convolution()`, `benchmark_nash()` and `benchmark_ihacres()`.
+  No-split behaviour preserved (`agg=None` default).
+  Seasonal mode returns a dict-of-dicts keyed by season name with an
+  additional `sample_number` field.
+
+
 ## [3.3.0]  
 
 ### Added
