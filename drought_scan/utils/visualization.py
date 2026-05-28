@@ -471,7 +471,7 @@ def plot_severe_events(DSO, tstartid, duration, deficit, max_events=None, labels
     fig.suptitle(title, fontsize=12)
     plt.show(block=False)
 
-def plot_cdn_trends(DSO, windows, figsize=(14,10),ax=None,year_ext=None,unit=None,show_spi=False):
+def plot_cdn_trends_old(DSO, windows, figsize=(14,10),ax=None,year_ext=None,unit=None,show_spi=False):
     """
     Plot trends in the Cumulative Deviation from Normal (CDN) time series
     over multiple moving window lengths, highlighting the net change
@@ -496,6 +496,10 @@ def plot_cdn_trends(DSO, windows, figsize=(14,10),ax=None,year_ext=None,unit=Non
     Returns:
         None. Displays a matplotlib figure.
     """
+    from numpy.lib.stride_tricks import sliding_window_view
+    from drought_scan.core import Streamflow
+
+
     cmap = plt.get_cmap('Set1')  # o 'Set1', 'Dark2'...
     colors = [cmap(i % cmap.N) for i in range(len(windows))]
 
@@ -509,18 +513,52 @@ def plot_cdn_trends(DSO, windows, figsize=(14,10),ax=None,year_ext=None,unit=Non
             ax = np.asarray(ax).ravel()  # make it iterable
         fig = ax[0].figure
 
+    anni = np.unique(DSO.m_cal[:, 1]).astype(int)
     normal_values = DSO.normal_values()
     coeff = DSO.c2r_index
     # average std, used to move from delta changes into mm
-    std_to_mm = [np.polyval(coeff[0, m, :], 1) - normal_values[m] for m in range(12)]
-    std_to_mm = np.mean(np.absolute(std_to_mm))
+    # std_to_native_rate = [np.polyval(coeff[0, m, :], 1) - normal_values[m] for m in range(12)]
+    # std_to_native_rate = np.mean(np.absolute( std_to_native_rate))
+    DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    avg_seconds_per_month = np.mean(DAYS_IN_MONTH) * 86400  # ~2.63e6 s
 
-    anni = np.unique(DSO.m_cal[:, 1]).astype(int)
+
+
+    # Quanto vale 1σ (z=+1) in unità native (mm per Precipitation, m³/s per Streamflow), mese per mese
+    std_to_native_rate_monthly = np.abs(np.array([
+        np.polyval(coeff[0, m, :], 1) - normal_values[m] for m in range(12)
+    ]))
+
+    # Mappo il rate stagionale su ogni step della serie temporale
+    cal_months_0 = DSO.m_cal[:, 0].astype(int) - 1  # 0-based
+    rate_series = std_to_native_rate_monthly[cal_months_0]  # shape = (n,)
 
 
     for i, window in enumerate(windows):
         R = DSO.find_trends(window=window)
-        val = R["delta"] * std_to_mm
+        # Rate medio sulla finestra che termina al mese corrente (allineato come delta)
+        rate_w = np.full(len(rate_series), np.nan)
+        if len(rate_series) >= window:
+            rate_w[window - 1:] = sliding_window_view(rate_series, window).mean(axis=1)
+
+        # Conversione delta → unità fisiche
+        if isinstance(DSO, Streamflow):
+            val = R["delta"] #* rate_w * avg_seconds_per_month
+            unit = "m³"
+        else:
+            val = R["delta"] #* rate_w
+            unit = "mm"
+
+        val[R['trend'] == 0] = 0
+
+
+        # if isinstance(DSO, Streamflow):
+        #
+        #     val = R["delta"] *  std_to_native_rate * avg_seconds_per_month
+        #     unit = "m³"
+        # else:
+        #     val = R["delta"] *  std_to_native_rate
+        #     unit = "mm"
         val[R['trend'] == 0] = 0
         line1,=ax[i].plot(DSO.CDN, '-k',label='CDN')
         ax[i].set_ylabel('CDN', fontsize=12)
@@ -592,6 +630,146 @@ def plot_cdn_trends(DSO, windows, figsize=(14,10),ax=None,year_ext=None,unit=Non
     fig.suptitle(DSO.basin_name)
     fig.tight_layout()
     plt.show(block=False)
+
+
+
+def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
+                    year_ext=None, unit=None, show_spi=False):
+    """
+      Plot the Cumulative Deviation from Normal (CDN) time series together with the
+      cumulative water deficit/surplus estimated over one or more moving windows.
+
+      For each window, the CDN curve is drawn on the left axis, while bars on the
+      right axis show the cumulative deficit/surplus in physical units (millimetres
+      for Precipitation, cubic metres for Streamflow). The deficit is computed by
+      `DSO.deficit_from_spi(window)`, i.e. the SPI-like anomaly at the accumulation
+      scale equal to the window length, converted back to native cumulative units
+      via the `c2r_index` calibration relative to the SPI=0 reference. Bars are set
+      to zero wherever `find_trends` detects no statistically significant monotonic
+      trend, so that a magnitude is reported only during phases of significant
+      change.
+
+      Args:
+          DSO: DroughtScan-like object exposing the CDN series, the calendar
+              `m_cal`, the calibration coefficients `c2r_index`, and the methods
+              `find_trends(window=...)` and `deficit_from_spi(window=...)`.
+          windows (list of int): Moving-window sizes, in months, over which to
+              compute and display the deficit/surplus. One subplot is drawn per
+              window.
+          figsize (tuple, optional): Figure size, used only when `ax` is not given.
+          ax (matplotlib Axes or array of Axes, optional): Target axes. If None, a
+              new figure with one row per window is created.
+          year_ext (tuple of (int, int), optional): Start and end years to restrict
+              the x-axis range. If None, the full record is shown from `window`
+              onwards.
+          unit (str, optional): Retained for backward compatibility; the unit is now
+              inferred automatically ("mm" for Precipitation, "m^3" for Streamflow).
+          show_spi (bool, optional): If True, overlay the SPI-like series at the
+              window scale on a third axis. The series is taken from
+              `DSO.spi_like_set` when `window <= DSO.K`, or computed on the fly for
+              larger scales. Gaps (NaN) from missing data in the input series appear
+              as breaks in the SPI line.
+
+      Returns:
+          dict: `Changes`, mapping each window size to its array of deficit/surplus
+          values (in native units, zeroed where no significant trend is detected).
+          The function also renders the figure.
+      """
+
+    from drought_scan.core import Streamflow
+
+    cmap = plt.get_cmap('Set1')
+    colors = [cmap(i % cmap.N) for i in range(len(windows))]
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize, ncols=1, nrows=len(windows))
+        ax = np.atleast_1d(ax).ravel()
+    else:
+        ax = [ax] if len(windows) == 1 else np.asarray(ax).ravel()
+        fig = ax[0].figure
+
+    anni = np.unique(DSO.m_cal[:, 1]).astype(int)
+    if unit is None:
+        unit = "m³" if isinstance(DSO, Streamflow) else "mm"
+
+
+
+    for i, window in enumerate(windows):
+
+        R = DSO.find_trends(window=window)
+
+        if window <= DSO.K:
+            spi_w = DSO.spi_like_set[window - 1, :]
+            coeff_w = DSO.c2r_index[window - 1]
+        else:
+            spi_w, coeff_w = DSO._compute_spi(month_scale=window)
+
+        # Deficit/surplus
+        anomaly = DSO.deficit_from_spi(window=window, spi=spi_w, coeff=coeff_w)
+
+        val = anomaly.copy()
+        val[R['trend'] == 0] = 0  # azzera dove non c'è trend significativo
+
+        # --- CDN, asse sinistro ---
+        line1, = ax[i].plot(DSO.CDN, '-k', label='CDN')
+        ax[i].set_ylabel('CDN', fontsize=12)
+        ax[i].set_xticks(np.arange(0, len(val), 12))
+        ax[i].set_xticklabels(anni, rotation=90)
+
+        # --- Volume anomaly, asse destro (barre) ---
+        ax2 = ax[i].twinx()
+        line2 = ax2.bar(np.arange(len(val)), val, color=colors[i],
+                        alpha=0.3, label=f'water anomaly {window}m')
+        ax2.axhline(0, color='lightgrey')
+        ax2.set_ylabel(f'Water anomaly [{unit}]', fontsize=12)
+        ax2.set_xlim(window, len(val))
+
+        # ylim simmetrico (come tua versione)
+        ymax = np.nanmax(np.abs(val))
+        if ymax > 0:
+            n_levels = 11
+            step = np.ceil(ymax / ((n_levels - 1) // 2))
+            base = 10 ** np.floor(np.log10(step))
+            for mult in [1, 2, 5, 10]:
+                if step <= mult * base:
+                    step = mult * base
+                    break
+            ymax_rounded = np.ceil(ymax / step) * step
+            yticks = np.arange(-ymax_rounded, ymax_rounded + step, step)
+            ax2.set_yticks(yticks)
+            ax2.set_ylim(yticks[0], yticks[-1])
+
+        lines = [line1, line2[0]]
+        labels = ['CDN', f'water anomaly over {window} months (sig. trend only)']
+
+        if show_spi:
+            ax3 = ax[i].twinx()
+            ax3.spines["right"].set_position(("axes", 1.12))
+            line3, = ax3.plot(spi_w, '-', color='dimgrey', alpha=0.7,
+                              label=f'SPI{window}')
+            ax3.set_ylabel(f'SPI{window}', fontsize=12, color='dimgrey')
+            ax3.tick_params(axis='y', labelcolor='dimgrey')
+            lines.append(line3)
+            labels.append(f'SPI{window}')
+
+        ax[i].legend(lines, labels, loc='upper left')
+
+        if year_ext is None:
+            ax[i].set_xlim(windows[0], len(DSO.CDN))
+        else:
+            x1 = np.where(DSO.m_cal[:, 1] == year_ext[0])[0]
+            x2 = np.where(DSO.m_cal[:, 1] == year_ext[1])[0]
+            if len(x1) == 0:
+                raise ValueError(
+                    f"year_ext start outside domain: "
+                    f"{int(DSO.m_cal[0, 1])}–{int(DSO.m_cal[-1, 1])}")
+            x2 = len(DSO.CDN) if len(x2) == 0 else x2[-1]
+            ax[i].set_xlim(x1[0], x2)
+
+    fig.suptitle(DSO.basin_name)
+    fig.tight_layout()
+    plt.show(block=False)
+
 
 def monthly_profile(DSO,var=None, var_name=None,cumulate=False, ax=None,highlight_years=None, season_shift=False):
     """

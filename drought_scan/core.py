@@ -74,7 +74,7 @@ from drought_scan.utils.visualization import (
 # --- statistics -------------------------------------------------------------
 from drought_scan.utils.statistics import (
     find_overlap,
-    _rolling_trend_analysis,
+    # _rolling_trend_analysis,
 )
 
 
@@ -153,7 +153,6 @@ class BaseDroughtAnalysis:
             matplotlib.axes.Axes (GeoAxes)
         """
         import cartopy.crs as ccrs
-        import cartopy.feature as cfeature
         from cartopy.mpl.gridliner import LONGITUDE_FORMATTER, LATITUDE_FORMATTER
         import matplotlib.pyplot as plt
 
@@ -2144,7 +2143,6 @@ class BaseDroughtAnalysis:
             Water Resources Research, 29(8), 2637-2649.
         """
         self._check_correlation_eligible()
-        from scipy.optimize import minimize
 
 
         if K is None:
@@ -2455,6 +2453,86 @@ class BaseDroughtAnalysis:
         Normal = Normal[0:len(self.ts)]
         return Normal
 
+    def deficit_from_spi(self, window, spi=None, coeff=None):
+        """
+        Estimate the cumulative water deficit/surplus over a moving window,
+        derived from the SPI-like index at the matching accumulation scale.
+
+        Rather than summing raw monthly anomalies (which, for precipitation, are
+        bounded below by zero and unbounded above, producing a systematic positive
+        skew), this method maps the anomaly through the SPI-like space. The SPI-like
+        index at scale `window` is converted back to native cumulative units via the
+        polynomial calibration stored in `c2r_index`, and the deficit/surplus is taken
+        relative to the SPI=0 reference (which, by construction, coincides with
+        `normal_values()`).
+
+        The resulting deficit is expressed in physical units and reflects the
+        statistical rarity of the accumulated anomaly. Note that, because the c2r
+        calibration is the non-linear (gamma-based) inverse transform, the deficit in
+        native units remains physically asymmetric even though the SPI itself is
+        symmetric; this asymmetry is intentional and reflects the real bounded nature
+        of the variable.
+
+        Parameters
+        ----------
+        window : int
+            Accumulation scale in months, equal to the moving-window length.
+        spi : ndarray, optional
+            Pre-computed SPI-like series at scale `window`. If None, it is retrieved
+            from `self.spi_like_set` when `window <= self.K`, or computed on the fly
+            via `_compute_spi(month_scale=window)` otherwise.
+        coeff : ndarray, optional
+            Pre-computed c2r calibration coefficients (shape (12, n_coef)) at scale
+            `window`. Retrieved or computed together with `spi` when not provided.
+
+        Returns
+        -------
+        deficit : ndarray, shape (n,)
+            Cumulative deficit (negative) or surplus (positive) over the preceding
+            `window` months, in native cumulative units: millimetres for
+            Precipitation, cubic metres (total volume) for Streamflow. For Streamflow,
+            the cumulative sum of monthly mean discharges (m^3/s) returned by the
+            calibration is converted to total volume by multiplying by the average
+            number of seconds per month. Entries are NaN wherever the SPI-like index
+            is undefined (the first `window-1` months, or any gaps propagated from
+            missing values in the input series).
+
+        Notes
+        -----
+        - The SPI=0 reference equals `normal_values()` by construction, so this deficit
+          is consistent with the rest of the framework's climatological baseline.
+        - For scales exceeding `self.K`, the SPI fit reuses the same baseline period
+          (`start_baseline_year`, `end_baseline_year`) as initialisation. At long
+          scales the number of independent samples per reference month is small, so
+          the gamma fit should be interpreted with care.
+        """
+
+        from drought_scan.core import Streamflow
+
+        n = len(self.ts)
+        months = self.m_cal[:, 0].astype(int)
+
+        if spi is None or coeff is None:
+            if window <= self.K:
+                spi = self.spi_like_set[window - 1, :]
+                coeff = self.c2r_index[window - 1]
+            else:
+                spi, coeff = self._compute_spi(month_scale=window)
+
+        deficit = np.full(n, np.nan)
+        for x in np.where(~np.isnan(spi))[0]:
+            m = months[x] - 1
+            deficit[x] = np.polyval(coeff[m], spi[x]) - np.polyval(coeff[m], 0.0)
+
+        # Streamflow: deficit è in m³/s cumulati (somma di window medie mensili).
+        # Converti a volume totale m³ moltiplicando per i secondi medi al mese.
+        if isinstance(self, Streamflow):
+            avg_seconds_per_month = np.mean(
+                [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]) * 86400
+            deficit = deficit * avg_seconds_per_month
+
+        return deficit
+
     def find_trends(self, var=None, window=None):
         """
         Analyze trends in self.CDN using rolling windows and linear regression.
@@ -2481,6 +2559,67 @@ class BaseDroughtAnalysis:
         results = _rolling_trend_analysis(var=var, window=window, significance=0.05)
         return results
 
+    def volume_anomaly_rolling(self, window):
+        """
+        Compute the observed cumulative water deficit/surplus over a moving window
+        by direct summation of monthly anomalies.
+
+        For each time step, the anomaly of every month within the preceding `window`
+        months is summed, where the monthly anomaly is the difference between the
+        observed value and its climatological normal (`normal_values()`, i.e. the
+        SPI=0 reference). This yields the actual physical water balance over the
+        window, without any statistical transformation.
+
+        This is the direct, observation-based counterpart to `deficit_from_spi`:
+        `volume_anomaly_rolling` measures how many real cubic metres / millimetres
+        were missing or in excess (the quantity relevant for water-balance and
+        reservoir-management purposes), whereas `deficit_from_spi` measures the
+        statistical rarity of the accumulated anomaly. The two are strongly
+        correlated but diverge at extremes; for precipitation the raw sum is
+        physically asymmetric (bounded below by zero, unbounded above). This method
+        is useful as a sanity check and as a complementary metric to the SPI-based
+        estimate.
+
+        Parameters
+        ----------
+        window : int
+            Moving-window length in months.
+
+        Returns
+        -------
+        anomaly : ndarray, shape (n,)
+            Cumulative deficit (negative) or surplus (positive) over the preceding
+            `window` months. Units are millimetres for Precipitation. For Streamflow,
+            each monthly mean discharge anomaly (m^3/s) is multiplied by the number of
+            seconds in its calendar month before summation, so the result is a total
+            volume in cubic metres. Entries are NaN for the first `window-1` months;
+            gaps from missing values in the input series propagate into the sum.
+
+        Notes
+        -----
+        - The reference (`normal_values()`) equals the SPI=0 native value by
+          construction, ensuring consistency with `deficit_from_spi` and the rest of
+          the framework's baseline.
+        - Unlike `deficit_from_spi`, no SPI fit is involved, so this method is robust
+          at any window length but does not correct the bounded-variable asymmetry.
+        """
+        n = len(self.ts)
+        months = self.m_cal[:, 0].astype(int)
+        normal = self.normal_values()
+
+        anomaly = np.full(n, np.nan)
+
+        if isinstance(self, Streamflow):
+            DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+            seconds = np.array([DAYS_IN_MONTH[m - 1] * 86400 for m in months])
+            delta_per_month = (self.ts - normal[months - 1]) * seconds  # m³/mese
+        else:  # Precipitation
+            delta_per_month = self.ts - normal[months - 1]  # mm/mese
+
+        for i in range(window - 1, n):
+            anomaly[i] = np.sum(delta_per_month[i - window + 1: i + 1])
+
+        return anomaly
     # =====================================================================
     # other
     # =====================================================================
@@ -3724,6 +3863,7 @@ class Streamflow(BaseDroughtAnalysis):
         import matplotlib.dates as mdates
         import os
         import pandas as pd
+        from drought_scan.utils.data_io import _read_csv_smart,_pick_date_col,_pick_value_col,_date_related_cols
 
         # re-read raw file to get the daily series (self.ts is already monthly)
         ext = os.path.splitext(self.data_path)[1].lower()

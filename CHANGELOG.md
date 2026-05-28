@@ -1,4 +1,40 @@
 # Changelog
+## [3.5.0] - 2026 - 05 - 28
+
+### Added
+- `deficit_from_spi(window)`: new method estimating the cumulative water
+  deficit/surplus over a moving window by mapping the SPI-like anomaly at the
+  matching accumulation scale back to native units via `c2r_index`, relative to
+  the SPI=0 reference (which equals `normal_values()`). Reflects the statistical
+  rarity of the accumulated anomaly. SPI is taken from `spi_like_set` when
+  `window <= K`, otherwise computed on the fly via `_compute_spi`. For
+  `Streamflow`, the cumulative monthly-mean discharge is converted to total
+  volume (m^3) via average seconds/month. Accepts optional pre-computed `spi`
+  and `coeff` to avoid recomputation.
+- `volume_anomaly_rolling(window)`: new method computing the observed cumulative
+  water balance by direct summation of monthly `(obs - normal)` anomalies over
+  the window. Direct, observation-based counterpart to `deficit_from_spi`; serves
+  as a sanity check and complementary metric. Units: mm (`Precipitation`),
+  total m^3 (`Streamflow`, each monthly anomaly weighted by its calendar-month
+  seconds).
+
+### Changed
+- `plot_trends()`: bars now report the cumulative water deficit/surplus in
+  physical units (mm for `Precipitation`, m^3 for `Streamflow`) computed via
+  `deficit_from_spi`, instead of standardized CDN deltas rescaled by a mean
+  `std_to_mm` factor. The unit is inferred automatically from the object type;
+  bars are zeroed where `find_trends` detects no significant monotonic trend.
+- `plot_trends()`: `show_spi=True` now overlays the SPI-like series at any window
+  scale, including scales exceeding `K` (computed on the fly). Previously limited
+  to `window <= K`.
+- `plot_trends()`: now returns a dict (`Changes`) mapping each window to its array
+  of deficit values (previously returned `None`).
+
+### Deprecated
+- `plot_trends()`: the `unit` argument is retained for backward compatibility but
+  no longer used; the unit is inferred from the object type.
+
+
 ## [3.4.0] - 2026 - 05 - 19
 
 ### Fixed

@@ -164,23 +164,67 @@ R = ds.find_trends(var=my_timeseries, window=48)
 
 ### Plot trends
 
+`plot_trends` visualizes the CDN curve together with the cumulative water
+deficit/surplus estimated over one or more moving windows. Bars on the right
+axis report the deficit in **physical units** — millimetres for `Precipitation`,
+cubic metres for `Streamflow` — inferred automatically from the object type.
+Bars are set to zero wherever no statistically significant monotonic trend is
+detected, so a magnitude is shown only during phases of significant change.
+
 ```python
-ds.plot_trends()                                    # default window
-ds.plot_trends(windows=[50, 120], unit='mm')        # custom multiple windows, variable unit
+ds.plot_trends()                          # default window
+ds.plot_trends(windows=[36, 60])          # multiple windows
+ds.plot_trends(windows=[36], show_spi=True)  # overlay the SPI series at that scale
 ```
 
-When plotting multiple trend analyses, you can provide an external axis (e.g., subplot):
+When `show_spi=True`, the SPI-like series at the window scale is overlaid on a
+third axis. Scales beyond `ds.K` are computed on the fly. Gaps from missing
+values in the input series appear as breaks in the SPI line.
+
+You can still provide an external axis for multi-panel figures:
+
 ```python
 import matplotlib.pyplot as plt
 fig, axs = plt.subplots(2, 1, figsize=(8, 6))
-ds.plot_trends(windows=[36], ax=axs[0], unit='mm')
-ds.plot_trends(windows=[60], ax=axs[1], unit='mm')
+ds.plot_trends(windows=[36], ax=axs[0])
+ds.plot_trends(windows=[60], ax=axs[1])
 ```
 
-> **Note**: `plot_trends` always visualizes the CDN trend (it does not accept a custom variable).
-> Use `find_trends(var=...)` to compute trends on external series, then build your own plot
-> from the returned dictionary if needed.
+> **Note**: `plot_trends` always visualizes the CDN trend; it does not accept a
+> custom variable. Use `find_trends(var=...)` to compute trends on external
+> series.
 
+### Cumulative deficit/surplus in physical units
+
+Two complementary methods quantify the cumulative water deficit/surplus over a
+moving window, both expressed in native units (mm for `Precipitation`, total m^3
+for `Streamflow`) relative to the SPI=0 reference (which equals
+`normal_values()`):
+
+```python
+# Statistical-rarity estimate (used internally by plot_trends):
+# maps the SPI-like anomaly at the window scale back to native units via c2r_index.
+deficit = ds.deficit_from_spi(window=36)
+
+# Direct observation-based water balance: sum of monthly (obs - normal) anomalies.
+volume = ds.volume_anomaly_rolling(window=36)
+```
+
+`deficit_from_spi` reflects the **statistical rarity** of the accumulated anomaly
+and is symmetric in SPI space (though, once converted back to physical units via
+the non-linear gamma calibration, it remains physically asymmetric — e.g.
+precipitation is bounded below by zero). `volume_anomaly_rolling` is the **direct
+physical water balance** and serves as a sanity check and complementary metric.
+The two correlate strongly but diverge at extremes.
+
+```python
+# Example: deficit at the peak of a window
+import numpy as np
+d = ds.deficit_from_spi(window=36)
+idx = np.nanargmin(d)
+print(f"Peak deficit over 36 months: {d[idx]:.3e} "
+      f"({'m^3' if hasattr(ds, 'BFI') else 'mm'}) at {ds.m_cal[idx]}")
+```
 ---
 
 
