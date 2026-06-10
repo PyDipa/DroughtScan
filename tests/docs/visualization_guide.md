@@ -137,14 +137,16 @@ R = ds.find_trends(window=window)
 # 'trend': -1 (negative), 0 (none), 1 (positive)
 # 'slope': slope coefficient
 # 'p_value': statistical significance
-# 'delta': cumulative change (slope * window size)
+# 'delta': cumulative change of the CDN over the window (standardized units)
 
-# Example: change up to Nov 2017
+# Example: trend status in Nov 2017
 date_idx = np.where((ds.m_cal[:,0]==11) & (ds.m_cal[:,1]==2017))[0][0]
-delta_unit = R['delta'][date_idx]
+print(f"Trend at Nov 2017 (W={window}m): "
+      f"direction={R['trend'][date_idx]}, p-value={R['p_value'][date_idx]:.3f}")
 
-std_to_mm = np.mean([np.polyval(coeff[0, m, :], 1) - ds.normal_values()[m] for m in range(12)])
-print(f'in Nov 2017 there was a trend over the last {window} months for a total of {delta_unit*std_to_mm} mm gain/lost')
+# To convert the trend into physical units (mm or m^3), see
+# `deficit_from_spi` in the subsection below.
+
 ```
 
 **Using external variables**

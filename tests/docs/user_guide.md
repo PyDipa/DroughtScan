@@ -289,8 +289,110 @@ Please see the [Visualization Guide](visualization_guide.md) for further details
 
 ---
 
+## 7) Trends and deficit quantification on the CDN
 
-## 7) Streamflow (SQI), Pet and Balance (SPEI) classes
+The Cumulative Deviation from Normal (`ds.CDN`) integrates the standardized
+anomaly over time, so it is a natural starting point to identify
+**multi-year cycles of drought or wet conditions** and to translate them into
+**physical water deficits / surpluses**.
+
+### Detecting trends
+
+`find_trends(window=W)` applies a rolling linear regression to the CDN over a
+moving window of `W` months and flags **monotonic, statistically significant**
+trends (p < 0.05). Returns four arrays:
+
+```python
+window = 36
+R = ds.find_trends(window=window)
+# R['trend']  : -1 negative, 0 none, 1 positive
+# R['slope']  : slope coefficient of the regression
+# R['p_value']: p-value of the trend test
+# R['delta']  : cumulative CDN change over the window (slope × W), in standardized units
+```
+
+Larger `W` filters short-term oscillations and emphasizes structural cycles.
+For typical basin-scale analyses, **W = 36–60 months** captures multi-annual
+drought / pluvial episodes that matter for water resource planning.
+
+### Quantifying the deficit/surplus in physical units
+
+Detecting a trend is one thing; communicating its magnitude as
+"X mm of missing rainfall" or "Y million m³ of missing discharge"
+requires conversion from standardized to physical units. Drought-Scan
+offers two complementary methods, both returning native units (mm for
+`Precipitation`, total m³ for `Streamflow`, derived units for `Pet`/`Balance`):
+
+- **`deficit_from_spi(window)`** — *statistical-rarity perspective.*
+  The SPI-like index at the matching accumulation scale is converted back
+  to native units via the calibrated inverse transform, taking SPI = 0 as
+  reference (which by construction equals `normal_values()`). This is the
+  method used internally by `plot_trends` (see
+  [Visualization Guide §5](visualization_guide.md#5-trend-detection-in-cdn)).
+  Anchors the deficit to the **statistical exceptionality** of the event,
+  preserving symmetry between dry and wet tails in standardized space.
+
+- **`volume_anomaly_rolling(window)`** — *physical water-balance perspective.*
+  Direct summation of monthly `(obs − normal)` anomalies over the window.
+  Returns the **observed physical deficit/surplus** — the quantity that
+  water managers, irrigation boards, and ecological-flow assessments
+  recognise. No statistical transformation involved.
+
+The two estimates correlate strongly but **diverge at extremes**, especially
+for precipitation, which is bounded below by zero (you cannot rain less than
+nothing) but unbounded above. The SPI-based method keeps the two tails
+balanced in standardized space; the direct sum is more honest about the
+physical asymmetry of the variable.
+
+### Which one should I use?
+
+A practical guide:
+
+| Goal | Recommended method |
+|------|-------------------|
+| Reporting headline numbers in papers and outreach | `deficit_from_spi` |
+| Reservoir / water-balance accounting (real cubic metres) | `volume_anomaly_rolling` |
+| Cross-basin comparison of drought severity | `deficit_from_spi` |
+| Sanity check on either method | use both, compare |
+
+In the spirit of robust analysis, **reporting both** in a methods section is
+often the cleanest choice: the SPI-based estimate as the primary,
+statistically-anchored figure, and the direct volumetric anomaly as the
+observation-grounded counterpart.
+
+```python
+window = 36
+
+# Statistically-anchored deficit
+d_spi = ds.deficit_from_spi(window=window)
+
+# Physically-observed deficit
+d_obs = ds.volume_anomaly_rolling(window=window)
+
+# Peak event comparison
+import numpy as np
+idx = np.nanargmin(d_spi)
+print(f"At {ds.m_cal[idx]} over the last {window} months:")
+print(f"  deficit_from_spi:        {d_spi[idx]:.3e}")
+print(f"  volume_anomaly_rolling:  {d_obs[idx]:.3e}")
+```
+
+For visualization, see `plot_trends` in the
+[Visualization Guide §5](visualization_guide.md#5-trend-detection-in-cdn),
+which combines the CDN curve with the deficit bars in a single figure.
+
+> **Note on hydrological regimes**: divergences between the two methods, and
+> between the deficit of precipitation and the deficit of streamflow, often
+> carry interpretive value. A streamflow deficit much larger than the
+> corresponding precipitation deficit may signal **destocking from cryospheric
+> or groundwater reservoirs** (glaciers, snowpack, aquifers); a streamflow
+> deficit much smaller may signal **buffering by lake regulation or
+> reservoir operation**. These contrasts are valuable diagnostic information,
+> not artefacts.
+---
+
+
+## 8) Streamflow (SQI), Pet and Balance (SPEI) classes
 For drought analysis based on other standardized indices like SQI, 
 SPEI or SPETI you can use the corresponding `Streamflow`, `Balance` and `Pet` classes. 
 They share the same initialization philosophy: provide `ts/m_cal` **or** file paths, 
@@ -347,11 +449,11 @@ streamflow = DS.Streamflow(data_path = river_path,
 ```
 
 
-## 8) Streamflow (SQI) — symmetry with Precipitation
+## 9) Streamflow (SQI) — symmetry with Precipitation
 
 Precipitation and streamflow are intrinsically linked as part of the hydrological cycle and represent key indicators for understanding drought. A reduction in precipitation can directly lead to decreased river discharge, reduced groundwater recharge, and lower reservoir storage. This extends the impacts of drought on water availability over time, often with a delayed effect. Drought-Scan explicitly analyzes this relationship through the correlation between the Standardized Drought Integration Index (SIDI), derived from SPI, and the one-month Streamflow Drought Index (SQI1).
 
-## 8.1) Reproducibility tips
+## 9.1) Reproducibility tips
 
 - Fix your **baseline** and stick to it across runs for fair comparisons between Precipitation and Streamflow.  
 - Streamflow data formats accepted are CSV or Excel.
@@ -424,7 +526,7 @@ sidi_opt    = SIDI_matrix[:, A['col_best_weight']]            # 1D vector (time,
 
 ```
 
-### 8.1.1) Seasonal correlation analysis
+### 9.1.1) Seasonal correlation analysis
 
 The method `analyze_correlation_seasonal` repeats the same optimization **per season**,
 allowing different K and weighting schemes for different parts of the year.
@@ -444,7 +546,7 @@ seasonal_corr = ds.analyze_correlation_seasonal(streamflow, agg='custom',
 # Apply seasonal optimization
 ds.set_optimal_SIDI_seasonal(seasonal_corr, agg='quarter', overwrite=True)
 ```
-### 8.1.2) Understanding SIDI optimization states
+### 9.1.2) Understanding SIDI optimization states
 
 After running `analyze_correlation` or `analyze_correlation_seasonal`, the SIDI
 can be optimized in two ways. Understanding the difference is important because
@@ -494,7 +596,7 @@ with `overwrite=True`. If you want to go back to the default SIDI,
 re-initialize the Precipitation object.
 
 
-## 8.2) Streamflow Gap Filling
+## 9.2) Streamflow Gap Filling
 Observed streamflow time series may contain **missing values** due to monitoring gaps or sensor errors.  
 The method `gap_filling` of the `Streamflow` class allows you to fill short gaps and preserve continuity in index calculation.
 
@@ -518,7 +620,7 @@ ds.set_optimal_SIDI(
 streamflow.gap_filling(ds)
 ```
 
-## 8.3) Month-wise SPIₖ–SQI₁ Correlation (`spi_sqi_corr`)
+## 9.3) Month-wise SPIₖ–SQI₁ Correlation (`spi_sqi_corr`)
 
 The method `spi_sqi_corr` provides a detailed month-by-month diagnostic of how 
 drought conditions propagate into hydrological drought.
@@ -596,9 +698,9 @@ print("Shape of R² matrix:", R2.shape)   # Expected: (12, K)
 ---
 
 
-## 9) Pet and Balance utilities 
+## 10) Pet and Balance utilities 
 
-## 9.1) PET analysis (Potential Evapotranspiration)
+## 10.1) PET analysis (Potential Evapotranspiration)
 
 PET datasets can be analyzed directly with the `Pet` class.  
 An example NetCDF file is provided in `tests/ERA5_monthly_pev.nc`. The workflow mirrors the precipitation setup.
@@ -628,7 +730,7 @@ Use PET as an independent climatic driver or combine it with precipitation to bu
 
 ---
 
-## 9.2) Balance (P–PET) > SPEI
+## 10.2) Balance (P–PET) > SPEI
 
 The `Balance` class computes the **monthly climatic water balance** (precipitation (P) minus potential evapotranspiration (PET)).  
 This is the standard input for SPEI index, which captures drought as a function of both supply (P) and virtual water demand (PET).
@@ -661,7 +763,7 @@ This setup is particularly useful in climate change studies, where increasing PE
 
 
 
-## 10) Temperature class
+## 11) Temperature class
 
 The `Temperature` class extends the same philosophy used for `Precipitation`, `Pet`, `Balance`, and `Streamflow`, 
 but is specialized for temperature datasets.
@@ -701,7 +803,7 @@ print("SIDI from T:", Temp.SIDI.shape)
 ```
 ---
 
-## 11) Teleindex class
+## 12) Teleindex class
 
 The `Teleindex` class is meant for **large-scale climate drivers** (e.g., Niño3.4, NAO, AO, IOD), provided as a
 single time series with a calendar. It reuses the common pipeline (SPI-like multi-scale set, **SIDI**, **CDN**),
