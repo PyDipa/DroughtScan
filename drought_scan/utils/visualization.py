@@ -696,7 +696,7 @@ def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
 
     for i, window in enumerate(windows):
 
-        R = DSO.find_trends(window=window)
+        # R = DSO.find_trends(window=window)
 
         if window <= DSO.K:
             spi_w = DSO.spi_like_set[window - 1, :]
@@ -708,7 +708,8 @@ def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
         anomaly = DSO.deficit_from_spi(window=window, spi=spi_w, coeff=coeff_w)
 
         val = anomaly.copy()
-        val[R['trend'] == 0] = 0  # azzera dove non c'è trend significativo
+        val[(spi_w>-0.5) & (spi_w<0.5) ] = 0
+        # val[R['trend'] == 0] = 0  # azzera dove non c'è trend significativo
 
         # --- CDN, asse sinistro ---
         line1, = ax[i].plot(DSO.CDN, '-k', label='CDN')
@@ -752,7 +753,7 @@ def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
             lines.append(line3)
             labels.append(f'SPI{window}')
 
-        ax[i].legend(lines, labels, loc='upper left')
+        ax[i].legend(lines, labels, loc='lower left',fontsize=10,frameon=False)
 
         if year_ext is None:
             ax[i].set_xlim(windows[0], len(DSO.CDN))
