@@ -248,10 +248,21 @@ class BaseDroughtAnalysis:
 
         for ref_month in range(1, 13):
             if fit_params is None:
-                indices, spi_values, coeff, _ = self.calculation_method(
+                indices, spi_values, coeff, params = self.calculation_method(
                     self.ts, month_scale, ref_month, self.m_cal,
                     self.start_baseline_year, self.end_baseline_year
                 )
+                # self.fit_params[month_scale - 1, ref_month - 1, :] = params  # (a, loc, scale)
+
+                # Auto-expand fit_params if the requested scale exceeds the original
+                # allocation (K). This happens when _compute_spi is called on-the-fly
+                # for windows > K (e.g. from deficit_from_spi or plot_trends).
+                if month_scale > self.fit_params.shape[0]:
+                    n_extra = month_scale - self.fit_params.shape[0]
+                    n_params = self.fit_params.shape[2]
+                    extra = np.full((n_extra, 12, n_params), np.nan)
+                    self.fit_params = np.concatenate([self.fit_params, extra], axis=0)
+                self.fit_params[month_scale - 1, ref_month - 1, :] = params
             else:
                 # USE SAVED PARAMS
                 # _compute_spi acts as a transparent dispatcher: it extracts the
@@ -300,8 +311,11 @@ class BaseDroughtAnalysis:
 
         if  base_func in [f_spi, f_spei,f_kde]:
             c2rspi = np.zeros((self.K, 12, 4), dtype=float)
+            self.fit_params = np.full((self.K, 12, 3), np.nan)  # (shape, loc, scale)
+
         elif  base_func == f_zscore:
             c2rspi = np.zeros((self.K, 12, 2), dtype=float)
+            self.fit_params = np.full((self.K, 12, 2), np.nan)  # (shape, loc, scale)
 
         # Calculate SPI for each temporal scale
         for k in range(1, self.K + 1):
@@ -313,6 +327,150 @@ class BaseDroughtAnalysis:
             spiset[k - 1, :] = Spi_ts.copy()
             c2rspi[k - 1, :, :] = coeff.copy()
         return spiset, c2rspi
+
+    def native_to_spi(self, value, month_scale, ref_month):
+        """
+        Convert native-unit value(s) to SPI/SQI/SPEI etc via the fitted distribution stored
+        at calibration time.
+
+        Analytical counterpart to numerically inverting
+        `np.polyval(c2r_index[scale-1, month-1, :], ...)`: uses the exact parameters
+        of the fitted distribution (gamma for f_spi/f_spei, mean+std for f_zscore),
+        avoiding the polynomial approximation error of `c2r_index`, which is
+        non-trivial in the distribution tails.
+
+        Parameters
+        ----------
+        value : float or array-like
+            Value(s) in native units (e.g. mm for Precipitation, m^3/s for
+            Streamflow) to convert to SPI/SQI.
+        month_scale : int
+            Accumulation scale (1..K) at which the conversion is performed.
+        ref_month : int
+            Reference calendar month (1..12) whose calibrated distribution is used.
+
+        Returns
+        -------
+        spi : float or ndarray
+            SPI/SQI value(s) corresponding to `value` at the given scale and
+            reference month.
+
+        Raises
+        ------
+        NotImplementedError
+            If the active `calculation_method` is `f_kde`, whose fitted KDE object
+            is not currently stored as numerical parameters in `fit_params`.
+        ValueError
+            If `calculation_method` is unrecognised.
+
+        See Also
+        --------
+        spi_to_native : Inverse transform (SPI -> native units).
+        c2r_index : Polynomial approximation, retained for backward compatibility
+            (deprecated).
+        """
+        from functools import partial
+        from scipy.stats import norm, gamma
+        from drought_scan.utils.drought_indices import f_spi, f_spei, f_zscore, f_kde
+
+        method = self.calculation_method
+        base_func = method.func if isinstance(method, partial) else method
+
+        # Guard: ensure fit_params has been computed for the requested scale
+        if month_scale > self.fit_params.shape[0] or \
+                np.any(np.isnan(self.fit_params[month_scale - 1, ref_month - 1, :])):
+            raise ValueError(
+                f"fit_params not available for scale={month_scale}, month={ref_month}. "
+                f"Call self._compute_spi(month_scale={month_scale}) first, "
+                f"or initialize the DSO with a larger K."
+            )
+
+        params = self.fit_params[month_scale - 1, ref_month - 1, :]
+
+        if base_func in [f_spi, f_spei]:
+            a, loc, scale_param = params
+            p = gamma.cdf(value, a, loc=loc, scale=scale_param)
+            return norm.ppf(p)
+
+        elif base_func == f_zscore:
+            mean, std = params
+            return (value - mean) / std
+
+        elif base_func == f_kde:
+            raise NotImplementedError(
+                "native_to_spi is not yet implemented for f_kde. "
+                "KDE requires storing the fitted gaussian_kde object, "
+                "which is not currently saved as numerical parameters in fit_params."
+            )
+
+        else:
+            raise ValueError(f"Unknown calculation_method: {base_func}")
+
+    def spi_to_native(self, spi_value, month_scale, ref_month):
+        """
+        Convert SPI/SQI/SPEI etc to  native units via the fitted distribution stored at calibration time.
+
+        Analytical counterpart to np.polyval(c2r_index[scale-1, month-1, :], spi_value):
+        uses the exact parameters of the fitted distribution (gamma for f_spi/f_spei,
+        mean+std for f_zscore), avoiding the polynomial approximation error of
+        c2r_index in the distribution tails.
+
+        Parameters
+        ----------
+        spi_value : float or array-like
+            SPI/SQI value(s) to convert.
+        month_scale : int
+            Accumulation scale (1..K).
+        ref_month : int
+            Reference month (1..12).
+
+        Returns
+        -------
+        float or ndarray
+            Native-unit value(s) corresponding to `spi_value` at the given scale
+            and reference month.
+
+        See Also
+        --------
+        native_to_spi : Inverse transform (native → SPI).
+        c2r_index : Polynomial approximation, retained for backward compatibility.
+        """
+        from functools import partial
+        from scipy.stats import norm, gamma
+        from drought_scan.utils.drought_indices import f_spi, f_spei, f_zscore, f_kde
+
+        method = self.calculation_method
+        base_func = method.func if isinstance(method, partial) else method
+
+        # Guard: ensure fit_params has been computed for the requested scale
+        if month_scale > self.fit_params.shape[0] or \
+                np.any(np.isnan(self.fit_params[month_scale - 1, ref_month - 1, :])):
+            raise ValueError(
+                f"fit_params not available for scale={month_scale}, month={ref_month}. "
+                f"Call self._compute_spi(month_scale={month_scale}) first, "
+                f"or initialize the DSO with a larger K."
+            )
+
+        params = self.fit_params[month_scale - 1, ref_month - 1, :]
+
+        if base_func in [f_spi, f_spei]:
+            a, loc, scale_param = params
+            p = norm.cdf(spi_value)
+            return gamma.ppf(p, a, loc=loc, scale=scale_param)
+
+        elif base_func == f_zscore:
+            mean, std = params
+            return spi_value * std + mean
+
+        elif base_func == f_kde:
+            raise NotImplementedError(
+                "spi_to_native not yet implemented for f_kde. "
+                "KDE requires storing the fitted gaussian_kde object, "
+                "which is not currently saved as numerical parameters."
+            )
+
+        else:
+            raise ValueError(f"Unknown calculation_method: {base_func}")
 
     def _spi_like_set_ensemble_mean(self):
         """
