@@ -411,12 +411,21 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
     """
     xbase, x, idmesi_all = _resolve_indices(prec, stride, m, m_cal, tb1, tb2)
 
+
+
     # --- Pre-allocate output ---
     spi = np.full_like(x, np.nan, dtype=float)
     finite_x = np.isfinite(x)
     finite_xbase = np.isfinite(xbase)
 
     # --- Optional log-transform ---
+    if log_transform and np.nanmin([np.nanmin(xbase), np.nanmin(x)]) <= 0:
+        warnings.warn(
+            "f_kde: non-positive data detected → log_transform disabled ",
+            RuntimeWarning, stacklevel=2
+        )
+        log_transform = False
+
     if log_transform:
         with np.errstate(divide='ignore', invalid='ignore'):
             x_log = np.log(x)
@@ -525,3 +534,10 @@ def f_zscore(data, stride, m, m_cal, tb1, tb2,fit_params=None):
     zscore = (x - baseline_mean) / baseline_std if baseline_std != 0 else np.zeros_like(x)
 
     return idmesi_all, zscore, [baseline_mean, baseline_std], out_params
+
+#  Domain requirements  (dominio della distribuzione, non della classe)
+# ===================================================================
+f_spi.requires_positive    = True    # Gamma → (0, +∞)
+f_spei.requires_positive   = False   # Pearson III → ℝ
+f_kde.requires_positive    = False   # KDE → ℝ
+f_zscore.requires_positive = False   # z-score → ℝ

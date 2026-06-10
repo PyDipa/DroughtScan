@@ -104,6 +104,19 @@ class BaseDroughtAnalysis:
         if K <= 0:
             raise ValueError("`K` must be a positive integer.")
 
+        if getattr(calculation_method, "requires_positive", False):
+            finite = ts[np.isfinite(ts)]
+            if finite.size and np.any(finite < 0):
+                frac_neg = np.mean(finite < 0)
+                raise ValueError(
+                    f"Negative distribution detected ({frac_neg:.0%} of values < 0). "
+                    f"{calculation_method.__name__} (Gamma) is defined only on positive, "
+                    f"right-skewed data. Re-run with calculation_method=f_spei "
+                    f"(Pearson III) or calculation_method=f_kde for real-valued "
+                    f"variables such as the P-PET balance."
+                )
+
+
         self.ts = ts
         self.m_cal = m_cal
         self.K = K
@@ -215,7 +228,7 @@ class BaseDroughtAnalysis:
     # =====================================================================
     # ▸ STANDARD Methods
     # =====================================================================
-    def _compute_spi(self, month_scale,fit_params=None):
+    def _compute_spi_old(self, month_scale,fit_params=None):
         """
         Calculate SPI for a specific temporal scale, optionally using precomputed gamma parameters.
 
@@ -263,6 +276,8 @@ class BaseDroughtAnalysis:
                     extra = np.full((n_extra, 12, n_params), np.nan)
                     self.fit_params = np.concatenate([self.fit_params, extra], axis=0)
                 self.fit_params[month_scale - 1, ref_month - 1, :] = params
+
+
             else:
                 # USE SAVED PARAMS
                 # _compute_spi acts as a transparent dispatcher: it extracts the
@@ -288,7 +303,83 @@ class BaseDroughtAnalysis:
             c2rspi[ref_month - 1, :] = coeff.copy()
         return Spi_ts,c2rspi
 
-    def _calculate_spi_like_set(self,fit_params=None):
+    def _compute_spi(self, month_scale, fit_params=None):
+        """
+        Calculate SPI for a specific temporal scale, optionally using precomputed parameters.
+
+        Args:
+            month_scale (int): Temporal scale for SPI (e.g., SPI-3, SPI-6).
+            fit_params (dict, optional): Precomputed parameters keyed by month (1-12).
+                Structure depends on the calculation_method (tuple for f_spi/f_spei,
+                dict for f_kde, list for f_zscore). If None, fitted from scratch.
+
+        Returns:
+            tuple:
+                - ndarray: SPI time series for the given scale, with NaN for undefined values.
+                - ndarray: c2r coefficients (12 months x {4|2} columns).
+
+        Note:
+            f_spi/f_spei/f_zscore parameters (numeric) are stored in the numeric
+            array `self.fit_params`. f_kde parameters (a dict holding a live
+            gaussian_kde object) are stored separately in `self.fit_params_kde`,
+            keyed by (month_scale, ref_month), to keep the numeric array — and its
+            np.isnan-based guards in native_to_spi/spi_to_native — intact.
+        """
+        Spi_ts = np.full_like(self.ts, np.nan, dtype=float)
+
+        method = self.calculation_method
+        base_func = method.func if isinstance(method, partial) else method
+
+        if base_func in [f_spi, f_spei, f_kde]:
+            c2rspi = np.zeros((12, 4), dtype=float)
+            way = 1
+        elif base_func == f_zscore:
+            c2rspi = np.zeros((12, 2), dtype=float)
+            way = 2
+
+        for ref_month in range(1, 13):
+            if fit_params is None:
+                indices, spi_values, coeff, params = self.calculation_method(
+                    self.ts, month_scale, ref_month, self.m_cal,
+                    self.start_baseline_year, self.end_baseline_year
+                )
+
+                # --- Store fitted parameters ---
+                if base_func == f_kde:
+                    # KDE returns a dict with a live gaussian_kde object: keep it OUT
+                    # of the numeric fit_params array (np.isnan/float dtype would break).
+                    self.fit_params_kde[(month_scale, ref_month)] = params
+                else:
+                    # Numeric params (f_spi/f_spei: 3 floats; f_zscore: 2 floats).
+                    # Auto-expand if the requested scale exceeds the original K
+                    # allocation (e.g. from deficit_from_spi or plot_trends).
+                    if month_scale > self.fit_params.shape[0]:
+                        n_extra = month_scale - self.fit_params.shape[0]
+                        n_params = self.fit_params.shape[2]
+                        extra = np.full((n_extra, 12, n_params), np.nan)
+                        self.fit_params = np.concatenate([self.fit_params, extra], axis=0)
+                    self.fit_params[month_scale - 1, ref_month - 1, :] = params
+            else:
+                # USE SAVED PARAMS — transparent dispatcher: forwards the per-month
+                # params object as-is, type interpretation delegated to each method:
+                #   f_spi / f_spei : tuple (param1, loc, param2)
+                #   f_kde          : dict  {'kde': ..., 'bw_factor': ..., ...}
+                #   f_zscore       : list  [baseline_mean, baseline_std]
+                params = fit_params[ref_month]
+                indices, spi_values, coeff, _ = self.calculation_method(
+                    self.ts, month_scale, ref_month, self.m_cal,
+                    self.start_baseline_year, self.end_baseline_year,
+                    fit_params=params
+                )
+
+            if indices is None or spi_values is None or coeff is None:
+                raise ValueError(f"calculation_method returned invalid results for ref_month={ref_month}.")
+
+            Spi_ts[indices] = spi_values.copy()
+            c2rspi[ref_month - 1, :] = coeff.copy()
+        return Spi_ts, c2rspi
+
+    def _calculate_spi_like_set_old(self,fit_params=None):
         """
        Compute SPI values for all temporal scales up to K, optionally using precomputed gamma parameters.
 
@@ -317,6 +408,8 @@ class BaseDroughtAnalysis:
             c2rspi = np.zeros((self.K, 12, 2), dtype=float)
             self.fit_params = np.full((self.K, 12, 2), np.nan)  # (shape, loc, scale)
 
+        self.fit_params_kde = {}  #specific store for f_kde: {(scale, month): params_dict}
+
         # Calculate SPI for each temporal scale
         for k in range(1, self.K + 1):
             if fit_params is None:
@@ -324,6 +417,48 @@ class BaseDroughtAnalysis:
             else:
                 params = fit_params[k]
                 Spi_ts, coeff = self._compute_spi(k,fit_params=params)
+            spiset[k - 1, :] = Spi_ts.copy()
+            c2rspi[k - 1, :, :] = coeff.copy()
+        return spiset, c2rspi
+
+    def _calculate_spi_like_set(self, fit_params=None):
+        """
+       Compute SPI values for all temporal scales up to K, optionally using precomputed parameters.
+
+       Args:
+        fit_params (dict, optional): Nested dict {k: {m: params}} where k is the
+        temporal scale (1..K) and m the reference month (1-12). If None, parameters
+        are estimated from scratch at each scale.
+
+       Returns:
+           tuple:
+               - ndarray: SPI values arranged as (scale, time).
+               - ndarray: c2r coefficients (K, 12, {4|2}).
+        """
+        # Initialize SPI set and coefficients
+        spiset = np.full((self.K, len(self.ts)), np.nan, dtype=float)
+        method = self.calculation_method
+        base_func = method.func if isinstance(method, partial) else method
+
+        if base_func in [f_spi, f_spei, f_kde]:
+            c2rspi = np.zeros((self.K, 12, 4), dtype=float)
+            self.fit_params = np.full((self.K, 12, 3), np.nan)  # (shape, loc, scale)
+        elif base_func == f_zscore:
+            c2rspi = np.zeros((self.K, 12, 2), dtype=float)
+            self.fit_params = np.full((self.K, 12, 2), np.nan)  # (mean, std)
+
+        # Opaque store for non-numeric fit params (currently f_kde only).
+        # Always allocated → exists for every method (empty when unused), so no
+        # attribute appears/disappears depending on calculation_method.
+        self.fit_params_kde = {}
+
+        # Calculate SPI for each temporal scale
+        for k in range(1, self.K + 1):
+            if fit_params is None:
+                Spi_ts, coeff = self._compute_spi(k)
+            else:
+                params = fit_params[k]
+                Spi_ts, coeff = self._compute_spi(k, fit_params=params)
             spiset[k - 1, :] = Spi_ts.copy()
             c2rspi[k - 1, :, :] = coeff.copy()
         return spiset, c2rspi
@@ -381,8 +516,8 @@ class BaseDroughtAnalysis:
                 np.any(np.isnan(self.fit_params[month_scale - 1, ref_month - 1, :])):
             raise ValueError(
                 f"fit_params not available for scale={month_scale}, month={ref_month}. "
-                f"Call self._compute_spi(month_scale={month_scale}) first, "
-                f"or initialize the DSO with a larger K."
+                f"Note: this method is not supported with f_kde. "
+                f"Initialize the Drought Scan object with calculation_method=f_spi (or f_spei)."
             )
 
         params = self.fit_params[month_scale - 1, ref_month - 1, :]
@@ -447,10 +582,9 @@ class BaseDroughtAnalysis:
                 np.any(np.isnan(self.fit_params[month_scale - 1, ref_month - 1, :])):
             raise ValueError(
                 f"fit_params not available for scale={month_scale}, month={ref_month}. "
-                f"Call self._compute_spi(month_scale={month_scale}) first, "
-                f"or initialize the DSO with a larger K."
+                f"Note: this method is not supported with f_kde. "
+                f"Initialize the Drought Scan object with calculation_method=f_spi (or f_spei)."
             )
-
         params = self.fit_params[month_scale - 1, ref_month - 1, :]
 
         if base_func in [f_spi, f_spei]:
@@ -4422,7 +4556,139 @@ class Balance(BaseDroughtAnalysis):
         # ts = np.nanmean(Pgrid, axis=(1, 2)) - np.nanmean(ETgrid, axis=(1, 2))
 
 
-        return Pgrid, ETgrid, m_cal, ts,Lat_common, Lon_common
+        return Pgrid, ETgrid, m_cal, ts,Lat_common, Lon_common,day1
+
+    def set_optimal_SIDI(self, optimal_k, optimal_weight_index, overwrite=False):
+        """
+        Recalculate SIDI using the optimal K (obtained via analyze_correlation with Streamflow).
+        Optionally store optimal_k (and optimal_weight_index) on this instance.
+
+        Args:
+            optimal_k (int): optimal K determined by analyze_correlation(streamflow).
+            optimal_weight_index (int): specific weight index to track/store (0-based).
+            overwrite (bool): if True, updates self.SIDI and stores self.optimal_k
+                              and self.optimal_weight_index on the instance.
+
+        Returns:
+            np.ndarray: SIDI array (time x n_weightings) computed with optimal_k.
+        """
+        if optimal_k is None or optimal_k < 0:
+            raise ValueError("optimal_k must be a positive integer obtained by SIDI vs SQI1 optimitation (use 'analize_correlation' method to estimate optima_k.")
+
+        if optimal_weight_index is None or optimal_weight_index < 0 or  optimal_weight_index >= 5:
+            raise ValueError(
+                "optimal_weight index must be positive integers obtained via SIDI vs SQI1 optimization")
+        # ---- compute SIDI with the requested K (no side effects yet)
+        SIDI_new = self.recalculate_SIDI(K=optimal_k)
+
+        if overwrite:
+            self.SIDI = SIDI_new
+            self.optimal_k = optimal_k
+            self.optimal_weight_index = int(optimal_weight_index)
+
+        return SIDI_new
+
+    def set_optimal_SIDI_seasonal(self, seasonal_corr, agg='quarter',
+                                  seasons=None, overwrite=False):
+        """
+        Recalculate SIDI using season-specific optimal K and weight_index
+        (obtained via ``analyze_correlation_seasonal``).
+
+        The method builds a "mosaic" SIDI where each month is computed with
+        the optimal parameters of its season, then standardised per-season
+        on the baseline.
+
+        When ``overwrite=True`` the 1-D seasonal SIDI is tiled to shape
+        ``(time, 5)`` so that downstream consumers expecting
+        ``self.SIDI[:, weight_index]`` keep working transparently
+        (every column holds the same optimised series).
+
+        Args:
+            seasonal_corr (dict): Output of ``analyze_correlation_seasonal()``.
+                Each key is a season name, each value contains at least
+                ``'best_k'`` and ``'col_best_weight'``.
+            agg (str): Aggregation scheme — **must match** the one used in
+                ``analyze_correlation_seasonal()``.
+                Options: 'quarter', 'semiannual', 'four-monthly', 'monthly', 'custom'.
+            seasons (dict, optional): Required when ``agg='custom'``.
+                ``{season_name: [month_ints]}``.
+            overwrite (bool): If True, updates ``self.SIDI`` (tiled to ``(time, 5)``)
+                and stores ``self.seasonal_params`` on the instance.
+
+        Returns:
+            np.ndarray: SIDI array ``(time,)`` with season-specific optimization.
+        """
+        if seasons is not None:
+            agg = 'custom'
+
+        seasons_dict = self._build_seasons_dict(agg, seasons)
+
+        # Validate coverage
+        missing = [s for s in seasons_dict if s not in seasonal_corr]
+        if missing:
+            print(f"Warning: seasons {missing} not found in seasonal_corr; "
+                  f"corresponding months will be NaN in SIDI.")
+
+        SIDI_seasonal = self.recalculate_SIDI_seasonal(seasonal_corr, seasons_dict)
+
+        if overwrite:
+            # tile to (time, 5) for backward compatibility with
+            # consumers that do self.SIDI[:, weight_index]
+            self.SIDI = np.tile(SIDI_seasonal[:, np.newaxis], (1, 5))
+            print("Note: SIDI overwritten with seasonal optimization. "
+                  "All 5 weight columns are identical (season-specific K and weight already applied).")
+            # ... rest of seasonal_params assignment
+            self.seasonal_params = {
+                'agg': agg,
+                'seasons': seasons_dict,
+                'config': {
+                    name: {'best_k': v['best_k'],
+                           'col_best_weight': v['col_best_weight']}
+                    for name, v in seasonal_corr.items()
+                    if name in seasons_dict
+                }
+            }
+
+        else:
+            return SIDI_seasonal
+
+    def plot_covariates(self, streamflow,year_ext=None, split_plot=False):
+        """
+        Plot the covariate relationship between the optimized SIDI and a Streamflow-based index.
+
+        Parameters
+        ----------
+        streamflow : BaseDroughtAnalysis or Streamflow
+            Streamflow object providing SQI1 or similar indices.
+        year_ext : tuple of int, optional
+            (start_year, end_year) to restrict the x-axis.
+        split_plot : bool, optional
+            If True, produces separate figures for each panel. Default False.
+
+        Raises
+        ------
+        TypeError
+            If streamflow is not a BaseDroughtAnalysis instance, or if the
+            Precipitation object has not been optimized.
+        """
+        if not isinstance(streamflow, BaseDroughtAnalysis):
+            raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
+
+        if self.is_seasonal_sidi:
+            print(f"Note: SIDI is seasonally optimized — weight_index is ignored (all columns identical).")
+            weight_index = None  # colonna 0, colore rosso
+        elif hasattr(self, 'optimal_weight_index'):
+            weight_index = self.optimal_weight_index
+        else:
+            raise TypeError(
+                "The Precipitation object must be optimized with "
+                "'set_optimal_SIDI()' or 'set_optimal_SIDI_seasonal()' OVERWRITE=True "
+                "before calling this function."
+            )
+
+        plot__covariates(self, streamflow=streamflow, weight_index=weight_index,
+                         year_ext=year_ext, split_plot=split_plot)
+
 
 class Temperature(BaseDroughtAnalysis):
     def __init__(self, start_baseline_year, end_baseline_year,
