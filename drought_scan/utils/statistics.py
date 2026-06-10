@@ -1106,3 +1106,54 @@ def _rolling_trend_analysis(var, window=60, significance=0.05):
         'p_value': p_values,
         'delta': deltas
     }
+
+def _rolling_phase_test(DSO, window=60, alpha=0.05, min_valid=None):
+    """
+    Rolling significance test for wetting/drying phases on the 1-month SPI series.
+
+    A phase is a sustained departure of monthly anomalies from zero (a LEVEL),
+    not a slope. Over each W-month window the mean of SPI1 is tested against zero
+    with a one-sample t-test. The test is applied to SPI1 (approximately serially
+    independent), NOT to the CDN (a cumulative/integrated series on which trend
+    tests are spurious). Results are aligned to the LAST month of each window,
+    matching the CDN time axis.
+
+    Args:
+        spi1 (ndarray): 1-month SPI-like series (e.g. DSO.spi_like_set[0]).
+        window (int): window length in months (= accumulation scale W).
+        alpha (float): two-sided significance level.
+        min_valid (int, optional): min number of non-NaN months to run the test.
+            Defaults to window // 2.
+
+    Returns:
+        dict aligned to `spi1`:
+            'phase'   : int  (+1 significant wetting, -1 significant drying, 0 otherwise)
+            'mean'    : float (mean SPI1 over the window, NaN where undefined)
+            'p_value' : float (two-sided p-value, NaN where undefined)
+    """
+    from scipy.stats import ttest_1samp
+    spi1 = self.spi_like_set[0]
+    n = len(spi1)
+    if min_valid is None:
+        min_valid = window // 2
+
+    phase = np.zeros(n, dtype=int)
+    mean_w = np.full(n, np.nan)
+    pval = np.full(n, np.nan)
+
+    for i in range(n - window + 1):
+        w = spi1[i:i + window]
+        w = w[~np.isnan(w)]  # scarta i gap
+        j = i + window - 1  # ultimo mese della finestra
+        if len(w) < min_valid:
+            continue
+        m = w.mean()
+        _, p = ttest_1samp(w, 0.0)  # H0: media SPI1 = 0 (nessuna tendenza netta)
+        mean_w[j] = m
+        pval[j] = p
+        if p < alpha:
+            phase[j] = 1 if m > 0 else -1
+
+    return {'phase': phase, 'mean': mean_w, 'p_value': pval}
+
+
