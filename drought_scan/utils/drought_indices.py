@@ -421,7 +421,7 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
     # --- Optional log-transform ---
     if log_transform and np.nanmin([np.nanmin(xbase), np.nanmin(x)]) <= 0:
         warnings.warn(
-            "f_kde: non-positive data detected → log_transform disabled ",
+            f"f_kde: zeros or non-positive data detected in month {m} - month-scale {stride} → log_transform disabled ",
             RuntimeWarning, stacklevel=2
         )
         log_transform = False
