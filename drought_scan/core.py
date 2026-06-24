@@ -3071,7 +3071,7 @@ class BaseDroughtAnalysis:
 
     def spatial_maps(self, month_scales =None, timestamp=None, K=None):
         """
-        Compute gridded SPI at selected temporal scales,SIDI and Trends in CDN for each grid point in Pgrid.
+        Compute gridded SPI at selected temporal scales and SIDI for each grid point in Pgrid.
 
         Args:
             month_scales (list of int, optional): Temporal scales for SPI maps. Defaults to [1, 3, 6, 12, 18, 24].
@@ -3123,7 +3123,7 @@ class BaseDroughtAnalysis:
         n_cores = cpu_count()
         t_per_point = 1.4  # secondi stimati dal benchmark
         estimated_min = (n_valid * t_per_point / n_cores) / 60
-        print(f"compute_spatial_sidi: {n_valid}/{n_rows * n_cols} valid grid points.")
+        print(f"computed spatial SIDI (D) and SPIs: {n_valid}/{n_rows * n_cols} valid grid points.")
         print(f"Running on {n_cores} cores — may take up to {estimated_min:.0f} min.")
 
         # --- parallel computation ---
@@ -3186,6 +3186,65 @@ class BaseDroughtAnalysis:
 
     @staticmethod
     def _process_grid_point_trends(ts_ij, m_cal, K, start_baseline_year, end_baseline_year,
+                                   calculation_method, windows, t_idx):
+        """
+        Standalone computation of CDN and std_to_mm for a single grid point — picklable by joblib.
+
+        Returns:
+            CDN_ij    : ndarray (n_months,) — cumulative deviation from normal (cumsum of SPI-1)
+            std_to_mm : float — mm equivalent of one standardized unit, derived from pixel-level fit
+            error     : str or None
+        """
+
+
+        from drought_scan.utils.drought_indices import baseline_indices
+        try:
+            # --- SPI-1 per CDN (invariato) ---
+            Spi1 = np.full(len(ts_ij), np.nan, dtype=float)
+            for ref_month in range(1, 13):
+                indices, spi_values, coeff, _ = calculation_method(
+                    ts_ij, 1, ref_month, m_cal, start_baseline_year, end_baseline_year
+                )
+                if indices is not None and spi_values is not None:
+                    Spi1[indices] = spi_values.copy()
+
+            tb1_id, _ = baseline_indices(m_cal, start_baseline_year, end_baseline_year)
+            CDN_ij = np.nancumsum(Spi1)
+            CDN_ij[:tb1_id] = np.nan
+
+            # --- deficit_from_spi per ogni window ---
+            months = m_cal[:, 0].astype(int)
+            deficit_at_tidx = {}
+
+            for w in windows:
+                spi_w = np.full(len(ts_ij), np.nan, dtype=float)
+                c2r_w = None
+
+                for ref_month in range(1, 13):
+                    indices, spi_values, coeff, _ = calculation_method(
+                        ts_ij, w, ref_month, m_cal, start_baseline_year, end_baseline_year
+                    )
+                    if indices is not None and spi_values is not None:
+                        spi_w[indices] = spi_values.copy()
+                        if c2r_w is None:
+                            c2r_w = np.full((12, len(coeff)), np.nan, dtype=float)
+                        c2r_w[ref_month - 1, :] = coeff.copy()
+
+                spi_val = spi_w[t_idx]
+                if c2r_w is None or np.isnan(spi_val):
+                    deficit_at_tidx[w] = np.nan
+                else:
+                    m = months[t_idx] - 1
+                    raw = float(np.polyval(c2r_w[m], spi_val) - np.polyval(c2r_w[m], 0.0))
+                    deficit_at_tidx[w] = 0.0 if abs(spi_val) < 0.5 else raw
+
+            return CDN_ij, deficit_at_tidx, None
+
+        except Exception as e:
+            return None, None, str(e)
+
+    @staticmethod
+    def _process_grid_point_trends_old(ts_ij, m_cal, K, start_baseline_year, end_baseline_year,
                                    calculation_method):
         """
         Standalone computation of CDN and std_to_mm for a single grid point — picklable by joblib.
@@ -3195,7 +3254,7 @@ class BaseDroughtAnalysis:
             std_to_mm : float — mm equivalent of one standardized unit, derived from pixel-level fit
             error     : str or None
         """
-        from drought_scan.utils.drought_indices import get_month_indices, baseline_indices
+        from drought_scan.utils.drought_indices import  baseline_indices
         try:
             # --- SPI-1 for all 12 months ---
             Spi1 = np.full(len(ts_ij), np.nan, dtype=float)
@@ -3255,6 +3314,9 @@ class BaseDroughtAnalysis:
         from joblib import Parallel, delayed, cpu_count
         from drought_scan.utils.statistics import _rolling_trend_analysis
 
+        if hasattr(self, 'trend_grid'):
+            del self.trend_grid
+
         if windows is None:
             windows = [24, 36, 60, 120]
 
@@ -3290,18 +3352,21 @@ class BaseDroughtAnalysis:
         n_valid = len(valid_ij)
 
         n_cores = cpu_count()
-        t_per_point = 0.5  # SPI-1 only, lighter than full spatial_maps
+        t_per_point = 2.5  # SPI-1 only, lighter than full spatial_maps
         estimated_min = (n_valid * t_per_point / n_cores) / 60
         print(f"compute_spatial_trends: {n_valid}/{n_rows * n_cols} valid grid points.")
         print(f"Running on {n_cores} cores — may take up to {estimated_min:.0f} min.")
 
         # --- parallel computation ---
+        import matplotlib.pyplot as plt
+        plt.close('all')  # ← aggiungi qui, prima di Parallel(...)
         results = Parallel(n_jobs=-1)(
             delayed(self._process_grid_point_trends)(
                 self.Pgrid[:, i, j],
                 self.m_cal, self.K,
                 self.start_baseline_year, self.end_baseline_year,
-                self.calculation_method
+                self.calculation_method,
+                windows, t_idx
             )
             for (i, j) in valid_ij
         )
@@ -3312,7 +3377,7 @@ class BaseDroughtAnalysis:
         n_none = 0
         errors = {}
         for idx, (i, j) in enumerate(valid_ij):
-            CDN_ij, std_to_mm, err = results[idx]
+            CDN_ij, deficit_at_tidx, err = results[idx]
             if CDN_ij is None:
                 n_none += 1
                 errors[(i, j)] = err
@@ -3320,9 +3385,9 @@ class BaseDroughtAnalysis:
 
             for w in windows:
                 R = _rolling_trend_analysis(CDN_ij, window=w, significance=0.05)
-                delta = R['delta'][t_idx]
+                deficit = deficit_at_tidx.get(w, np.nan)
                 trend = R['trend'][t_idx]
-                trend_grid[w][i, j] = delta * std_to_mm if trend != 0 else 0.0
+                trend_grid[w][i, j] = deficit if not np.isnan(deficit) else 0.0
 
         print(f"compute_spatial_trends: 100% — done. ({n_none}/{n_valid} points failed)")
         if errors:
@@ -3332,6 +3397,7 @@ class BaseDroughtAnalysis:
                 print(f"  {n} points: {e}")
 
         self.trend_grid = trend_grid
+
     # =====================================================================
     # ▸ VISUALIZATION
     # =====================================================================
