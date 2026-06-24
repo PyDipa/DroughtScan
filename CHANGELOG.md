@@ -1,4 +1,86 @@
 # Changelog
+## [3.6.1] - 2026 - 06 - 24
+
+- 
+### Added
+- `fit_params`: new attribute storing the fitted-distribution parameters
+  per (scale, reference_month), populated during calibration in
+  `_compute_spi`. Shape is (K, 12, 3) for gamma-based methods
+  (f_spi, f_spei) and (K, 12, 2) for f_zscore. Auto-expanded to larger
+  scales when `_compute_spi` is invoked on the fly (e.g. from
+  `deficit_from_spi` or `plot_trends` for windows > K).
+- `spi_to_native(spi_value, month_scale, ref_month)` and
+  `native_to_spi(value, month_scale, ref_month)`: analytical SPI/native
+  conversions via the fitted distribution stored in `fit_params`
+  (gamma for f_spi/f_spei, mean+std for f_zscore). Numerically equivalent
+  to the existing `c2r_index` polynomial approximation (max error ≈ 0.03%
+  over SPI ∈ [-3, +3]), provided as a cleaner API for future use.
+  `f_kde` not yet supported (raises NotImplementedError).
+- `_rolling_phase_test(window, alpha, min_valid)` in statistics: rolling
+  one-sample t-test on the 1-month SPI series to detect significant
+  wetting/drying phases. Complements `find_trends` (slope-based on CDN)
+  by testing the LEVEL of the anomaly on a non-integrated series.
+  Returns 'phase' (+1/-1/0), 'mean', and 'p_value' aligned to the last
+  month of each window. P-values are approximate (assumes serial
+  independence of SPI1).
+
+### Changed
+- `native_to_spi` / `spi_to_native` report a clearer error when invoked with
+  `calculation_method=f_kde`, directing users to `f_spi` / `f_spei`.
+- `plot_trends`: deficit bars are now masked by SPI magnitude (|SPI_w| < 0.5)
+  rather than by `find_trends` on CDN. The previous mask was statistically
+  fragile because trend tests on cumulative series (CDN) behave like trend
+  tests on random walks. The new mask operates on the standardized SPI
+  series at the window scale, non-integrated, where magnitude thresholds
+  carry direct climatological meaning. For rigorous level-based phase
+  detection, use `_rolling_phase_test` instead.
+
+### Fixed
+- `f_kde` no longer raises `TypeError: ... not 'dict'` during DroughtScan/Balance
+  initialization, nor on the `plot_trends(show_spi=True)` and deficit code paths.
+  Its fitted parameters (a dict holding a live `gaussian_kde` object) are now kept
+  in a dedicated `fit_params_kde` store instead of being forced into the numeric
+  `fit_params` array.
+- `spatial_trends`: il calcolo del deficit/surplus per pixel ora usa la
+  trasformazione inversa gamma mese-specifica (`polyval` su `c2r`),
+  in luogo dell'approssimazione lineare scalare `std_to_mm`. Il risultato
+  è coerente con `deficit_from_spi` e con `plot_cdn_trends`.
+- `spatial_trends`: aggiunta soglia `|SPI| < 0.5` per azzerare anomalie
+  meteorologicamente trascurabili, allineata al comportamento di
+  `plot_cdn_trends`.
+- `spatial_trends`: invalidazione esplicita di `trend_grid` a ogni chiamata;
+  rilanci con `windows` custom non lasciano più stato residuo.
+- `spatial_trends`: aggiunto `plt.close('all')` prima di `Parallel` per
+  evitare `RuntimeError: main thread is not in main loop` in sessioni
+  interattive con matplotlib attivo.
+- `spatial_maps`: corretto import mancante di `generate_weights` nello
+  scope del metodo (era importata solo nel worker `_process_grid_point`).
+- `spatial_maps`: corretta docstring che indicava erroneamente il calcolo
+  dei trend CDN tra gli output del metodo.
+
+
+### Deprecated (planned)
+- `c2r_index`: polynomial approximation of the SPI inverse transform.
+  Future releases will gradually migrate internal usage to the analytical
+  methods `spi_to_native` and `native_to_spi` based on `fit_params`.
+  `c2r_index` remains the default in this release with no breaking change.
+  The polynomial approximation is numerically accurate (< 0.05% error
+  throughout the [-3, +3] SPI range for both gamma-fit and z-score
+  methods); the planned change is an architectural simplification, not
+  an accuracy improvement.
+
+### Documentation
+- `visualization_guide.md` §5: rewritten "Plot trends" subsection
+  reflecting the new behaviour (deficit bars in physical units, auto
+  unit inference, returned dict). New subsection "Cumulative
+  deficit/surplus in physical units" documenting `deficit_from_spi`
+  and `volume_anomaly_rolling`.
+- `user_guide.md` §7 (new): "Trends and deficit quantification on the
+  CDN". Workflow-oriented introduction framing the two deficit methods
+  as complementary perspectives (statistical rarity vs physical water
+  balance). Subsequent sections renumbered (§7→§8 ... §11→§12).
+
+
 ## [3.5.0] - 2026 - 05 - 28
 
 ### Added
