@@ -3312,7 +3312,6 @@ class BaseDroughtAnalysis:
             SIDI_grid and SPI_grid are invalidated — rerun spatial_maps for consistency.
         """
         from joblib import Parallel, delayed, cpu_count
-        from drought_scan.utils.statistics import _rolling_trend_analysis
 
         if hasattr(self, 'trend_grid'):
             del self.trend_grid
@@ -3352,14 +3351,14 @@ class BaseDroughtAnalysis:
         n_valid = len(valid_ij)
 
         n_cores = cpu_count()
-        t_per_point = 2.5  # SPI-1 only, lighter than full spatial_maps
+        t_per_point = 1.5  # SPI-1 only, lighter than full spatial_maps
         estimated_min = (n_valid * t_per_point / n_cores) / 60
         print(f"compute_spatial_trends: {n_valid}/{n_rows * n_cols} valid grid points.")
         print(f"Running on {n_cores} cores — may take up to {estimated_min:.0f} min.")
 
         # --- parallel computation ---
         import matplotlib.pyplot as plt
-        plt.close('all')  # ← aggiungi qui, prima di Parallel(...)
+        plt.close('all')  # to avoid potential ram saturation
         results = Parallel(n_jobs=-1)(
             delayed(self._process_grid_point_trends)(
                 self.Pgrid[:, i, j],
@@ -3384,9 +3383,7 @@ class BaseDroughtAnalysis:
                 continue
 
             for w in windows:
-                R = _rolling_trend_analysis(CDN_ij, window=w, significance=0.05)
                 deficit = deficit_at_tidx.get(w, np.nan)
-                trend = R['trend'][t_idx]
                 trend_grid[w][i, j] = deficit if not np.isnan(deficit) else 0.0
 
         print(f"compute_spatial_trends: 100% — done. ({n_none}/{n_valid} points failed)")
