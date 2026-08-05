@@ -44,7 +44,8 @@ All results are stored as spatial arrays in the DSO at a target timestamp.
 ds.spatial_maps(
     month_scales=None,
     timestamp=None,
-    K=None
+    K=None,
+    seasonal_params=None
 )
 ```
 
@@ -63,6 +64,14 @@ ds.spatial_maps(
 - `K` : int, optional  
   Maximum temporal scale. Overrides `ds.K` for this computation only.  
   After the method completes, `ds.K` is restored to its original value.
+
+- `seasonal_params` : dict, optional  
+  Output of `set_optimal_SIDI_seasonal`'s `ds.seasonal_params`. If provided, `K`
+  is automatically resolved to the `best_k` of the season containing `timestamp`
+  (or the last available timestamp), overriding any `K` passed explicitly.
+  A warning reports the suggested `weight_index` to use in `plot_spatial` for
+  consistency with the season-specific optimization.
+  See [§2.6 Using an optimized SIDI](#26-using-an-optimized-sidi) below.
 
 ---
 
@@ -138,14 +147,81 @@ sidi_equal = ds.SIDI_grid[:, :, 0]
 
 ---
 
+### 2.6 Using an optimized SIDI
+
+`spatial_maps` always computes SIDI for **all** weighting schemes at a given `K`.
+It has no automatic awareness of an optimization performed beforehand at the
+point-scale level (`set_optimal_SIDI` / `set_optimal_SIDI_seasonal`). There are
+three ways to align the spatial output with a known-optimal configuration,
+depending on your workflow.
+
+**A. You already know the optimal `K` and `weight_index`.**  
+No need to call any `set_optimal_*` method — just pass them directly:
+
+```python
+# Suppose a previous analyze_correlation() found K=8, weight_index=0 as optimal
+ds.spatial_maps(K=8)
+ds.plot_spatial(var='SIDI', weight_index=0)
+```
+
+**B. You called `set_optimal_SIDI(overwrite=True)` on the point-scale object.**  
+`self.SIDI` is now the optimized series, and `self.optimal_k` /
+`self.optimal_weight_index` are stored on the instance — but `spatial_maps`
+does **not** read them automatically (it still defaults to `ds.K`). If you call
+`spatial_maps()` without passing `K` explicitly, a warning reminds you of the
+mismatch:
+
+```python
+ds.set_optimal_SIDI(optimal_k=8, optimal_weight_index=0, overwrite=True)
+
+ds.spatial_maps()
+# UserWarning: self.optimal_k=8 is set (from set_optimal_SIDI) but spatial_maps
+# is using self.K=24. Pass K=self.optimal_k explicitly if you want spatial
+# consistency.
+
+# To make the spatial grid consistent with the optimized point-scale SIDI:
+ds.spatial_maps(K=ds.optimal_k)
+ds.plot_spatial(var='SIDI', weight_index=ds.optimal_weight_index)
+```
+
+**C. You called `set_optimal_SIDI_seasonal(overwrite=True)`.**  
+A single global `K` cannot replicate a seasonal mosaic, since each month may use
+a different optimal `K` and weighting scheme. Pass `ds.seasonal_params` instead
+of `K`: the method resolves the correct season-specific `K` from the `timestamp`
+you request.
+
+```python
+ds.set_optimal_SIDI_seasonal(seasonal_corr, agg='quarter', overwrite=True)
+
+ds.spatial_maps(timestamp=(1, 2022), seasonal_params=ds.seasonal_params)
+# UserWarning: Using seasonal K=10 for season 'winter' (month 1).
+# Plot with weight_index=1 for consistency.
+
+ds.plot_spatial(var='SIDI', weight_index=1)
+```
+
+> **Note**  
+> If both `K` and `seasonal_params` are passed together, `seasonal_params` wins
+> silently — the season-resolved `K` overrides the explicit `K`.
+
+---
+
 ## 3. `spatial_trends`
 
 ### 3.1 Purpose
 
-Computes pixel-wise **CDN trend maps** at a target timestamp. For each valid grid point,
-the method computes the CDN (cumulative sum of SPI-1) and applies rolling trend analysis
-over each specified window. The net change (delta) is converted to mm-equivalent using
-pixel-level calibration coefficients.
+Computes pixel-wise **deficit/surplus maps** at a target timestamp. For each valid
+grid point, the method computes the SPI-like index at each requested window scale
+and converts it to native units (mm) via the pixel-level reverse-gamma calibration
+(`c2r`), consistent with `deficit_from_spi`. This replaces an earlier linear
+approximation (`std_to_mm`) with the same non-linear, month-specific transform used
+elsewhere in the framework — see the [Changelog](../CHANGELOG.md), v3.6.1.
+
+Anomalies with `|SPI| < 0.5` at the target timestamp are set to `0.0`, filtering out
+meteorologically negligible deficits/surpluses, consistent with `plot_cdn_trends`.
+The CDN itself (cumulative sum of SPI-1) is still computed per pixel and stored
+internally, but rolling trend significance is no longer used to gate the output —
+the physical magnitude of the SPI-based anomaly is the sole criterion.
 
 ---
 
@@ -175,12 +251,18 @@ ds.spatial_trends(
 After running `spatial_trends`, the following attribute is added:
 
 - **`ds.trend_grid`** : dict `{window: ndarray (n_rows, n_cols)}`  
-  mm-equivalent net change over each window at the target timestamp.  
-  Pixels with no significant trend are set to `0.0`.
+  mm-equivalent deficit/surplus over each window at the target timestamp, derived
+  from the reverse-gamma transform of the SPI-like index (see §3.1).  
+  Pixels with `|SPI| < 0.5` at the target timestamp are set to `0.0`.
 
 The `spatial_timestamp` attribute is also updated. If it differs from a previously
 stored timestamp, `SIDI_grid` and `SPI_grid` are invalidated — rerun `spatial_maps`
 for consistency.
+
+> **Note**  
+> Every call to `spatial_trends` explicitly discards any previously stored
+> `trend_grid` before recomputing, so rerunning with different `windows` always
+> reflects a clean recalculation rather than a partial update.
 
 ---
 

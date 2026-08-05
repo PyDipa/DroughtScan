@@ -1,3 +1,27 @@
+## [3.6.2] - Unreleased
+
+### Added
+- `spatial_maps`: new `seasonal_params` argument. When passed the output of
+  `set_optimal_SIDI_seasonal`'s `self.seasonal_params`, `K` is automatically
+  resolved to the season-specific `best_k` matching the requested `timestamp`,
+  and a warning reports the corresponding `weight_index` to use for consistent
+  plotting. This allows the spatial SIDI grid to reflect a seasonal optimization
+  that a single global `K` cannot represent.
+- `spatial_maps`: emits a warning when `K` is left unspecified and `self.optimal_k`
+  is present on the instance (i.e. `set_optimal_SIDI` was called), signalling that
+  the spatial grid is being computed with `self.K` rather than the optimized value,
+  and pointing to `K=self.optimal_k` as the fix.
+
+### Documentation
+- `spatial_guide.md` §2.6 (new): "Using an optimized SIDI" — documents the three
+  supported workflows for aligning `spatial_maps` with a point-scale SIDI
+  optimization: explicit manual `K`, `set_optimal_SIDI` (with the new warning),
+  and `set_optimal_SIDI_seasonal` (via `seasonal_params`).
+- `spatial_guide.md` §3.1: updated to describe `spatial_trends`'s deficit/surplus
+  computation via the reverse-gamma transform (`deficit_from_spi`-consistent),
+  replacing the previous description based on the linear `std_to_mm`
+  approximation and rolling-trend significance gating.
+
 # Changelog
 ## [3.6.1] - 2026 - 06 - 24
 
