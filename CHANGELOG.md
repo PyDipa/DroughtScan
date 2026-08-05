@@ -12,6 +12,23 @@
   the spatial grid is being computed with `self.K` rather than the optimized value,
   and pointing to `K=self.optimal_k` as the fix.
 
+### Fixed
+- `spatial_trends` (`_process_grid_point_trends`): per-window deficit/surplus at
+  `t_idx` (feeding `trend_grid`, plotted via `plot_spatial(var='CDN', ...)`) is now
+  computed via the exact inverse of the fitted distribution (`norm.cdf(spi) ->
+  distribution.ppf`, same approach as `spi_to_native`), instead of the degree-3
+  polynomial (`c2r`) approximation. The polynomial fit extrapolates poorly in the
+  distribution tails, which was flattening/understating deficit magnitude at pixels
+  with strongly negative SPI at the requested `month_scale`. Dispatches to
+  `gamma.ppf` for `f_spi`, `pearson3.ppf` for `f_spei`, and the linear transform
+  for `f_zscore`; `f_kde` raises `NotImplementedError` (consistent with
+  `spi_to_native`). The `0.0` clip for `|SPI| < 0.5` is unchanged.
+- `native_to_spi` / `spi_to_native`: `f_spei` was incorrectly routed through
+  `gamma.cdf`/`gamma.ppf` using its Pearson III fit parameters (`c, loc, scale`
+  from `pearson3.fit`), mismatching distribution family and parameterization.
+  Now correctly uses `pearson3.cdf`/`pearson3.ppf`. `f_spi` (gamma) and `f_zscore`
+  were unaffected.
+
 ### Documentation
 - `spatial_guide.md` §2.6 (new): "Using an optimized SIDI" — documents the three
   supported workflows for aligning `spatial_maps` with a point-scale SIDI

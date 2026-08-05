@@ -470,9 +470,9 @@ class BaseDroughtAnalysis:
 
         Analytical counterpart to numerically inverting
         `np.polyval(c2r_index[scale-1, month-1, :], ...)`: uses the exact parameters
-        of the fitted distribution (gamma for f_spi/f_spei, mean+std for f_zscore),
-        avoiding the polynomial approximation error of `c2r_index`, which is
-        non-trivial in the distribution tails.
+        of the fitted distribution (gamma for f_spi, Pearson III for f_spei,
+        mean+std for f_zscore), avoiding the polynomial approximation error of
+        `c2r_index`, which is non-trivial in the distribution tails.
 
         Parameters
         ----------
@@ -505,7 +505,7 @@ class BaseDroughtAnalysis:
             (deprecated).
         """
         from functools import partial
-        from scipy.stats import norm, gamma
+        from scipy.stats import norm, gamma, pearson3
         from drought_scan.utils.drought_indices import f_spi, f_spei, f_zscore, f_kde
 
         method = self.calculation_method
@@ -522,9 +522,14 @@ class BaseDroughtAnalysis:
 
         params = self.fit_params[month_scale - 1, ref_month - 1, :]
 
-        if base_func in [f_spi, f_spei]:
+        if base_func == f_spi:
             a, loc, scale_param = params
             p = gamma.cdf(value, a, loc=loc, scale=scale_param)
+            return norm.ppf(p)
+
+        elif base_func == f_spei:
+            c, loc, scale_param = params
+            p = pearson3.cdf(value, c, loc=loc, scale=scale_param)
             return norm.ppf(p)
 
         elif base_func == f_zscore:
@@ -546,9 +551,9 @@ class BaseDroughtAnalysis:
         Convert SPI/SQI/SPEI etc to  native units via the fitted distribution stored at calibration time.
 
         Analytical counterpart to np.polyval(c2r_index[scale-1, month-1, :], spi_value):
-        uses the exact parameters of the fitted distribution (gamma for f_spi/f_spei,
-        mean+std for f_zscore), avoiding the polynomial approximation error of
-        c2r_index in the distribution tails.
+        uses the exact parameters of the fitted distribution (gamma for f_spi,
+        Pearson III for f_spei, mean+std for f_zscore), avoiding the polynomial
+        approximation error of c2r_index in the distribution tails.
 
         Parameters
         ----------
@@ -571,7 +576,7 @@ class BaseDroughtAnalysis:
         c2r_index : Polynomial approximation, retained for backward compatibility.
         """
         from functools import partial
-        from scipy.stats import norm, gamma
+        from scipy.stats import norm, gamma, pearson3
         from drought_scan.utils.drought_indices import f_spi, f_spei, f_zscore, f_kde
 
         method = self.calculation_method
@@ -587,10 +592,15 @@ class BaseDroughtAnalysis:
             )
         params = self.fit_params[month_scale - 1, ref_month - 1, :]
 
-        if base_func in [f_spi, f_spei]:
+        if base_func == f_spi:
             a, loc, scale_param = params
             p = norm.cdf(spi_value)
             return gamma.ppf(p, a, loc=loc, scale=scale_param)
+
+        elif base_func == f_spei:
+            c, loc, scale_param = params
+            p = norm.cdf(spi_value)
+            return pearson3.ppf(p, c, loc=loc, scale=scale_param)
 
         elif base_func == f_zscore:
             mean, std = params
@@ -3571,13 +3581,17 @@ class BaseDroughtAnalysis:
         Returns:
             CDN_ij         : ndarray (n_months,) — cumulative deviation from normal (cumsum of SPI-1)
             deficit_at_tidx: dict {window: float} — deficit/surplus in native units at t_idx,
-                             via reverse-gamma transform (see deficit_from_spi). NaN where SPI
-                             is undefined; 0.0 where |SPI| < 0.5.
+                             via the exact inverse of the fitted distribution (analogous to
+                             spi_to_native: norm.cdf(spi) -> distribution.ppf), not the
+                             polynomial (c2r) approximation. NaN where SPI is undefined;
+                             0.0 where |SPI| < 0.5.
             error          : str or None
         """
 
 
-        from drought_scan.utils.drought_indices import baseline_indices
+        from scipy.stats import norm, gamma, pearson3
+        from drought_scan.utils.drought_indices import baseline_indices, f_spi, f_spei, f_zscore, f_kde
+        base_func = calculation_method.func if isinstance(calculation_method, partial) else calculation_method
         try:
             # --- SPI-1 per CDN (invariato) ---
             Spi1 = np.full(len(ts_ij), np.nan, dtype=float)
@@ -3598,25 +3612,46 @@ class BaseDroughtAnalysis:
 
             for w in windows:
                 spi_w = np.full(len(ts_ij), np.nan, dtype=float)
-                c2r_w = None
+                params_w = {}
 
                 for ref_month in range(1, 13):
-                    indices, spi_values, coeff, _ = calculation_method(
+                    indices, spi_values, coeff, params = calculation_method(
                         ts_ij, w, ref_month, m_cal, start_baseline_year, end_baseline_year
                     )
                     if indices is not None and spi_values is not None:
                         spi_w[indices] = spi_values.copy()
-                        if c2r_w is None:
-                            c2r_w = np.full((12, len(coeff)), np.nan, dtype=float)
-                        c2r_w[ref_month - 1, :] = coeff.copy()
+                        if params is not None:
+                            params_w[ref_month] = params
 
                 spi_val = spi_w[t_idx]
-                if c2r_w is None or np.isnan(spi_val):
+                ref_month_t = int(months[t_idx])
+                if np.isnan(spi_val) or ref_month_t not in params_w:
                     deficit_at_tidx[w] = np.nan
+                elif abs(spi_val) < 0.5:
+                    deficit_at_tidx[w] = 0.0
                 else:
-                    m = months[t_idx] - 1
-                    raw = float(np.polyval(c2r_w[m], spi_val) - np.polyval(c2r_w[m], 0.0))
-                    deficit_at_tidx[w] = 0.0 if abs(spi_val) < 0.5 else raw
+                    p = norm.cdf(spi_val)
+                    fit = params_w[ref_month_t]
+                    if base_func == f_spi:
+                        a, loc, scale = fit
+                        raw_val = gamma.ppf(p, a, loc=loc, scale=scale)
+                        normal_val = gamma.ppf(0.5, a, loc=loc, scale=scale)
+                    elif base_func == f_spei:
+                        c, loc, scale = fit
+                        raw_val = pearson3.ppf(p, c, loc=loc, scale=scale)
+                        normal_val = pearson3.ppf(0.5, c, loc=loc, scale=scale)
+                    elif base_func == f_zscore:
+                        mean, std = fit
+                        raw_val = spi_val * std + mean
+                        normal_val = mean
+                    elif base_func == f_kde:
+                        raise NotImplementedError(
+                            "Exact deficit (spi_to_native-style) is not supported for f_kde; "
+                            "use f_spi/f_spei/f_zscore as calculation_method."
+                        )
+                    else:
+                        raise ValueError(f"Unknown calculation_method: {base_func}")
+                    deficit_at_tidx[w] = float(raw_val - normal_val)
 
             return CDN_ij, deficit_at_tidx, None
 
