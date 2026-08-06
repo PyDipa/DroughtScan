@@ -4103,7 +4103,7 @@ class Precipitation(BaseDroughtAnalysis):
             # self.Pgrid, self.m_cal, self.ts = self._import_data()
 
             self.ts, self.m_cal, self.Pgrid,self.Lat,self.Lon,self.day = import_netcdf_for_cumulative_variable(prec_path,['tp','rr','precipitation','prec','LAPrec1871',
-                                                                                               'pre','swe','SWE','sd','SD','sf','SF',
+                                                                                               'pre','swe','SWE','sd','SD','sf','SF','rain',
                                                                                                'sde','smlt'],self.shape,self.verbose,rolling=rolling)
         else:
             raise ValueError("Provide either ts and m_cal directly or specify data_path for a gridded precipitation data in NetCDF format along with the path of the river shapefile.")
