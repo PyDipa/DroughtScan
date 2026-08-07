@@ -28,6 +28,16 @@
   from `pearson3.fit`), mismatching distribution family and parameterization.
   Now correctly uses `pearson3.cdf`/`pearson3.ppf`. `f_spi` (gamma) and `f_zscore`
   were unaffected.
+- `spatial_trends`: `windows` now also accepts a single `int` (e.g. `windows=10`)
+  in addition to a list. Previously a bare int raised
+  `TypeError: 'int' object is not iterable` when building `trend_grid`.
+- `plot_spatial(var='CDN', ...)`: raises a clear `ValueError` when the requested
+  `trend_grid[month_scale]` is entirely NaN, instead of letting the error
+  propagate opaquely from matplotlib's colorbar (`pcolormesh` rejecting
+  non-finite `vmin`/`vmax`). This happens when `spatial_trends` was run with
+  `calculation_method=f_kde`, for which the exact deficit/native conversion is
+  not supported (see above) — the new message points to `f_spi`/`f_spei`/
+  `f_zscore` as the fix.
 
 ### Documentation
 - `spatial_guide.md` §2.6 (new): "Using an optimized SIDI" — documents the three

@@ -3733,6 +3733,8 @@ class BaseDroughtAnalysis:
 
         if windows is None:
             windows = [24, 36, 60, 120]
+        elif isinstance(windows, int):
+            windows = [windows]
 
         # --- resolve timestamp ---
         if timestamp is None:
@@ -3984,6 +3986,13 @@ class BaseDroughtAnalysis:
             if month_scale is None or month_scale not in self.trend_grid:
                 raise ValueError(f"Specify a valid month_scale. Available: {list(self.trend_grid.keys())}")
             data = self.trend_grid[month_scale]
+            if np.all(np.isnan(data)):
+                raise ValueError(
+                    "CDN grid is all-NaN: spatial_trends() could not compute exact "
+                    "deficit/native conversion for this calculation_method. If this "
+                    "instance uses calculation_method=f_kde, switch to f_spi, f_spei, "
+                    "or f_zscore and rerun spatial_trends()."
+                )
             label = f'deficit/surplus on {month_scale} months'
             val = np.nanmax(np.abs(data.flatten()))
             cdnbounds = np.linspace(-val,val, len(bounds))
