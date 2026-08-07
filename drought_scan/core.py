@@ -3444,6 +3444,7 @@ class BaseDroughtAnalysis:
             if hasattr(self, 'trend_grid'):
                 del self.trend_grid
         self.spatial_timestamp = new_timestamp
+        self.spatial_K = K
         self.K = _K_orig
 
     def spatial_maps_old(self, month_scales =None, timestamp=None, K=None):
@@ -3979,7 +3980,16 @@ class BaseDroughtAnalysis:
         # --- select data ---
         if var == 'SIDI':
             data = self.SIDI_grid[:, :, weight_index]
-            label = f'{self.SIDI_name} (weight {weight_index})'
+            weight_names = {
+                0: 'equal weights',
+                1: 'linear decreasing',
+                2: 'logarithmically decreasing',
+                3: 'linear increasing',
+                4: 'logarithmically increasing',
+            }
+            weight_name = weight_names.get(weight_index, f'weight {weight_index}')
+            K_label = self.spatial_K if hasattr(self, 'spatial_K') else self.K
+            label = f'{self.SIDI_name} (K={K_label}, {weight_name})'
             norm = b_norm
 
         elif var == 'CDN':

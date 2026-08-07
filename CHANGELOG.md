@@ -38,6 +38,12 @@
   `calculation_method=f_kde`, for which the exact deficit/native conversion is
   not supported (see above) — the new message points to `f_spi`/`f_spei`/
   `f_zscore` as the fix.
+- `plot_spatial(var='SIDI', ...)`: title now shows the temporal scale (`K=...`)
+  and the weighting scheme spelled out (e.g. "logarithmically decreasing")
+  instead of the bare `weight_index` int, matching the naming used in
+  `user_guide.md`. `spatial_maps` now stores the `K` it actually ran with in
+  `self.spatial_K`, since it resets `self.K` to its pre-call value on exit —
+  reading `self.K` alone at plot time could report a stale/wrong scale.
 
 ### Documentation
 - `spatial_guide.md` §2.6 (new): "Using an optimized SIDI" — documents the three
