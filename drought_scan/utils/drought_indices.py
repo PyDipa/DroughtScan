@@ -386,6 +386,106 @@ def f_spei(balance, stride, m, m_cal, tb1, tb2, fit_params=None):
 
 
 # ===================================================================
+#  KDE forward/reverse — shared exact CDF/PPF for f_kde
+# ===================================================================
+def kde_cdf(x, xb, h, qq, log_transform):
+    """
+    Evaluate the fitted KDE-based cumulative probability Hx at native value(s) x,
+    reusing an already-fitted baseline (xb, h) and zero-inflation fraction (qq).
+
+    Factors out the exact formula used internally by f_kde (mean of Gaussian
+    kernel CDFs centered on each baseline point, mixed with a point mass `qq`
+    at zero), so it can be reused both by f_kde itself and by
+    native_to_spi/_process_grid_point_trends to standardize a *new* value
+    against an already-fitted baseline, without refitting.
+
+    Args:
+        x (float or ndarray): native-unit value(s) to evaluate.
+        xb (ndarray): baseline sample used for the KDE fit (already
+            log-transformed if log_transform=True), as in out_params['xb'].
+        h (float): kernel bandwidth used for the fit, as in out_params['h'].
+        qq (float): fraction of exact zeros in the evaluation series at fit
+            time, as in out_params['qq'].
+        log_transform (bool): whether x must be log-transformed before
+            evaluation, as in out_params['log_transform'].
+
+    Returns:
+        float or ndarray: cumulative probability Hx (not clipped — matches
+        native_to_spi's f_spi/f_spei branches, which don't clip either).
+    """
+    x_arr = np.atleast_1d(np.asarray(x, dtype=float))
+    is_scalar = np.ndim(x) == 0
+
+    zero_mask = (x_arr == 0)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        xfull = np.log(x_arr) if log_transform else x_arr
+    finite_mask = np.isfinite(xfull)
+
+    Gx = np.full(x_arr.shape, np.nan, dtype=float)
+    Gx[finite_mask] = norm.cdf(
+        (xfull[finite_mask, None] - xb[None, :]) / h
+    ).mean(axis=1)
+
+    Hx = np.full(x_arr.shape, np.nan, dtype=float)
+    Hx[finite_mask] = qq + (1 - qq) * Gx[finite_mask]
+    Hx[zero_mask] = qq
+
+    return float(Hx[0]) if is_scalar else Hx
+
+
+def kde_ppf(Hx, xb, h, qq, log_transform, n_grid=2000):
+    """
+    Invert kde_cdf: cumulative probability Hx -> native-unit value(s).
+
+    There is no closed form for the inverse of a Gaussian-kernel CDF mixture,
+    so this builds a monotonic grid of native values spanning the baseline
+    (+/- 6 bandwidths — norm.cdf(6) is already within 1e-9 of 1, well beyond
+    the 3.17e-5 tail clip used throughout the library), evaluates kde_cdf on
+    the whole grid at once, and interpolates with np.interp (which clamps to
+    the grid's edge values outside its range, rather than extrapolating).
+    Values of Hx at or below the zero-inflation fraction `qq` map to exactly
+    0.0, matching the point mass at zero in the forward transform.
+
+    Args:
+        Hx (float or ndarray): cumulative probability value(s) to invert.
+        xb, h, qq, log_transform: same fitted-baseline parameters as kde_cdf.
+        n_grid (int): number of grid points used for the interpolation.
+
+    Returns:
+        float or ndarray: native-unit value(s).
+
+    Raises:
+        ValueError: if the baseline bandwidth h is not finite or not
+            positive (degenerate baseline — e.g. a single point, or
+            all-identical values).
+    """
+    if not np.isfinite(h) or h <= 0:
+        raise ValueError(
+            f"kde_ppf: invalid bandwidth h={h!r} (baseline too small or "
+            f"degenerate); cannot invert the KDE-based CDF."
+        )
+
+    Hx_arr = np.atleast_1d(np.asarray(Hx, dtype=float))
+    is_scalar = np.ndim(Hx) == 0
+
+    out = np.zeros(Hx_arr.shape, dtype=float)
+    above = Hx_arr > qq
+
+    if np.any(above):
+        lo = np.min(xb) - 6 * h
+        hi = np.max(xb) + 6 * h
+        grid = np.linspace(lo, hi, n_grid)
+        grid_Gx = norm.cdf((grid[:, None] - xb[None, :]) / h).mean(axis=1)
+        grid_Hx = qq + (1 - qq) * grid_Gx
+        grid_Hx = np.maximum.accumulate(grid_Hx)  # guard vs float non-monotonicity
+
+        vals = np.interp(Hx_arr[above], grid_Hx, grid)
+        out[above] = np.exp(vals) if log_transform else vals
+
+    return float(out[0]) if is_scalar else out
+
+
+# ===================================================================
 #  f_kde — Non-parametric KDE (for any data)
 # ===================================================================
 def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None):
@@ -406,8 +506,14 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
         tuple:
             - idmesi_all (ndarray): month indices for the full period.
             - spi (ndarray): standardized index values.
-            - coef (ndarray): degree-3 polyfit coefficients for inverse mapping.
+            - coef (ndarray): degree-3 polyfit coefficients for inverse mapping
+              (approximate; retained for backward compatibility only).
             - out_params (dict or None): KDE metadata if fitted, else None.
+              Keys: 'kde', 'bw_factor', 'n_fit', 'fit_domain' (fitted object
+              and diagnostics, not used for computation), plus 'xb', 'h',
+              'qq', 'log_transform' — the exact ingredients actually used by
+              kde_cdf/kde_ppf for exact forward/reverse conversion of new
+              values against this fit (see native_to_spi/spi_to_native).
     """
     xbase, x, idmesi_all = _resolve_indices(prec, stride, m, m_cal, tb1, tb2)
 
@@ -451,44 +557,40 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
             )
 
         kde = gaussian_kde(xb, bw_method="silverman")
+        h = 0.9 * np.std(xb, ddof=1) * xb.size ** (-1 / 5)
+        qq = np.sum(x == 0) / len(x)
         out_params = {
             "kde": kde,
             "bw_factor": float(kde.factor),
             "n_fit": int(xb.size),
             "fit_domain": "xbase (finite, full R)",
+            # Exact-inverse ingredients (see kde_cdf/kde_ppf): xb/h/qq/log_transform
+            # are what the CDF below actually uses — NOT `kde`/`bw_factor`, which
+            # are fitted independently and never consulted for the computation.
+            "xb": xb,
+            "h": h,
+            "qq": qq,
+            "log_transform": log_transform,
         }
     else:
         kde = fit_params.get("kde", None)
         if kde is None:
             raise ValueError("kde_params provided but missing key 'kde'.")
         xb = xbase_log[finite_xbase] if log_transform else xbase[finite_xbase]
+        h = 0.9 * np.std(xb, ddof=1) * xb.size ** (-1 / 5)
+        qq = np.sum(x == 0) / len(x)
         out_params = None
 
-    # --- CDF evaluation via broadcasting ---
-    Gx = np.full_like(x, np.nan, dtype=float)
-    Hx = np.full_like(x, np.nan, dtype=float)
-
-    xfull = x_log if log_transform else x
-    finite_mask = np.isfinite(xfull)
-    zero_mask = (x == 0)
-
-    h = 0.9 * np.std(xb, ddof=1) * xb.size ** (-1 / 5)
-    qq = np.sum(zero_mask) / len(x)
-
-    # Broadcasting: (n_eval, n_baseline) → mean over axis=1
-    Gx[finite_mask] = norm.cdf(
-        (xfull[finite_mask, None] - xb[None, :]) / h
-    ).mean(axis=1)
-
-    # --- Mixed distribution for zeros (same approach as f_spi) ---
-    Hx[finite_mask] = qq + (1 - qq) * Gx[finite_mask]
-    Hx[zero_mask] = qq
+    # --- CDF evaluation (exact; same formula reused by native_to_spi/spi_to_native) ---
+    Hx = kde_cdf(x, xb, h, qq, log_transform)
 
     # --- Normal-score transform ---
     Hx = np.clip(Hx, 3.17e-5, 1 - 3.17e-5)
     spi = np.round(norm.ppf(Hx), 4)
 
-    # --- Reverse mapping ---
+    # --- Reverse mapping (polynomial approximation, retained for backward
+    # compatibility only — the exact inverse is kde_ppf, used by
+    # native_to_spi/spi_to_native/spatial_trends) ---
     coef = _reverse_polyfit(spi, xbase, m_cal, idmesi_all, tb1, tb2, stride, m)
 
     return idmesi_all, spi, coef, out_params

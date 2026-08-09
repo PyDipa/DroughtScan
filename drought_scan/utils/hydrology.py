@@ -14,7 +14,8 @@ Main functions:
 - `Qcs2Qmm()` / `Qmm2Qcs()`: Convert streamflow between m³/s and mm of runoff.
 - `era_snowfall_to_mm()`: Convert ERA5 snowfall rate (m/s) to mm/month.
 - `compute_extended_c2r_index()`: Extend c2r calibration coefficients for scales > K.
-- `severe_events_deficits_computation()`: Detect and characterize severe drought events.
+- `severe_events_deficits_computation_old()`: Detect and characterize severe drought
+  events (deprecated — still polynomial/c2r-based, not migrated to the exact inverse).
 
 Used by: `core.py`, `drought_indices.py`.
 """
@@ -159,7 +160,7 @@ def compute_extended_c2r_index(ds_object, K=60):
         c2rspi[k - 1, :, :] = coeff
     return c2rspi
 
-def severe_events_deficits_computation(ds_object,weight_index=None):
+def severe_events_deficits_computation_old(ds_object,weight_index=None):
     """
     Identify severe drought events and calculate their durations and deficits.
 

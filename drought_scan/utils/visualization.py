@@ -699,12 +699,11 @@ def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
 
         if window <= DSO.K:
             spi_w = DSO.spi_like_set[window - 1, :]
-            coeff_w = DSO.c2r_index[window - 1]
         else:
-            spi_w, coeff_w = DSO._compute_spi(month_scale=window)
+            spi_w, _ = DSO._compute_spi(month_scale=window)
 
         # Deficit/surplus
-        anomaly = DSO.deficit_from_spi(window=window, spi=spi_w, coeff=coeff_w)
+        anomaly = DSO.deficit_from_spi(window=window, spi=spi_w)
 
         val = anomaly.copy()
         val[(spi_w>-0.5) & (spi_w<0.5) ] = 0

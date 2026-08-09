@@ -40,7 +40,6 @@ from scipy import stats
 # --- drought_indices --------------------------------------------------------
 from drought_scan.utils.drought_indices import (
     baseline_indices,
-    c2r_eval,
     f_kde,
     f_spei,
     f_spi,
@@ -59,7 +58,7 @@ from drought_scan.utils.data_io import (
 
 # --- hydrology --------------------------------------------------------------
 from drought_scan.utils.hydrology import (
-    severe_events_deficits_computation,
+    severe_events_deficits_computation_old,
 )
 
 # --- visualization ----------------------------------------------------------
@@ -463,6 +462,23 @@ class BaseDroughtAnalysis:
             c2rspi[k - 1, :, :] = coeff.copy()
         return spiset, c2rspi
 
+    def _get_kde_fit(self, month_scale, ref_month):
+        """
+        Look up the fitted KDE ingredients (xb, h, qq, log_transform) for
+        (month_scale, ref_month), stored by `_compute_spi` in
+        `self.fit_params_kde`. Shared guard for native_to_spi/spi_to_native.
+        """
+        key = (month_scale, ref_month)
+        fit = self.fit_params_kde.get(key)
+        if fit is None:
+            raise ValueError(
+                f"fit_params_kde not available for scale={month_scale}, "
+                f"month={ref_month}. The SPI-like set for this scale must be "
+                f"computed first (e.g. via _compute_spi or by initializing "
+                f"with a K that covers this scale)."
+            )
+        return fit
+
     def native_to_spi(self, value, month_scale, ref_month):
         """
         Convert native-unit value(s) to SPI/SQI/SPEI etc via the fitted distribution stored
@@ -471,8 +487,9 @@ class BaseDroughtAnalysis:
         Analytical counterpart to numerically inverting
         `np.polyval(c2r_index[scale-1, month-1, :], ...)`: uses the exact parameters
         of the fitted distribution (gamma for f_spi, Pearson III for f_spei,
-        mean+std for f_zscore), avoiding the polynomial approximation error of
-        `c2r_index`, which is non-trivial in the distribution tails.
+        mean+std for f_zscore, KDE cumulative for f_kde — see kde_cdf), avoiding
+        the polynomial approximation error of `c2r_index`, which is non-trivial
+        in the distribution tails.
 
         Parameters
         ----------
@@ -492,11 +509,10 @@ class BaseDroughtAnalysis:
 
         Raises
         ------
-        NotImplementedError
-            If the active `calculation_method` is `f_kde`, whose fitted KDE object
-            is not currently stored as numerical parameters in `fit_params`.
         ValueError
-            If `calculation_method` is unrecognised.
+            If the requested (month_scale, ref_month) has not been fitted yet
+            (numerically, for f_spi/f_spei/f_zscore; or in fit_params_kde, for
+            f_kde), or if `calculation_method` is unrecognised.
 
         See Also
         --------
@@ -506,18 +522,22 @@ class BaseDroughtAnalysis:
         """
         from functools import partial
         from scipy.stats import norm, gamma, pearson3
-        from drought_scan.utils.drought_indices import f_spi, f_spei, f_zscore, f_kde
+        from drought_scan.utils.drought_indices import f_spi, f_spei, f_zscore, f_kde, kde_cdf
 
         method = self.calculation_method
         base_func = method.func if isinstance(method, partial) else method
+
+        if base_func == f_kde:
+            fit = self._get_kde_fit(month_scale, ref_month)
+            Hx = kde_cdf(value, fit['xb'], fit['h'], fit['qq'], fit['log_transform'])
+            return norm.ppf(Hx)
 
         # Guard: ensure fit_params has been computed for the requested scale
         if month_scale > self.fit_params.shape[0] or \
                 np.any(np.isnan(self.fit_params[month_scale - 1, ref_month - 1, :])):
             raise ValueError(
                 f"fit_params not available for scale={month_scale}, month={ref_month}. "
-                f"Note: this method is not supported with f_kde. "
-                f"Initialize the Drought Scan object with calculation_method=f_spi (or f_spei)."
+                f"Initialize the Drought Scan object with a K that covers this scale."
             )
 
         params = self.fit_params[month_scale - 1, ref_month - 1, :]
@@ -536,13 +556,6 @@ class BaseDroughtAnalysis:
             mean, std = params
             return (value - mean) / std
 
-        elif base_func == f_kde:
-            raise NotImplementedError(
-                "native_to_spi is not yet implemented for f_kde. "
-                "KDE requires storing the fitted gaussian_kde object, "
-                "which is not currently saved as numerical parameters in fit_params."
-            )
-
         else:
             raise ValueError(f"Unknown calculation_method: {base_func}")
 
@@ -552,8 +565,9 @@ class BaseDroughtAnalysis:
 
         Analytical counterpart to np.polyval(c2r_index[scale-1, month-1, :], spi_value):
         uses the exact parameters of the fitted distribution (gamma for f_spi,
-        Pearson III for f_spei, mean+std for f_zscore), avoiding the polynomial
-        approximation error of c2r_index in the distribution tails.
+        Pearson III for f_spei, mean+std for f_zscore, KDE cumulative for
+        f_kde — see kde_ppf), avoiding the polynomial approximation error of
+        c2r_index in the distribution tails.
 
         Parameters
         ----------
@@ -577,18 +591,22 @@ class BaseDroughtAnalysis:
         """
         from functools import partial
         from scipy.stats import norm, gamma, pearson3
-        from drought_scan.utils.drought_indices import f_spi, f_spei, f_zscore, f_kde
+        from drought_scan.utils.drought_indices import f_spi, f_spei, f_zscore, f_kde, kde_ppf
 
         method = self.calculation_method
         base_func = method.func if isinstance(method, partial) else method
+
+        if base_func == f_kde:
+            fit = self._get_kde_fit(month_scale, ref_month)
+            Hx = norm.cdf(spi_value)
+            return kde_ppf(Hx, fit['xb'], fit['h'], fit['qq'], fit['log_transform'])
 
         # Guard: ensure fit_params has been computed for the requested scale
         if month_scale > self.fit_params.shape[0] or \
                 np.any(np.isnan(self.fit_params[month_scale - 1, ref_month - 1, :])):
             raise ValueError(
                 f"fit_params not available for scale={month_scale}, month={ref_month}. "
-                f"Note: this method is not supported with f_kde. "
-                f"Initialize the Drought Scan object with calculation_method=f_spi (or f_spei)."
+                f"Initialize the Drought Scan object with a K that covers this scale."
             )
         params = self.fit_params[month_scale - 1, ref_month - 1, :]
 
@@ -605,13 +623,6 @@ class BaseDroughtAnalysis:
         elif base_func == f_zscore:
             mean, std = params
             return spi_value * std + mean
-
-        elif base_func == f_kde:
-            raise NotImplementedError(
-                "spi_to_native not yet implemented for f_kde. "
-                "KDE requires storing the fitted gaussian_kde object, "
-                "which is not currently saved as numerical parameters."
-            )
 
         else:
             raise ValueError(f"Unknown calculation_method: {base_func}")
@@ -2965,9 +2976,10 @@ class BaseDroughtAnalysis:
           Compute the "normal" values of the  climatology  using the inverse function of the SPI-like index.
 
           This method calculates the "normal" values for the variable of interest based on the
-          inverse of the SPI-like index at scale 1 (SPI_like_index_1 == 0). It uses the coefficients
-          (`self.c2r_index`) from the polynomial fitting of the SPI-like index for each month.
-          The normal values are computed for all months and tiled across the entire timeframe.
+          exact inverse of the SPI-like index at scale 1 (SPI_like_index_1 == 0), via
+          `spi_to_native` (the fitted distribution's ppf, not the polynomial `c2r_index`
+          approximation). The normal values are computed for all months and tiled across
+          the entire timeframe.
 
           Returns
           -------
@@ -2978,12 +2990,12 @@ class BaseDroughtAnalysis:
           """
         Nn = np.zeros(12)
         for m in range(12):
-            Nn[m] = c2r_eval(self.c2r_index[0, m, :], 0, self.calculation_method)
+            Nn[m] = self.spi_to_native(0.0, month_scale=1, ref_month=m + 1)
         Normal = np.tile(np.squeeze(Nn),len(np.unique(self.m_cal[:,1])))
         Normal = Normal[0:len(self.ts)]
         return Normal
 
-    def deficit_from_spi(self, window, spi=None, coeff=None):
+    def deficit_from_spi(self, window, spi=None):
         """
         Estimate the cumulative water deficit/surplus over a moving window,
         derived from the SPI-like index at the matching accumulation scale.
@@ -2992,16 +3004,17 @@ class BaseDroughtAnalysis:
         bounded below by zero and unbounded above, producing a systematic positive
         skew), this method maps the anomaly through the SPI-like space. The SPI-like
         index at scale `window` is converted back to native cumulative units via the
-        polynomial calibration stored in `c2r_index`, and the deficit/surplus is taken
-        relative to the SPI=0 reference (which, by construction, coincides with
-        `normal_values()`).
+        exact inverse of the fitted distribution (`spi_to_native`), and the
+        deficit/surplus is taken relative to the SPI=0 reference (which, by
+        construction, coincides with `normal_values()`).
 
         The resulting deficit is expressed in physical units and reflects the
-        statistical rarity of the accumulated anomaly. Note that, because the c2r
-        calibration is the non-linear (gamma-based) inverse transform, the deficit in
-        native units remains physically asymmetric even though the SPI itself is
-        symmetric; this asymmetry is intentional and reflects the real bounded nature
-        of the variable.
+        statistical rarity of the accumulated anomaly. Note that, for methods whose
+        inverse transform is non-linear (gamma for f_spi, Pearson III for f_spei,
+        KDE for f_kde), the deficit in native units remains physically asymmetric
+        even though the SPI itself is symmetric; this asymmetry is intentional and
+        reflects the real bounded nature of the variable. For f_zscore the inverse
+        is linear, so the deficit is symmetric in native units too.
 
         Parameters
         ----------
@@ -3011,9 +3024,6 @@ class BaseDroughtAnalysis:
             Pre-computed SPI-like series at scale `window`. If None, it is retrieved
             from `self.spi_like_set` when `window <= self.K`, or computed on the fly
             via `_compute_spi(month_scale=window)` otherwise.
-        coeff : ndarray, optional
-            Pre-computed c2r calibration coefficients (shape (12, n_coef)) at scale
-            `window`. Retrieved or computed together with `spi` when not provided.
 
         Returns
         -------
@@ -3042,18 +3052,24 @@ class BaseDroughtAnalysis:
         n = len(self.ts)
         months = self.m_cal[:, 0].astype(int)
 
-        if spi is None or coeff is None:
+        if spi is None:
             if window <= self.K:
                 spi = self.spi_like_set[window - 1, :]
-                coeff = self.c2r_index[window - 1]
             else:
-                spi, coeff = self._compute_spi(month_scale=window)
+                spi, _ = self._compute_spi(month_scale=window)
 
+        # Grouped by calendar month (not per-timestep): spi_to_native accepts a
+        # single ref_month per call, and for f_kde each call rebuilds an
+        # interpolation grid, so batching all timesteps of the same month into
+        # one call avoids rebuilding it once per timestep.
         deficit = np.full(n, np.nan)
-        for x in np.where(~np.isnan(spi))[0]:
-            m = months[x] - 1
-            deficit[x] = (c2r_eval(coeff[m], spi[x], self.calculation_method)
-                          - c2r_eval(coeff[m], 0.0, self.calculation_method))
+        for m in range(1, 13):
+            idx = np.where((months == m) & ~np.isnan(spi))[0]
+            if idx.size == 0:
+                continue
+            native_vals = self.spi_to_native(spi[idx], window, m)
+            normal_val = self.spi_to_native(0.0, window, m)
+            deficit[idx] = np.asarray(native_vals) - normal_val
 
         # Streamflow: deficit è in m³/s cumulati (somma di window medie mensili).
         # Converti a volume totale m³ moltiplicando per i secondi medi al mese.
@@ -3593,7 +3609,7 @@ class BaseDroughtAnalysis:
 
 
         from scipy.stats import norm, gamma, pearson3
-        from drought_scan.utils.drought_indices import baseline_indices, f_spi, f_spei, f_zscore, f_kde
+        from drought_scan.utils.drought_indices import baseline_indices, f_spi, f_spei, f_zscore, f_kde, kde_ppf
         base_func = calculation_method.func if isinstance(calculation_method, partial) else calculation_method
         try:
             # --- SPI-1 per CDN (invariato) ---
@@ -3648,10 +3664,8 @@ class BaseDroughtAnalysis:
                         raw_val = spi_val * std + mean
                         normal_val = mean
                     elif base_func == f_kde:
-                        raise NotImplementedError(
-                            "Exact deficit (spi_to_native-style) is not supported for f_kde; "
-                            "use f_spi/f_spei/f_zscore as calculation_method."
-                        )
+                        raw_val = kde_ppf(p, fit['xb'], fit['h'], fit['qq'], fit['log_transform'])
+                        normal_val = kde_ppf(0.5, fit['xb'], fit['h'], fit['qq'], fit['log_transform'])
                     else:
                         raise ValueError(f"Unknown calculation_method: {base_func}")
                     deficit_at_tidx[w] = float(raw_val - normal_val)
@@ -3869,13 +3883,11 @@ class BaseDroughtAnalysis:
             "July", "August", "September", "October", "November", "December"
         ]
 
-        coeff = self.c2r_index
         domain = np.arange(-3,3.2,0.2)
         mm = np.zeros((self.K,len(domain),12))
         for m in range(12):
             for k in range(self.K):
-                for i,spi_value in enumerate(domain):
-                    mm[k,i,m] = c2r_eval(coeff[k, m, :], spi_value, self.calculation_method)
+                mm[k, :, m] = self.spi_to_native(domain, month_scale=k + 1, ref_month=m + 1)
         cmap = spi_cmap().reversed() if self.threshold > 0 else spi_cmap()
         plt.figure(figsize=(7,5))
         plt.scatter(mm[K-1, :, month-1], domain, s=80, c=domain, cmap=cmap)
@@ -3890,7 +3902,7 @@ class BaseDroughtAnalysis:
 
     def severe_events(self, weight_index=None, plot=True, max_events=None, labels=False, unit=None, name=None):
 
-        tstartid, tendid, duration, deficit = severe_events_deficits_computation(self, weight_index=weight_index)
+        tstartid, tendid, duration, deficit = severe_events_deficits_computation_old(self, weight_index=weight_index)
         if plot == True:
             plot_severe_events(self,
                                tstartid=tstartid,
@@ -4472,14 +4484,22 @@ class Streamflow(BaseDroughtAnalysis):
             sqi1_pred = sqi1.copy()
             sqi1_pred[prediction_mask] = a * SIDI[prediction_mask] + b
 
-            # back-transform SQI1 -> portata (metodo corretto per calculation_method)
+            # back-transform SQI1 -> portata (metodo esatto, spi_to_native),
+            # raggruppato per mese calendariale: spi_to_native accetta un solo
+            # ref_month scalare per chiamata, e per f_kde ogni chiamata
+            # ricostruisce una griglia di interpolazione, quindi raggruppare
+            # i gap dello stesso mese evita di ricostruirla per ognuno.
             mc_pred = m_cal[prediction_mask]
             s_pred = sqi1_pred[prediction_mask]
+            Q_pred_vals = np.empty(s_pred.shape[0], dtype=float)
 
-            Q_pred[prediction_mask] = [
-                c2r_eval(self.c2r_index[0, mc_pred[i, 0] - 1, :], s_pred[i], self.calculation_method)
-                for i in range(s_pred.shape[0])
-            ]
+            for m in range(1, 13):
+                sub = np.where(mc_pred[:, 0] == m)[0]
+                if sub.size == 0:
+                    continue
+                Q_pred_vals[sub] = self.spi_to_native(s_pred[sub], month_scale=1, ref_month=m)
+
+            Q_pred[prediction_mask] = Q_pred_vals
 
         # ==================================================================
         # UPDATE
