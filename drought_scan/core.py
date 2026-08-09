@@ -40,6 +40,7 @@ from scipy import stats
 # --- drought_indices --------------------------------------------------------
 from drought_scan.utils.drought_indices import (
     baseline_indices,
+    c2r_eval,
     f_kde,
     f_spei,
     f_spi,
@@ -90,12 +91,15 @@ class BaseDroughtAnalysis:
             K (int): Maximum temporal scale for SPI calculations.
             start_baseline_year (int): Starting year for baseline period.
             end_baseline_year (int): Ending year for baseline period.
-            calculation_method (callable, optional): Function for index calculation. Defaults to f_kde.
+            basin_name (str): Name of the basin/site.
+            calculation_method (callable): Function for index calculation.
             Available methods (in utils.py) are:
                 f_spi:   FOR  POSITIVE & RIGHT-SKEWED DATA (uses a Gamma Function) but works fine also for positive normal distribuited sample
                 f_spei:  FOR REAL VALUES & RIGHT-SKEWED (uses a Pearson III function)
                 f_zscore FOR REAL VALUES NORMAL DISTRIBUTED
-            threshold (float, optional): Threshold for severe events. Defaults to -1.
+            threshold (float): Threshold for severe events.
+            index_name (str, optional): Name of the drought index. Defaults to 'SPI'.
+            day (ndarray, optional): Daily calendar/series, if available. Defaults to None.
         """
         if len(ts) != len(m_cal):
             raise ValueError("The time series `ts` and calendar `m_cal` must have the same length.")
@@ -230,22 +234,18 @@ class BaseDroughtAnalysis:
     # =====================================================================
     def _compute_spi_old(self, month_scale,fit_params=None):
         """
-        Calculate SPI for a specific temporal scale, optionally using precomputed gamma parameters.
+        Calculate SPI for a specific temporal scale, optionally using precomputed parameters.
 
         Args:
             month_scale (int): Temporal scale for SPI (e.g., SPI-3, SPI-6).
-            fit_params (dict, optional): Precomputed parameters for the reference month,
-                keyed by month (1-12). Each value is a dict with keys:
-                - 'kde': fitted scipy gaussian_kde object
-                - 'bw_factor': bandwidth factor used in the KDE fit
-                - 'n_fit': number of samples used for fitting
-                - 'fit_domain': string describing the domain of the fit
-                If None, parameters are estimated from scratch.
+            fit_params (dict, optional): Precomputed parameters keyed by month (1-12).
+                Structure depends on the calculation_method (tuple for f_spi/f_spei,
+                dict for f_kde, list for f_zscore). If None, fitted from scratch.
 
         Returns:
             tuple:
                 - ndarray: SPI time series for the given scale, with NaN for undefined values.
-                - ndarray: Coefficients for SPI calculation (12 months x 6 columns).
+                - ndarray: c2r coefficients (12 months x {4|2} columns).
         """
         Spi_ts = np.full_like(self.ts, np.nan, dtype=float)
 
@@ -393,7 +393,7 @@ class BaseDroughtAnalysis:
        Returns:
            tuple:
                - ndarray: SPI values arranged in a 2D array (scale, time).
-               - ndarray: 6 coefficients for each scale and month (K, 12, 6).
+               - ndarray: c2r coefficients for each scale and month (K, 12, {4|2}).
         """
         # Initialize SPI set and coefficients
         spiset = np.full((self.K, len(self.ts)), np.nan, dtype=float)
@@ -1948,7 +1948,7 @@ class BaseDroughtAnalysis:
         -----
         - Requires temporal overlap between self.m_cal and streamflow.m_cal.
         - NaN values in either SQI1 or any SPI_k are excluded row-wise.
-        - Kmax is capped at min(self.K, streamflow.spi_like_set.shape[0]).
+        - Kmax is capped at min(Kmax, self.spi_like_set.shape[0], streamflow.spi_like_set.shape[0]).
         - `optimal_K` selection follows the plateau criterion (first end of
           monotonic-increasing sequence in R²_adj), not the global maximum.
 
@@ -2295,7 +2295,7 @@ class BaseDroughtAnalysis:
     @staticmethod
     def _nash_kernel(n: float, k: float, K: int) -> np.ndarray:
         """
-        Discrete Nash IUH kernel (Gamma pdf sampled at lags 1..L).
+        Discrete Nash IUH kernel (Gamma pdf sampled at lags 1..K).
         The result is a weightingh scheme woth bell-shape
 
         Parameters
@@ -2370,11 +2370,12 @@ class BaseDroughtAnalysis:
         Returns
         -------
         dict (no seasonal split) or dict-of-dicts (seasonal split) with keys:
-            'optimal_L'  : int
+            'optimal_K'  : int (optimal kernel length L)
             'optimal_n'  : float
             'optimal_k'  : float
             'R2'         : float
-            'kernel'     : ndarray, shape (optimal_L,)
+            'kernel'     : ndarray, shape (optimal_K,)
+            'metrics'    : dict of evaluation metrics (see _eval_metrics)
             'sample_number' : int  (only in seasonal mode)
 
         References
@@ -2404,7 +2405,7 @@ class BaseDroughtAnalysis:
         def _optimize_nash(driver, target, season_mask=None):
             """Optimise Nash IUH for a given data subset.
             the challange is figure out the two paramters definish the best gamma-shaped kernel
-            testing incresing kernle from 1 to K"""
+            testing incresing kernle from 2 to K"""
 
 
 
@@ -2977,7 +2978,7 @@ class BaseDroughtAnalysis:
           """
         Nn = np.zeros(12)
         for m in range(12):
-            Nn[m] = np.polyval(self.c2r_index[0,m,:],0)
+            Nn[m] = c2r_eval(self.c2r_index[0, m, :], 0, self.calculation_method)
         Normal = np.tile(np.squeeze(Nn),len(np.unique(self.m_cal[:,1])))
         Normal = Normal[0:len(self.ts)]
         return Normal
@@ -3051,7 +3052,8 @@ class BaseDroughtAnalysis:
         deficit = np.full(n, np.nan)
         for x in np.where(~np.isnan(spi))[0]:
             m = months[x] - 1
-            deficit[x] = np.polyval(coeff[m], spi[x]) - np.polyval(coeff[m], 0.0)
+            deficit[x] = (c2r_eval(coeff[m], spi[x], self.calculation_method)
+                          - c2r_eval(coeff[m], 0.0, self.calculation_method))
 
         # Streamflow: deficit è in m³/s cumulati (somma di window medie mensili).
         # Converti a volume totale m³ moltiplicando per i secondi medi al mese.
@@ -3064,15 +3066,14 @@ class BaseDroughtAnalysis:
 
     def find_trends(self, var=None, window=None):
         """
-        Analyze trends in self.CDN using rolling windows and linear regression.
+        Analyze trends in a variable using a rolling window and linear regression.
 
         Args:
-            window  (list of int, optional):   window size  in months.
-                Defaults to [60].
+            var (ndarray, optional): Variable to analyze. Defaults to self.CDN.
+            window (int, optional): Rolling window size in months. Defaults to 60.
 
         Returns:
-            dict: Dictionary containing results for each window size.
-                Each entry contains:
+            dict: Results of the rolling trend analysis, containing:
                 - 'trend': Array with -1 (negative trend), 0 (no trend), 1 (positive trend).
                 - 'slope': Array with slope coefficients.
                 - 'p_value': Array with p-values.
@@ -3327,6 +3328,7 @@ class BaseDroughtAnalysis:
             SIDI_grid        : ndarray (n_rows, n_cols, n_weights) — all weighting schemes.
             SPI_grid         : dict {scale: ndarray (n_rows, n_cols)}.
             spatial_timestamp: ndarray (2,) — [month, year] of the stored snapshot.
+            spatial_K        : int — K used for this spatial computation.
 
         Notes:
             Default weight for display: weight_index=2 (see generate_weights convention).
@@ -3828,6 +3830,8 @@ class BaseDroughtAnalysis:
                 year_ext (tuple, optional): Years defining X-axis limits.
                 split_plot :   If True, each panel (CDN, Heatmap, SIDI) is plotted in a separate figure,
                 plot_order : str, default='CHS';    Order of the panels when split_plot=False.
+                saveplot (bool, optional): If True, also saves the plot via self._savedsplot(). Default False.
+                figsize (tuple, optional): Figure size passed to plot_overview.
 
 
             """
@@ -3854,11 +3858,9 @@ class BaseDroughtAnalysis:
         mm : ndarray, shape (K, len(domain), 12)
             Matrix of fitted values used for plotting, containing the equivalent
             raw values for each SPI domain point, scale, and month.
-            Returned only if the function is assigned to a variable
-            (e.g. ``mm = precipitation.plot_spi_fit(K=3, month=3)``).
-            If the function is called directly without assignment
-            (e.g. ``precipitation.plot_spi_fit(K=3, month=3)``),
-            the plot is generated and nothing is printed to the console.
+            Returned only if `return_data=True` (default False).
+            If `return_data=False`, only the plot is generated and the function
+            returns None.
         """
 
         var = 'mm' if isinstance(self, (Precipitation, Pet, Balance)) else "raw values"
@@ -3873,7 +3875,7 @@ class BaseDroughtAnalysis:
         for m in range(12):
             for k in range(self.K):
                 for i,spi_value in enumerate(domain):
-                    mm[k,i,m]  = np.polyval(coeff[k, m, :], spi_value)
+                    mm[k,i,m] = c2r_eval(coeff[k, m, :], spi_value, self.calculation_method)
         cmap = spi_cmap().reversed() if self.threshold > 0 else spi_cmap()
         plt.figure(figsize=(7,5))
         plt.scatter(mm[K-1, :, month-1], domain, s=80, c=domain, cmap=cmap)
@@ -3907,6 +3909,11 @@ class BaseDroughtAnalysis:
         Args:
             windows (list of int, optional): List of window lengths (in months) over which to evaluate trends.
                                              Default is [12, 36, 60, 120].
+            figsize (tuple, optional): Figure size. Defaults to (14, 10).
+            show_spi (bool, optional): If True, overlay SPI on the plot. Default False.
+            ax (matplotlib.axes.Axes, optional): Existing axes to plot on.
+            year_ext (tuple, optional): Years defining X-axis limits.
+            unit (str, optional): Unit label for the plot.
 
         Returns:
             None. Displays a plot.
@@ -3926,6 +3933,9 @@ class BaseDroughtAnalysis:
 
         var_name : str or None, optional
             Optional label to include in the plot title.
+
+        ax : matplotlib.axes.Axes, optional
+            Existing axes to plot on. If None, creates new figure.
 
         cumulate : bool, default=False
             If True, compute and display the cumulative sum per month for each year.
@@ -3951,6 +3961,7 @@ class BaseDroughtAnalysis:
         Args:
             var (str): 'SIDI' or 'SPI' or CDN. Default 'SIDI'.
             weight_index (int): Weight slice for SIDI. Default 2.
+            month_scale (int, optional): Temporal scale to select, required for var='SPI' or 'CDN'.
             ax (matplotlib.axes.Axes, optional): Existing axes. If None, creates new figure.
             cmap (str): Colormap. Default is red-2-green palette using the coulors by Crimeri as used in the heatmap
             title (str, optional): Custom title.
@@ -4075,9 +4086,10 @@ class Precipitation(BaseDroughtAnalysis):
         Args:
             start_baseline_year (int): Starting year for baseline period.
             end_baseline_year (int): Ending year for baseline period.
+            basin_name (str): Name of the basin/site.
             ts (ndarray, optional): Aggregated basin-level precipitation timeseries.
             m_cal (ndarray, optional): Calendar array (month, year) matching `ts`.
-            data_path (str, optional): Path to the NetCDF file containing precipitation data.
+            prec_path (str, optional): Path to the NetCDF file containing precipitation data.
             shape_path (str, optional): Path to the shapefile defining the basin.
             shape (object, optional): Shapefile geometry (if already loaded).
             K (int, optional): Maximum temporal scale for SPI calculations. Default is 36.
@@ -4091,6 +4103,9 @@ class Precipitation(BaseDroughtAnalysis):
 
             threshold (int,optional) : threshold to define severe events, Default is -1 (i.e. -1 standard deviation of SIDI)
             verbose (bool, optional): Whether to print initialization messages. Default is True.
+            index_name (str, optional): Name of the drought index. Defaults to 'SPI'.
+            rolling (bool, optional): If True, use rolling 30-day windows when importing
+                gridded data instead of fixed calendar months. Default False.
 
 
         """
@@ -4210,7 +4225,9 @@ class Precipitation(BaseDroughtAnalysis):
                 and stores ``self.seasonal_params`` on the instance.
 
         Returns:
-            np.ndarray: SIDI array ``(time,)`` with season-specific optimization.
+            np.ndarray or None: SIDI array ``(time,)`` with season-specific optimization
+            if ``overwrite=False``. If ``overwrite=True``, updates ``self.SIDI`` and
+            ``self.seasonal_params`` in place and returns None.
         """
         if seasons is not None:
             agg = 'custom'
@@ -4384,8 +4401,10 @@ class Streamflow(BaseDroughtAnalysis):
         Returns
         -------
         None
-            Updates ``self.ts`` in place. If any gaps are filled, also
-            recomputes ``self.spi_like_set``, ``self.SIDI``, and ``self.CDN``.
+            Updates ``self.ts`` in place and unconditionally recomputes
+            ``self.spi_like_set``, ``self.SIDI``, and ``self.CDN``
+            (this only returns early, without recomputing, when
+            ``self.ts`` has no NaN values to begin with).
         """
         if not isinstance(precipitation, BaseDroughtAnalysis):
             raise TypeError("The input must be an instance of Precipitation.")
@@ -4448,17 +4467,17 @@ class Streamflow(BaseDroughtAnalysis):
         prediction_mask = np.isnan(sqi1) & np.isfinite(SIDI)
         n_to_fill = int(np.sum(prediction_mask))
 
+        Q_pred = ts.copy()
         if n_to_fill > 0:
             sqi1_pred = sqi1.copy()
             sqi1_pred[prediction_mask] = a * SIDI[prediction_mask] + b
 
-            # back-transform SQI1 -> portata con polinomi mensili
-            Q_pred = ts.copy()
+            # back-transform SQI1 -> portata (metodo corretto per calculation_method)
             mc_pred = m_cal[prediction_mask]
             s_pred = sqi1_pred[prediction_mask]
 
             Q_pred[prediction_mask] = [
-                np.polyval(self.c2r_index[0, mc_pred[i, 0] - 1, :], s_pred[i])
+                c2r_eval(self.c2r_index[0, mc_pred[i, 0] - 1, :], s_pred[i], self.calculation_method)
                 for i in range(s_pred.shape[0])
             ]
 
@@ -4633,14 +4652,13 @@ class Streamflow(BaseDroughtAnalysis):
         bfi : float
             Baseflow Index in [0, 1].
         baseflow : np.ndarray
-            Daily baseflow series, same length as self.ts.
+            Daily baseflow series, re-read from self.data_path (self.ts is monthly).
 
         Raises
         ------
-        AttributeError
-            If self.day does not exist, indicating the series is not daily.
         ValueError
-            If the series is too short or contains only NaN.
+            If the file format is unsupported, or if the series is too short
+            (< block_size * 3 days) or contains only NaN.
 
         References
         ----------
@@ -4800,7 +4818,7 @@ class Pet(BaseDroughtAnalysis):
                 f_spi:   FOR  POSITIVE & RIGHT-SKEWED DATA (uses a Gamma Function) but works fine also for positive normal distribuited sample
                 f_spei:  FOR REAL VALUES & RIGHT-SKEWED (uses a Pearson III function)
                 f_zscore FOR REAL VALUES NORMAL DISTRIBUTED
-            threshold (float, optional): Threshold for severe events. Defaults to -1.
+            threshold (float, optional): Threshold for severe events. Defaults to 1.
             verbose (bool, optional): Whether to print initialization messages. Default is True.
         """
         self.start_baseline_year = start_baseline_year
@@ -4932,13 +4950,14 @@ class Balance(BaseDroughtAnalysis):
         and crop them to their common spatial extent.
 
         Returns:
-            tuple: (Pgrid, ETgrid, m_cal, ts, Lat_common, Lon_common)
+            tuple: (Pgrid, ETgrid, m_cal, ts, Lat_common, Lon_common, day1)
                 - Pgrid: precipitation grid on common domain [time, lat, lon]
                 - ETgrid: PET grid on common domain [time, lat, lon]
                 - m_cal: common calendar
                 - ts: precipitation minus PET time series
                 - Lat_common: common latitude vector
                 - Lon_common: common longitude vector
+                - day1: daily calendar associated with the precipitation series
         """
 
         # import preciptiation data
@@ -5113,7 +5132,9 @@ class Balance(BaseDroughtAnalysis):
                 and stores ``self.seasonal_params`` on the instance.
 
         Returns:
-            np.ndarray: SIDI array ``(time,)`` with season-specific optimization.
+            np.ndarray or None: SIDI array ``(time,)`` with season-specific optimization
+            if ``overwrite=False``. If ``overwrite=True``, updates ``self.SIDI`` and
+            ``self.seasonal_params`` in place and returns None.
         """
         if seasons is not None:
             agg = 'custom'
@@ -5211,7 +5232,7 @@ class Temperature(BaseDroughtAnalysis):
                 - weight_index = 3: Linear increasing weights
                 - weight_index = 4: Logarithmically increasing weights
 
-            threshold (int, optional): Threshold to define severe events, Default is -1.
+            threshold (int, optional): Threshold to define severe events, Default is 1.
             calculation_method (callable, optional): Method to use for drought calculations. Default is f_kde.
                 Available methods (in utils.py) are:
                 f_spi:   FOR  POSITIVE & RIGHT-SKEWED DATA (uses a Gamma Function) but works fine also for positive normal distribuited sample

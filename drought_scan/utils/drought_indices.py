@@ -118,7 +118,7 @@ def get_month_indices(month, start_year, end_year, m_cal):
     Return indices of ``m_cal`` where the specified month appears for years
     ``start_year`` through ``end_year``.
 
-    Results are cached by (month, start_year, end_year, id(m_cal)) so that
+    Results are cached by (month, start_year, end_year, m_cal.tobytes()) so that
     repeated calls (e.g., across grid points sharing the same calendar) are
     effectively free.
 
@@ -534,6 +534,41 @@ def f_zscore(data, stride, m, m_cal, tb1, tb2,fit_params=None):
     zscore = (x - baseline_mean) / baseline_std if baseline_std != 0 else np.zeros_like(x)
 
     return idmesi_all, zscore, [baseline_mean, baseline_std], out_params
+
+
+# ===================================================================
+#  c2r_eval — correct "reverse" evaluation of c2r coefficients
+# ===================================================================
+def c2r_eval(coeff, x, calculation_method):
+    """
+    Evaluate the c2r "reverse" coefficients at x (standardized index -> native units).
+
+    For f_spi/f_spei/f_kde, `coeff` holds degree-3 polynomial coefficients
+    (from `_reverse_polyfit`) and must be evaluated with `np.polyval`. For
+    f_zscore, `coeff` instead holds `[baseline_mean, baseline_std]` (not
+    polynomial coefficients) and must be evaluated as `x * std + mean`:
+    calling `np.polyval([mean, std], x)` on it computes `mean * x + std`,
+    which only coincides with the correct result by coincidence at x=1 and
+    is wrong everywhere else (including x=0, the "normal value" reference
+    used throughout the library).
+
+    Args:
+        coeff (ndarray): c2r coefficients for one (scale, month) slice —
+            shape (4,) for f_spi/f_spei/f_kde, shape (2,) for f_zscore.
+        x (float or ndarray): standardized index value(s) to convert back.
+        calculation_method (callable): the object's `calculation_method`
+            (f_spi, f_spei, f_kde, f_zscore, or a `functools.partial` thereof).
+
+    Returns:
+        float or ndarray: native-unit value(s).
+    """
+    from functools import partial
+    base_func = calculation_method.func if isinstance(calculation_method, partial) else calculation_method
+    if base_func is f_zscore:
+        mean, std = coeff
+        return x * std + mean
+    return np.polyval(coeff, x)
+
 
 #  Domain requirements  (dominio della distribuzione, non della classe)
 # ===================================================================

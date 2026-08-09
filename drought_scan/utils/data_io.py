@@ -13,7 +13,7 @@ This module provides functions for:
 
 Public functions:
 - ``import_netcdf_for_cumulative_variable()`` — read gridded NetCDF, clip to basin, aggregate monthly.
-- ``import_timeseries()`` — read a scalar time series from CSV/Excel.
+- ``import_timeseries()`` — read a scalar time series from a NetCDF file.
 - ``load_streamflow()`` — read streamflow from CSV/Excel with auto-detection of date/value columns.
 - ``load_shape()`` — load and reproject a shapefile.
 - ``create_mask()`` — generate a spatial mask from a shapefile and a lat/lon grid.
@@ -54,7 +54,8 @@ def extract_variable(data, possible_names):
         possible_names (list): List of potential variable names (strings)
 
     Returns:
-        ndarray: Extracted variable array.
+        ndarray: Extracted variable array, or None if none of `possible_names`
+            is found in `data.variables`.
     """
     # check of the inputs:
     if not hasattr(data, "variables"):
@@ -131,13 +132,20 @@ def import_netcdf_for_cumulative_variable(file_path, possible_names,shape,verbos
         file_path (str): Path to the NetCDF file.
         possible_names (list): List of possible variable names.
         shape (GeoDataFrame): Spatial mask for regional data extraction.
-        verbose (bool, optional): If True, displays additional information.
+        verbose (bool): If True, displays additional information.
+        cumulative (bool, optional): If True, aggregate daily values by summation
+            (e.g. precipitation); if False, by averaging. Defaults to True.
+        rolling (bool, optional): If True, use rolling 30-day windows instead of
+            fixed calendar months when aggregating daily data. Defaults to False.
 
     Returns:
         tuple:
-            - ts (ndarray): Aggregated time series.
+            - ts (ndarray): Aggregated basin-level time series.
             - m_cal (ndarray): Monthly and yearly timestamps.
-            - Pgrid (ndarray): Precipitation data grid.
+            - Pgrid (ndarray): Gridded data on the basin domain.
+            - Lat (ndarray): Latitude vector/grid.
+            - Lon (ndarray): Longitude vector/grid.
+            - day (ndarray or None): Daily calendar, if the source data is daily; else None.
 
     Raises:
         FileNotFoundError: If the NetCDF file is not found.
@@ -552,7 +560,7 @@ def _date_related_cols(df: pd.DataFrame, date_col: str) -> set:
 
     Args:
         df (pd.DataFrame): The input dataframe.
-        chosen_date_col (str or None): The name of the selected date column.
+        date_col (str or None): The name of the selected date column.
 
     Returns:
         set: Names of columns to exclude from numeric value detection.
@@ -600,10 +608,9 @@ def _pick_value_col(df: pd.DataFrame, exclude_cols=None) -> str:
 
     Logic:
         0. Exclude candidate columns passed via `exclude_cols` (es. data, giorno/mese/anno, '_date').
-        1. Use the provided hint if valid (and not excluded).
-        2. Match common IT/EN keywords for discharge/flow (and not excluded).
-        3. Fallback: choose the column with the highest ratio of numeric (non-NaN) values (and not excluded).
-        4. Last resort: first non-datetime column not excluded.
+        1. Match common IT/EN keywords for discharge/flow (and not excluded).
+        2. Fallback: choose the column with the highest ratio of numeric (non-NaN) values (and not excluded).
+        3. Last resort: first non-datetime column not excluded.
 
     Returns:
       str: The name of the detected value column.
@@ -659,11 +666,15 @@ def _coerce_to_monthly(df, date_col_name, value_col_name, min_days=20,rolling = 
         date_col_name (str): Name of the datetime column.
         value_col_name (str): Name of the numeric value column.
         min_days (int): Minimum number of valid daily entries to accept a monthly mean.
+        rolling (bool, optional): If True, aggregate with 30-day rolling windows
+            (backwards from the last day of month) instead of fixed calendar months.
+            Defaults to False.
 
     Returns:
         monthly_df (pd.DataFrame): Dataframe with '_date' and '_value' (monthly data).
         ts (np.ndarray): Numeric array of monthly values.
         m_cal (np.ndarray): Calendar array [[month, year], ...].
+        day (int or None): Anchor day of month used for rolling aggregation, if any.
     """
 
     df = df.copy()
@@ -941,14 +952,19 @@ def _pipeline_common(df, origin_label="",rolling = False):
 
       Args:
           df (pd.DataFrame): Input DataFrame containing raw streamflow data.
-          date_col (str, optional): Name of the date column (auto-detected if None).
-          value_col (str, optional): Name of the value column (auto-detected if None).
           origin_label (str): Optional label for identifying the data source in the log output.
+          rolling (bool, optional): If True, aggregate with 30-day rolling windows
+              instead of fixed calendar months. Defaults to False.
+
+      Notes:
+          Date and value columns are auto-detected internally via `_pick_date_col`
+          and `_pick_value_col` (not passed as arguments).
 
       Returns:
           tuple:
               - ts (np.ndarray): Monthly streamflow time series.
               - m_cal (np.ndarray): Corresponding calendar array [month, year].
+              - day (int or None): Anchor day of month used for rolling aggregation, if any.
       """
     date_col_name = _pick_date_col(df)
     exclude = _date_related_cols(df, date_col_name)
@@ -979,11 +995,14 @@ def load_streamflow(file_path,rolling=False):
 
     Args:
         file_path (str): Path to the input file (.csv, .txt, .xlsx, .xls).
+        rolling (bool, optional): If True, aggregate with 30-day rolling windows
+            instead of fixed calendar months. Defaults to False.
 
     Returns:
         tuple:
             - ts (np.ndarray): Monthly streamflow time series.
             - m_cal (np.ndarray): Corresponding calendar array [month, year].
+            - day (int or None): Anchor day of month used for rolling aggregation, if any.
 
     Raises:
         ValueError: If the file extension is not recognized.

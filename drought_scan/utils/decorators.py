@@ -3,16 +3,11 @@ author: PyDipa
 # © 2025 Arianna Di Paola
 # License: GNU General Public License v3.0 (GPLv3)
 
-Function decorators for logging and performance monitoring.
-
-This module provides decorators to:
-- **Measure execution time** of functions.
-- **Cache results** for optimized performance.
-- **Handle exceptions gracefully**.
-- **Enable debugging/logging** for selected operations.
+Function decorators for guarding methods on optional data.
 
 Main decorators:
-- `@requires_forecast_data`: Ensures forecast data are available before executing a method.
+- `@requires_forecast_data`: Ensures forecast data are available before executing a method;
+  otherwise warns and skips the call.
 
 Used by: `core.py`, `statistics.py`.
 """

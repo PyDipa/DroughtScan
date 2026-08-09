@@ -15,6 +15,7 @@ Used by  and 'core.py'
 
 from scipy import stats
 import numpy as np
+import warnings
 from typing import Optional
 import matplotlib.pyplot as plt
 from datetime import date,datetime,timedelta
@@ -52,15 +53,19 @@ def find_overlap(m_cal1, m_cal2):
 def concatenate_m_cal(m_cal1,m_cal2):
 
     """
-    Generates a new m_cal vector based on the relationship between self.m_cal and self.forecast_m_cal.
+    Generates a new m_cal vector based on the relationship between m_cal1 and m_cal2.
 
-    - If self.forecast_m_cal is fully contained within self.m_cal, it returns self.m_cal.
-    - If self.forecast_m_cal partially overlaps with self.m_cal, it returns their intersection.
-    - If self.forecast_m_cal is contiguous with self.m_cal, it returns their union.
+    - If m_cal2 is fully contained within m_cal1, it returns m_cal1.
+    - If m_cal2 partially overlaps with m_cal1, it returns their intersection.
+    - If m_cal2 is contiguous with m_cal1, it returns their union.
     - If there is a gap between the two time ranges, it raises an error.
 
+    Args:
+        m_cal1 (np.ndarray): First calendar array [[month, year], ...].
+        m_cal2 (np.ndarray): Second calendar array [[month, year], ...].
+
     Returns:
-        np.ndarray: The modified m_cal based on the above conditions.
+        np.ndarray: The combined/overlapping m_cal based on the above conditions.
     Raises:
         ValueError: If there is a time gap between the two time ranges.
     """
@@ -183,7 +188,8 @@ def _fit_single_dist(dataset,dist=None,shift_for_gamma = True):
     Raises
     ------
     ValueError
-        If Gamma is requested on non-positive data with shift_for_gamma=False.
+        If Gamma is requested and the data used for fitting (dataset, or
+        dataset + 1 when shift_for_gamma=True) still contains non-positive values.
     """
     if dist is None:
         dist = 'gaussian'
@@ -344,7 +350,7 @@ def _bootstrap_ks_pvalue(dataset:np.ndarray,fit_result: dict,
     return float(np.mean(valid >= D_obs))
 
 # Fit all four families to `dataset` and return a comparison dict.
-def _analyze_all(dataset, shift_for_gamma = True,  n_bootstrap=0):
+def _analyze_all(dataset, shift_for_gamma = True,  n_bootstrap=0, seed=None):
     """
     Fit all four families to `dataset` and return a comparison dict.
 
@@ -359,7 +365,7 @@ def _analyze_all(dataset, shift_for_gamma = True,  n_bootstrap=0):
     _, p_normal = stats.normaltest(dataset)
 
     fits: dict[str, dict] = {}
-    rng = np.random.Generator
+    rng = np.random.default_rng(seed)
     for d in _ALL_DISTS:
         try:
             res = _fit_single_dist(dataset, d, shift_for_gamma=shift_for_gamma)
@@ -544,7 +550,7 @@ def test_standardization(data, groups=None, shift_for_gamma = True,
 
 
     if groups is None:
-        result = _analyze_all(data, shift_for_gamma, n_bootstrap)
+        result = _analyze_all(data, shift_for_gamma, n_bootstrap, seed=seed)
         if plot:
             fig = _plot_cdf_comparison(data, result)
             plt.show()
@@ -557,7 +563,7 @@ def test_standardization(data, groups=None, shift_for_gamma = True,
     results = {}
     for g in np.unique(groups):
         subset = data[groups == g]
-        res    = _analyze_all(subset, shift_for_gamma, n_bootstrap)
+        res    = _analyze_all(subset, shift_for_gamma, n_bootstrap, seed=seed)
         if plot:
             fig = _plot_cdf_comparison(subset, res, title=str(g))
             plt.show()
@@ -968,13 +974,13 @@ def plot_cdf_comparison(data, dist="gamma", params=None, shift_for_gamma=True,un
         If None, parameters are fitted internally.
     shift_for_gamma : bool
         If True and dist == "gamma", data are shifted by +1 as in fit_distribution_stats.
-    ax : matplotlib axis or None
-        Optional axis to draw on.
+    unit : str or None
+        Label for the data axis (x-axis of both panels). Defaults to "value".
 
     Returns
     -------
-    ax : matplotlib axis
-        The axis containing the final plot.
+    None
+        Displays the figure (histogram + PDF, empirical vs theoretical CDF).
     """
     if unit==None:
         unit = "value"
@@ -1066,7 +1072,7 @@ def _rolling_trend_analysis(var, window=60, significance=0.05):
     """
     Perform rolling trend analysis on a given time series.
     Args:
-        Y (ndarray): Input time series array.
+        var (ndarray): Input time series array.
         window (int): Window size in months for rolling regression.
         significance (float): p-value threshold for trend significance.
 
@@ -1119,20 +1125,21 @@ def _rolling_phase_test(DSO, window=60, alpha=0.05, min_valid=None):
     matching the CDN time axis.
 
     Args:
-        spi1 (ndarray): 1-month SPI-like series (e.g. DSO.spi_like_set[0]).
+        DSO (object): DroughtScan object; the 1-month SPI-like series is read
+            internally from `DSO.spi_like_set[0]`.
         window (int): window length in months (= accumulation scale W).
         alpha (float): two-sided significance level.
         min_valid (int, optional): min number of non-NaN months to run the test.
             Defaults to window // 2.
 
     Returns:
-        dict aligned to `spi1`:
+        dict aligned to the SPI-1 series:
             'phase'   : int  (+1 significant wetting, -1 significant drying, 0 otherwise)
             'mean'    : float (mean SPI1 over the window, NaN where undefined)
             'p_value' : float (two-sided p-value, NaN where undefined)
     """
     from scipy.stats import ttest_1samp
-    spi1 = self.spi_like_set[0]
+    spi1 = DSO.spi_like_set[0]
     n = len(spi1)
     if min_valid is None:
         min_valid = window // 2

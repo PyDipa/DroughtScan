@@ -80,8 +80,9 @@ def _figure_size_for_length(n: object) -> object:
     return round(w, 1), round(h, 1)
 
 def spi_cmap(n_levels=13):
+    """Create a red-2-green palette using the colors by cmcrameri (falls back
+    to heatmap_cmap() if cmcrameri is not installed)."""
     if cmc is not None:
-        """Create a red-2-green palette using the coulors by Crimeri"""
         # take part of colors by lajolla (red) bamako (green)
         n_half = (n_levels - 2) // 2  # esempio: 5 su 13
         # ROSSI puri: prendiamo solo da index 0.40 a 0.75
@@ -416,11 +417,12 @@ def plot_severe_events(DSO, tstartid, duration, deficit, max_events=None, labels
     Generalized plot for severe drought events, ordered by magnitude or duration.
 
     Args:
+        DSO (object): DroughtScan object providing the calendar (`DSO.m_cal`) for event labels.
         tstartid (ndarray): Indices marking the start of each drought event.
-        tendid (ndarray): Indices marking the end of each drought event.
         duration (ndarray): Duration (in time steps) of each drought event.
         deficit (ndarray): Water deficit for each drought event.
         max_events (int, optional): Maximum number of events to plot. Defaults to None (all events).
+        labels (bool, optional): If True, annotate bars with event start dates. Defaults to False.
         unit (str, optional): Unit of measure for the data. Defaults to "mm".
         name (string, optional): the name of the basin identified by the shape
     """
@@ -481,7 +483,7 @@ def plot_cdn_trends_old(DSO, windows, figsize=(14,10),ax=None,year_ext=None,unit
         DSO: DroughtScan-like object containing the CDN time series,
              method `find_trends(window=...)`, calendar `m_cal`,
              and transformation coefficients `c2r_index`.
-        windows (list of int, optional): List of moving window sizes (in months)
+        windows (list of int): List of moving window sizes (in months)
              over which to compute and visualize trend magnitudes.
 
     Notes:
@@ -526,7 +528,7 @@ def plot_cdn_trends_old(DSO, windows, figsize=(14,10),ax=None,year_ext=None,unit
 
     # Quanto vale 1σ (z=+1) in unità native (mm per Precipitation, m³/s per Streamflow), mese per mese
     std_to_native_rate_monthly = np.abs(np.array([
-        np.polyval(coeff[0, m, :], 1) - normal_values[m] for m in range(12)
+        c2r_eval(coeff[0, m, :], 1, DSO.calculation_method) - normal_values[m] for m in range(12)
     ]))
 
     # Mappo il rate stagionale su ogni step della serie temporale
@@ -645,9 +647,8 @@ def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
       `DSO.deficit_from_spi(window)`, i.e. the SPI-like anomaly at the accumulation
       scale equal to the window length, converted back to native cumulative units
       via the `c2r_index` calibration relative to the SPI=0 reference. Bars are set
-      to zero wherever `find_trends` detects no statistically significant monotonic
-      trend, so that a magnitude is reported only during phases of significant
-      change.
+      to zero wherever the SPI-like anomaly at the window scale falls within
+      [-0.5, 0.5], so that a magnitude is reported only outside this near-neutral band.
 
       Args:
           DSO: DroughtScan-like object exposing the CDN series, the calendar
@@ -671,9 +672,7 @@ def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
               as breaks in the SPI line.
 
       Returns:
-          dict: `Changes`, mapping each window size to its array of deficit/surplus
-          values (in native units, zeroed where no significant trend is detected).
-          The function also renders the figure.
+          None. Displays the figure.
       """
 
     from drought_scan.core import Streamflow
@@ -778,8 +777,10 @@ def monthly_profile(DSO,var=None, var_name=None,cumulate=False, ax=None,highligh
 
     Parameters
     ----------
-    var : a DSO timeseries to be profiled. If None, `self.ts` will be used as default.
-        Must be a 1D array with the same length as `self.m_cal`.
+    DSO : DroughtScan-like object providing `DSO.ts` and `DSO.m_cal`.
+
+    var : a DSO timeseries to be profiled. If None, `DSO.ts` will be used as default.
+        Must be a 1D array with the same length as `DSO.m_cal`.
 
     var_name : str or None, optional
         Optional label to include in the plot title.
@@ -943,6 +944,8 @@ def plot__covariates(DSO, streamflow, weight_index, year_ext=None, split_plot=Fa
             (1) Optimal SIDI vs SQI1
             (2) Their difference (SQI1 - SIDI).
         If False (default), combines both in a single figure with two stacked panels.
+        In both cases, an additional figure with a time series + scatter comparison
+        is always rendered.
 
     Notes
     -----
