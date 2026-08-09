@@ -647,6 +647,21 @@ class BaseDroughtAnalysis:
             sidi.append(sidi_w)
         return np.array(sidi, dtype=float)
 
+    @staticmethod
+    def _zscore_baseline(values, baseline, context=""):
+        """
+        Standardize `values` to zero mean / unit variance using `baseline`
+        (already sliced/masked to the reference period) for mean/std. Same
+        formula as f_zscore's core standardization, factored out so
+        _calculate_SIDI/recalculate_SIDI/recalculate_SIDI_seasonal share one
+        implementation instead of each reimplementing it independently.
+        """
+        mean = np.nanmean(baseline, axis=0)
+        std = np.nanstd(baseline, axis=0)
+        if np.any(~np.isfinite(std)) or np.any(std == 0):
+            raise ValueError(f"Zero or non-finite std in baseline{context}; cannot standardize.")
+        return (values - mean) / std
+
     def _calculate_SIDI(self):
         """
         Compute the Standardized Integrated Drought Index (SIDI).
@@ -664,14 +679,7 @@ class BaseDroughtAnalysis:
             raise ValueError("Invalid baseline indices: start index must be less than or equal to end index.")
 
         # Standardize the SIDI values
-        baseline_values = sidi[tb1_id:tb2_id + 1, :]
-        baseline_mean = np.nanmean(baseline_values, axis=0)
-        baseline_std = np.nanstd(baseline_values, axis=0)
-
-        if np.any(baseline_std == 0):
-            raise ValueError("Baseline standard deviation contains zero values, cannot standardize.")
-
-        SIDI = (sidi - baseline_mean) / baseline_std
+        SIDI = self._zscore_baseline(sidi, sidi[tb1_id:tb2_id + 1, :])
         return SIDI
 
     @property
@@ -719,12 +727,7 @@ class BaseDroughtAnalysis:
 
         # Standardize on the original baseline
         tb1_id, tb2_id = baseline_indices(self.m_cal, self.start_baseline_year, self.end_baseline_year)
-        baseline = sidi_matrix[tb1_id:tb2_id + 1, :]
-        mean = np.nanmean(baseline, axis=0)
-        std = np.nanstd(baseline, axis=0)
-        if np.any(~np.isfinite(std)) or np.any(std == 0):
-            raise ValueError("Zero or non-finite std in baseline; cannot standardize SIDI.")
-        SIDI_new = (sidi_matrix - mean) / std
+        SIDI_new = self._zscore_baseline(sidi_matrix, sidi_matrix[tb1_id:tb2_id + 1, :])
 
         return SIDI_new
 
@@ -837,14 +840,8 @@ class BaseDroughtAnalysis:
                       f"valid baseline points; skipping standardisation.")
                 continue
 
-            mean = np.nanmean(SIDI_raw[bl])
-            std = np.nanstd(SIDI_raw[bl])
-            if std == 0 or not np.isfinite(std):
-                raise ValueError(
-                    f"Zero or non-finite std in baseline for season "
-                    f"'{season_name}'; cannot standardize SIDI.")
-
-            SIDI[season_mask] = (SIDI_raw[season_mask] - mean) / std
+            SIDI[season_mask] = self._zscore_baseline(
+                SIDI_raw[season_mask], SIDI_raw[bl], context=f" for season '{season_name}'")
 
         return SIDI
 

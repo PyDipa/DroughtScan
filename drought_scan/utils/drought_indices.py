@@ -377,7 +377,7 @@ def f_spei(balance, stride, m, m_cal, tb1, tb2, fit_params=None):
     # --- CDF → normal quantile ---
     fx = pearson3.cdf(x, skew=c, loc=loc, scale=scale)
     fx = np.clip(fx, 3.17e-5, 1 - 3.17e-5)
-    spei = norm.ppf(fx, loc=0, scale=1)
+    spei = np.round(norm.ppf(fx, loc=0, scale=1), 4)
 
     # --- Reverse mapping ---
     coef = _reverse_polyfit(spei, xbase, m_cal, idmesi_all, tb1, tb2, stride, m)
