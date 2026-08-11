@@ -209,3 +209,48 @@ def test_fit_params_legacy_shape_warns_and_falls_back():
 
     # fallback == recalibration, i.e. same result as fitting from scratch
     assert np.allclose(np.nanmean(spi_legacy), np.nanmean(spi_ref), atol=1e-6)
+
+
+@pytest.mark.parametrize("calculation_method_name", ["f_spi", "f_kde"])
+def test_zero_inflation_estimated_on_baseline(calculation_method_name):
+    """qq is P(X=0) of the fitted mixture, so it must be estimated on the
+    baseline — the same sample the continuous part is fitted on. Zeros that
+    occur only outside the baseline must not enter it."""
+    from drought_scan.utils import drought_indices as di
+
+    f = getattr(di, calculation_method_name)
+    obj = _build_synthetic_dso(di.f_kde)          # strictly positive series
+    ts = obj.ts.copy()
+
+    # zeros only AFTER the baseline (baseline is 1981-2010)
+    post = np.where(obj.m_cal[:, 1] > 2010)[0]
+    ts[post[:20]] = 0.0
+
+    _, _, _, params = f(ts, 1, 7, obj.m_cal, 1981, 2010)
+    qq = params["qq"] if isinstance(params, dict) else None
+    if qq is not None:                             # f_kde exposes it, f_spi does not
+        assert qq == 0.0, f"qq picked up out-of-baseline zeros: {qq}"
+
+
+def test_log_transform_decided_on_baseline_is_not_retroactive():
+    """The log decision comes from the baseline, so appending/altering data
+    outside it cannot change already-computed historical SPI values (it used
+    to flip the whole cell to a different model)."""
+    from drought_scan.utils.drought_indices import f_kde
+
+    obj = _build_synthetic_dso(f_kde)
+    idx = np.where((obj.m_cal[:, 0] == 6) & (obj.m_cal[:, 1] == 2015))[0][0]
+
+    i0, spi0, _, _ = f_kde(obj.ts, 1, 6, obj.m_cal, 1981, 2010)
+    ts_dry = obj.ts.copy()
+    ts_dry[idx] = 0.0                              # one dry month, outside baseline
+    _, spi1, _, _ = f_kde(ts_dry, 1, 6, obj.m_cal, 1981, 2010)
+
+    pos = np.where(i0 == idx)[0][0]
+    other = np.setdiff1d(np.arange(len(spi0)), [pos])
+    delta = np.abs(np.asarray(spi1)[other] - np.asarray(spi0)[other])
+
+    assert np.nanmax(delta) == 0.0, (
+        f"altering data outside the baseline moved historical SPI by "
+        f"{np.nanmax(delta)}"
+    )

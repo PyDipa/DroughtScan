@@ -322,8 +322,12 @@ def f_spi(prec, stride, m, m_cal, tb1, tb2, fit_params=None):
         alpha, loc, beta = fit_params
 
     # --- CDF with zero-inflation ---
+    # qq is P(X=0) of the fitted mixture: estimated on the BASELINE, i.e. the same
+    # sample the Gamma above is fitted on (xbase[xbase > 0]). Taking it from the
+    # full period would mix two samples and let appended data shift past SPI values.
     Gx = gamma.cdf(x, a=alpha, loc=loc, scale=beta)
-    qq = np.sum(x == 0) / len(x)
+    xbase_valid = xbase[np.isfinite(xbase)]
+    qq = float(np.sum(xbase_valid == 0) / xbase_valid.size) if xbase_valid.size else 0.0
     Hx = qq + (1 - qq) * Gx
     Hx = np.clip(Hx, 3.17e-5, 1 - 3.17e-5)
 
@@ -524,8 +528,17 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
     finite_x = np.isfinite(x)
     finite_xbase = np.isfinite(xbase)
 
+    # --- Zero-inflation fraction, estimated on the BASELINE ---
+    # qq is P(X=0) of the fitted mixture, so it must come from the same sample as
+    # the rest of the fit. Estimating it on the full period would let data appended
+    # later change the calibration — and hence already-published SPI values.
+    xbase_valid = xbase[finite_xbase]
+    qq = float(np.sum(xbase_valid == 0) / xbase_valid.size) if xbase_valid.size else 0.0
+
     # --- Optional log-transform ---
-    if log_transform and np.nanmin([np.nanmin(xbase), np.nanmin(x)]) <= 0:
+    # Decided on the BASELINE only, for the same reason: the baseline defines the
+    # model, and evaluation data must not silently re-decide which model was fitted.
+    if log_transform and np.nanmin(xbase) <= 0:
         warnings.warn(
             f"f_kde: zeros or non-positive data detected in month {m} - month-scale {stride} → log_transform disabled ",
             RuntimeWarning, stacklevel=2
@@ -538,6 +551,14 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
             xbase_log = np.log(xbase)
         finite_x = np.isfinite(x_log)
         finite_xbase = np.isfinite(xbase_log)
+        # Negative values are outside the domain the model was calibrated on:
+        # they yield NaN rather than silently switching to a different model.
+        if np.any(np.isfinite(x) & (x < 0)):
+            warnings.warn(
+                f"f_kde: negative values outside the log-calibrated domain "
+                f"(month {m}, month-scale {stride}) → SPI is NaN for those months.",
+                RuntimeWarning, stacklevel=2
+            )
 
     # Early exit if no valid data
     if not np.any(finite_x):
@@ -558,7 +579,6 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
 
         kde = gaussian_kde(xb, bw_method="silverman")
         h = 0.9 * np.std(xb, ddof=1) * xb.size ** (-1 / 5)
-        qq = np.sum(x == 0) / len(x)
         out_params = {
             "kde": kde,
             "bw_factor": float(kde.factor),
@@ -598,7 +618,6 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
             )
             xb = xbase_log[finite_xbase] if log_transform else xbase[finite_xbase]
             h = 0.9 * np.std(xb, ddof=1) * xb.size ** (-1 / 5)
-            qq = np.sum(x == 0) / len(x)
         out_params = None
 
     # --- CDF evaluation (exact; same formula reused by native_to_spi/spi_to_native) ---
