@@ -311,3 +311,52 @@ def test_degenerate_grid_point_reports_error_not_short_tuple():
     assert len(result) == 3
     sidi_vals, spi_vals, err = result          # must not raise
     assert sidi_vals is None and err is not None
+
+
+def test_recalculate_sidi_scalar_k_unchanged():
+    """A scalar K must keep producing exactly what the single-K implementation
+    always produced — the per-weight K support must not perturb it."""
+    from drought_scan.utils.drought_indices import (
+        f_kde, generate_weights, weighted_metrics, baseline_indices,
+    )
+
+    obj = _build_synthetic_dso(f_kde)
+    K = 3
+    W = generate_weights(K)
+    raw = np.array([
+        [weighted_metrics(obj.spi_like_set[:K, t], w)[0] for w in W.T]
+        for t in range(len(obj.m_cal))
+    ])
+    tb1, tb2 = baseline_indices(obj.m_cal, 1981, 2010)
+    base = raw[tb1:tb2 + 1, :]
+    expected = (raw - np.nanmean(base, axis=0)) / np.nanstd(base, axis=0)
+
+    assert np.allclose(obj.recalculate_SIDI(K), expected, equal_nan=True)
+
+
+def test_recalculate_sidi_per_weight_k():
+    """Each weighting scheme peaks at its own K, so SIDI must accept one K per
+    column — and every column must equal what that K alone would have given."""
+    from drought_scan.utils.drought_indices import f_kde
+
+    obj = _build_synthetic_dso(f_kde)
+    Ks = [1, 2, 3, 2, 1]
+    sidi = obj.recalculate_SIDI(Ks)
+
+    assert sidi.shape == (len(obj.m_cal), 5)
+    for wi, k in enumerate(Ks):
+        assert np.allclose(sidi[:, wi], obj.recalculate_SIDI(k)[:, wi], equal_nan=True)
+
+
+def test_resolve_per_weight_k_validation():
+    """Bad K values must be rejected before any state is modified."""
+    from drought_scan.core import BaseDroughtAnalysis
+
+    with pytest.raises(ValueError):
+        BaseDroughtAnalysis._resolve_per_weight_K([1, 2, 3], n_scales=12)   # wrong length
+    with pytest.raises(ValueError):
+        BaseDroughtAnalysis._resolve_per_weight_K(0, n_scales=12)           # non-positive
+    with pytest.raises(ValueError):
+        BaseDroughtAnalysis._resolve_per_weight_K(99, n_scales=12)          # beyond scales
+
+    assert list(BaseDroughtAnalysis._resolve_per_weight_K(4, n_scales=12)) == [4] * 5

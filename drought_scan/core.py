@@ -627,25 +627,66 @@ class BaseDroughtAnalysis:
         else:
             raise ValueError(f"Unknown calculation_method: {base_func}")
 
-    def _spi_like_set_ensemble_mean(self):
+    @staticmethod
+    def _resolve_per_weight_K(K, n_scales):
+        """
+        Normalize `K` into one month-scale per weighting scheme.
+
+        Each weighting scheme has its own optimal K (see analyze_correlation, which
+        scores every (K, weight) pair): a scalar applies the same K to all schemes —
+        the historical behaviour — while a sequence assigns one K per column, so
+        every column of SIDI stays interpretable on its own terms.
+
+        Args:
+            K (int or sequence of int): single scale, or one per weighting scheme.
+            n_scales (int): number of SPI-like scales available.
+
+        Returns:
+            ndarray: shape (n_weights,), the scale to use for each weighting scheme.
+        """
+        n_weights = generate_weights(1).shape[1]
+        Ks = np.atleast_1d(np.asarray(K)).ravel()
+        if Ks.size == 1:
+            Ks = np.repeat(Ks, n_weights)
+        if Ks.size != n_weights:
+            raise ValueError(
+                f"K must be a single integer or one per weighting scheme "
+                f"({n_weights}); got {Ks.size} values.")
+        Ks = Ks.astype(int)
+        if np.any(Ks <= 0):
+            raise ValueError("K must be a positive integer.")
+        if np.any(Ks > n_scales):
+            raise ValueError(f"K={int(Ks.max())} exceeds available scales ({n_scales}).")
+        return Ks
+
+    def _spi_like_set_ensemble_mean(self, K=None):
         """
     Compute the weighted SIDI values using predefined weighting functions.
 
+    Args:
+        K (int or sequence of int, optional): month-scale(s) to aggregate over —
+            a single value for all weighting schemes, or one per scheme. Defaults
+            to self.optimal_k when set (i.e. after set_optimal_SIDI), else self.K.
+
     Returns:
-        ndarray: Weighted SIDI values (time steps x number of implemented weighting function).
+        ndarray: Weighted SIDI values (time steps x number of implemented weighting function),
+        not yet standardized.
 
     """
-        K = self.K if not hasattr(self, 'optimal_k') or self.optimal_k is None else self.optimal_k
-        # print(f'************************************')
-        # print(f'spiset ensamble mean up to SPI-{K}')
-        weights = generate_weights(K)
-        # weights = generate_weights(self.K)
-        sidi = []
-        for j in range(len(self.m_cal)):
-            vec = self.spi_like_set[:K, j]
-            sidi_w = [weighted_metrics(vec, w)[0] for w in weights.T]
-            sidi.append(sidi_w)
-        return np.array(sidi, dtype=float)
+        if K is None:
+            K = getattr(self, 'optimal_k', None)
+            if K is None:
+                K = self.K
+
+        n_scales, T = self.spi_like_set.shape
+        Ks = self._resolve_per_weight_K(K, n_scales)
+
+        sidi = np.empty((T, len(Ks)), dtype=float)
+        for wi, k in enumerate(Ks):
+            w = generate_weights(int(k))[:, wi]
+            for j in range(T):
+                sidi[j, wi] = weighted_metrics(self.spi_like_set[:k, j], w)[0]
+        return sidi
 
     @staticmethod
     def _zscore_baseline(values, baseline, context=""):
@@ -677,17 +718,17 @@ class BaseDroughtAnalysis:
             ndarray: SIDI values (time steps x number of implemented weighting function) standardized to zero mean and unit variance.
 
         """
-        # Get baseline indices and ensemble mean
-        tb1_id, tb2_id = baseline_indices(self.m_cal,self.start_baseline_year,self.end_baseline_year)
-        sidi = self._spi_like_set_ensemble_mean()
-
         # Validate baseline indices
+        tb1_id, tb2_id = baseline_indices(self.m_cal,self.start_baseline_year,self.end_baseline_year)
         if tb1_id >= tb2_id:
             raise ValueError("Invalid baseline indices: start index must be less than or equal to end index.")
 
-        # Standardize the SIDI values
-        SIDI = self._zscore_baseline(sidi, sidi[tb1_id:tb2_id + 1, :])
-        return SIDI
+        # Uses self.optimal_k when set (after set_optimal_SIDI), else self.K —
+        # resolved inside _spi_like_set_ensemble_mean, which recalculate_SIDI shares.
+        K = getattr(self, 'optimal_k', None)
+        if K is None:
+            K = self.K
+        return self.recalculate_SIDI(K)
 
     @property
     def is_seasonal_sidi(self):
@@ -701,36 +742,22 @@ class BaseDroughtAnalysis:
 
         Parameters
         ----------
-        K : int
-          Number of SPI-like scales to use for SIDI recalculation (top-K).
+        K : int or sequence of int
+          Number of SPI-like scales to use for SIDI recalculation (top-K). A single
+          value applies the same scale to every weighting scheme; a sequence assigns
+          one scale per scheme, in the column order of ``generate_weights`` — which is
+          what ``analyze_correlation`` reports as ``best_k_per_weight``, since each
+          scheme peaks at a different K.
 
         Returns
         -------
         np.ndarray
           SIDI array with shape (time, n_weightings).
         """
+        if K is None:
+            raise ValueError("K must be a positive integer, or one per weighting scheme.")
 
-        if K is None or K <= 0:
-            raise ValueError("K must be a positive integer.")
-
-        n_scales, T = self.spi_like_set.shape
-        if K > n_scales:
-            raise ValueError(f"K={K} exceeds available scales ({n_scales}).")
-
-        # weights: shape (K, n_weightings)
-        weights = generate_weights(K)
-        if weights.shape[0] != K:
-            raise RuntimeError("generate_weights(K) returned unexpected shape.")
-
-        # Build SIDI (time x n_weightings)
-        # self.spi_like_set has shape (scales, time). We use the first K rows.
-        sidi_matrix = []
-        for j in range(T):
-            vec = self.spi_like_set[:K, j]
-            sidi_w = [weighted_metrics(vec, w)[0] for w in weights.T]  # one value per weight_index
-            sidi_matrix.append(sidi_w)
-
-        sidi_matrix = np.array(sidi_matrix)  # (time, n_weightings)
+        sidi_matrix = self._spi_like_set_ensemble_mean(K)
 
         # Standardize on the original baseline
         tb1_id, tb2_id = baseline_indices(self.m_cal, self.start_baseline_year, self.end_baseline_year)
@@ -896,10 +923,17 @@ class BaseDroughtAnalysis:
         Returns
         -------
         dict
-            - "best_k" (int): Optimal month-scale (K).
+            - "best_k" (int): Optimal month-scale (K) of the best (K, weight) pair.
             - "col_best_weight" (int): Index of the best weighting function.
             - "max_correlation" (float): Maximum R² value achieved.
             - "spi_corr" (ndarray): Sorted single-scale SPI vs SQI₁ R² values.
+            - "best_k_per_weight" (ndarray, shape (5,)): optimal K of *each*
+              weighting scheme — every scheme peaks at a different K. Pass this to
+              ``set_optimal_SIDI`` to give each column of SIDI its own scale.
+            - "max_correlation_per_weight" (ndarray, shape (5,)): the R² reached by
+              each scheme at its own optimal K.
+            - "MatCorr" (ndarray, shape (K, 5)): the full R² surface, i.e. the score
+              of every (K, weight) combination.
         """
         self._check_correlation_eligible()
 
@@ -1023,8 +1057,22 @@ class BaseDroughtAnalysis:
             plt.tight_layout()
             plt.show(block=False)
 
+        # Each weighting scheme peaks at its own K: MatCorr already scores every
+        # (K, weight) pair, so the per-scheme optimum is just the argmax of each
+        # column. Reported alongside the global best so that set_optimal_SIDI can
+        # give every column of SIDI its own scale (see recalculate_SIDI).
+        best_k_per_weight = K_range[np.argmax(MatCorr, axis=0)]
+        max_corr_per_weight = np.max(MatCorr, axis=0)
+
+        print("Best K per weighting scheme:")
+        for w, (kw, rw) in enumerate(zip(best_k_per_weight, max_corr_per_weight)):
+            print(f"   {wlabel[w]:<40s} K={kw:<3d} R2={rw:.3f}")
+
         return {"best_k": K_range[best_k], "col_best_weight": best_weight,
-                "max_correlation": max_corr, 'spi_corr': R2_spi}
+                "max_correlation": max_corr, 'spi_corr': R2_spi,
+                "best_k_per_weight": best_k_per_weight,
+                "max_correlation_per_weight": max_corr_per_weight,
+                "MatCorr": MatCorr}
 
     def analyze_correlation_seasonal(self, streamflow, agg='quarter', plot=True, seasons=None):
         """
@@ -3277,6 +3325,8 @@ class BaseDroughtAnalysis:
     def _savedsplot(self):
 
         k = self.K if not hasattr(self, 'optimal_k') or self.optimal_k is None else self.optimal_k
+        if np.ndim(k) > 0:   # per-weight K: keep the filename readable
+            k = "-".join(str(int(v)) for v in np.ravel(k))
         w = self.weight_index if not hasattr(self,
                                              'optimal_weight_index') or self.optimal_weight_index is None else self.optimal_weight_index
         baseline = self.start_baseline_year, self.end_baseline_year
@@ -4228,16 +4278,25 @@ class Precipitation(BaseDroughtAnalysis):
         Optionally store optimal_k (and optimal_weight_index) on this instance.
 
         Args:
-            optimal_k (int): optimal K determined by analyze_correlation(streamflow).
+            optimal_k (int or sequence of int): optimal K determined by
+                analyze_correlation(streamflow). Pass its ``best_k`` to apply a single
+                scale to every weighting scheme, or its ``best_k_per_weight`` to give
+                each column of SIDI its own optimal scale — each scheme peaks at a
+                different K, so with a single scale only the `optimal_weight_index`
+                column is calibrated at its own optimum.
             optimal_weight_index (int): specific weight index to track/store (0-based).
+                It marks which column downstream consumers should read; the other
+                columns remain valid in their own right when a per-scheme K is used.
             overwrite (bool): if True, updates self.SIDI and stores self.optimal_k
                               and self.optimal_weight_index on the instance.
 
         Returns:
             np.ndarray: SIDI array (time x n_weightings) computed with optimal_k.
         """
-        if optimal_k is None or optimal_k < 0:
-            raise ValueError("optimal_k must be a positive integer obtained by SIDI vs SQI1 optimitation (use 'analize_correlation' method to estimate optima_k.")
+        if optimal_k is None:
+            raise ValueError("optimal_k must be a positive integer (or one per weighting scheme) obtained by SIDI vs SQI1 optimitation (use 'analize_correlation' method to estimate optima_k.")
+        # validated here so a bad K fails before any state is touched
+        self._resolve_per_weight_K(optimal_k, self.spi_like_set.shape[0])
 
         if optimal_weight_index is None or optimal_weight_index < 0 or  optimal_weight_index >= 5:
             raise ValueError(
@@ -5143,16 +5202,25 @@ class Balance(BaseDroughtAnalysis):
         Optionally store optimal_k (and optimal_weight_index) on this instance.
 
         Args:
-            optimal_k (int): optimal K determined by analyze_correlation(streamflow).
+            optimal_k (int or sequence of int): optimal K determined by
+                analyze_correlation(streamflow). Pass its ``best_k`` to apply a single
+                scale to every weighting scheme, or its ``best_k_per_weight`` to give
+                each column of SIDI its own optimal scale — each scheme peaks at a
+                different K, so with a single scale only the `optimal_weight_index`
+                column is calibrated at its own optimum.
             optimal_weight_index (int): specific weight index to track/store (0-based).
+                It marks which column downstream consumers should read; the other
+                columns remain valid in their own right when a per-scheme K is used.
             overwrite (bool): if True, updates self.SIDI and stores self.optimal_k
                               and self.optimal_weight_index on the instance.
 
         Returns:
             np.ndarray: SIDI array (time x n_weightings) computed with optimal_k.
         """
-        if optimal_k is None or optimal_k < 0:
-            raise ValueError("optimal_k must be a positive integer obtained by SIDI vs SQI1 optimitation (use 'analize_correlation' method to estimate optima_k.")
+        if optimal_k is None:
+            raise ValueError("optimal_k must be a positive integer (or one per weighting scheme) obtained by SIDI vs SQI1 optimitation (use 'analize_correlation' method to estimate optima_k.")
+        # validated here so a bad K fails before any state is touched
+        self._resolve_per_weight_K(optimal_k, self.spi_like_set.shape[0])
 
         if optimal_weight_index is None or optimal_weight_index < 0 or  optimal_weight_index >= 5:
             raise ValueError(

@@ -82,7 +82,7 @@ After running `spatial_maps`, the following attributes are added to the DSO:
 - **`ds.SIDI_grid`** : ndarray, shape `(n_rows, n_cols, n_weights)`  
   SIDI at the target timestamp for all weighting schemes.  
   Access a specific weight with: `ds.SIDI_grid[:, :, weight_index]`  
-  Default display weight: `weight_index=2` (logarithmically decreasing).
+  Default display weight: `weight_index=2` (geometrically decreasing).
 
 - **`ds.SPI_grid`** : dict `{scale: ndarray (n_rows, n_cols)}`  
   SPI maps at the target timestamp for each scale in `month_scales`.  
@@ -138,7 +138,7 @@ You can extract any of them:
 ```python
 import matplotlib.pyplot as plt
 
-# Default: logarithmically decreasing weights (weight_index=2)
+# Default: geometrically decreasing weights (weight_index=2)
 sidi_map = ds.SIDI_grid[:, :, 2]
 
 # Equal weights

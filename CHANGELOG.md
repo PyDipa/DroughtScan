@@ -1,3 +1,88 @@
+## [3.7.0] - Unreleased
+
+### Added
+- `analyze_correlation`: now also reports the optimum of **each** weighting scheme,
+  not just the single best (K, weight) pair. The full R² surface over every
+  (K, weight) combination was already being computed and plotted, but discarded;
+  it is now returned. New keys: `best_k_per_weight` (5,), `max_correlation_per_weight`
+  (5,) and `MatCorr` (K, 5). The per-scheme optima are printed alongside the global
+  best.
+- `recalculate_SIDI` / `set_optimal_SIDI` / `_spi_like_set_ensemble_mean`: `K` may
+  now be a sequence with one value per weighting scheme, in addition to a single
+  integer. Each weighting scheme peaks at a different K, so applying one scalar K
+  left the four columns other than `optimal_weight_index` calibrated at a scale
+  chosen for a different scheme — values with no interpretation, yet
+  indistinguishable from valid ones. Passing `best_k_per_weight` gives every column
+  its own optimum. A scalar keeps the previous behaviour, bit-for-bit.
+
+### Changed
+- The SIDI weighting schemes built with `np.geomspace` were labelled
+  "logarithmic" everywhere user-facing, including plot labels and the guides; they
+  are geometric and are now named so (`gdw`/`giw` replace `lgdw`/`lgiw`).
+
+### Fixed
+- `normal_values`: tiled the 12 monthly normals from position 0 and truncated to
+  `len(ts)`, silently assuming the record starts in January — on a series starting
+  in August every timestep received the wrong month's normal. Each timestep now
+  takes the normal of its own calendar month. The 12-value climatology is available
+  as `_monthly_normals`.
+- `f_kde`: `fit_params` was accepted but ignored — `xb`, `h`, `qq` and
+  `log_transform` were recomputed from the supplied data, so a stored calibration
+  silently recalibrated on whatever it was applied to. It is the path the
+  scenarios/forecast module drives, where the whole point is to keep modified series
+  comparable to the original fit. Now honoured when the calibration keys are
+  present; when they are not (the dict shape emitted by older versions) the previous
+  behaviour is kept but an explicit `RuntimeWarning` states that the result is not in
+  the reference frame of the fit passed in.
+- `f_spi` / `f_kde`: the zero-inflation fraction `qq` was estimated over the whole
+  record while the continuous part of the same mixture was fitted on the baseline
+  alone. Both halves now come from the baseline.
+- `f_kde`: the log-transform decision was taken from `min(xbase, x)`, so a single
+  value anywhere in the record could flip an entire (scale, month) cell to a
+  different model family — appending one dry month moved historical SPI values by up
+  to 3.2. The decision now comes from the baseline alone; values outside the
+  calibrated domain yield NaN with an explicit warning instead of silently switching
+  model.
+- CDN was computed two different ways under one name: the basin-level version
+  cumulated SPI-1 from the start of the baseline, rounded to 3 decimals and zeroed
+  the span before it, while the pixel-level version in `_process_grid_point_trends`
+  cumulated from index 0 with no rounding and NaN before the baseline. Unified in
+  `_cdn_from_spi1`.
+- `deficit_from_spi`: converted Streamflow deficits to volume with a fixed average
+  month length, while `volume_anomaly_rolling` — its documented counterpart — used
+  each month's real length, diverging by up to 7.9%. It now averages the seconds of
+  the months actually inside the window.
+- `native_to_spi` / `spi_to_native`: did not clip cumulative probabilities, so the
+  forward transform saturated near ±4 while the reverse returned ±inf beyond the
+  calibrated range. Both now clip through the shared `PROB_CLIP` constant.
+- `_process_grid_point`: carried a fourth hand-rolled copy of the baseline z-score
+  with a weaker guard, and returned a 2-tuple on a degenerate baseline where the
+  caller unpacks three values. It now uses the shared `_zscore_baseline`, whose
+  error is caught and reported like any other grid-point failure.
+- `Streamflow.gap_filling`: `Q_pred` was referenced outside the block defining it,
+  crashing whenever a gap fell outside the precipitation overlap window.
+- `_rolling_phase_test`: referenced an undefined `self` instead of its `DSO`
+  parameter, failing on every call.
+- `test_standardization`: missing `import warnings` broke the handler meant to
+  warn-and-skip a failed fit, and the bootstrap RNG was the `Generator` class rather
+  than an instance, so `seed` was ignored and bootstrap p-values never computed.
+- `c2r_index` is `[mean, std]` for `calculation_method=f_zscore`, but every reverse
+  conversion evaluated it with `np.polyval`, computing `mean*x + std` instead of
+  `x*std + mean` — wrong everywhere except by coincidence at x=1.
+- `f_spei`: now rounds to 4 decimals like `f_spi` and `f_kde`.
+
+### Internal
+- Exact numeric inverse for `f_kde` (`kde_cdf` / `kde_ppf`), so `native_to_spi`,
+  `spi_to_native` and `spatial_trends` support it instead of raising
+  `NotImplementedError`. All live (non-`_old`) reverse conversions now go through
+  the exact inverse of the fitted distribution rather than the degree-3 polynomial
+  approximation; `c2r_index` is still computed and stored for backward
+  compatibility.
+- Baseline z-score standardization deduplicated into `_zscore_baseline`
+  (was reimplemented independently in four places, with inconsistent guards).
+- Docstrings across `core.py` and `utils/` corrected against the implementation
+  after a full audit (signatures, return values, defaults, described behaviour).
+
 ## [3.6.2] - Unreleased
 
 ### Added

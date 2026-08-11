@@ -48,7 +48,7 @@ ds.plot_scan()
 
 ```python
 ds.plot_scan(optimal_k=10)           # Highlight an optimal integration timescale
-ds.plot_scan(weight_index=4)         # Use logarithmically increasing weights for SIDI
+ds.plot_scan(weight_index=4)         # Use geometrically increasing weights for SIDI
 ds.plot_scan(year_ext=(2000,2010))   # Zoom in on a specific period
 ds.plot_scan(plot_order='HSC')       # set the order of the subplots: H > heatmap; S = SIDI ==(D(SPI)); C=CDN
 ds.plot_scan(split_plot=True)        # plot Heatmap, SIDI and CDN in single plots 

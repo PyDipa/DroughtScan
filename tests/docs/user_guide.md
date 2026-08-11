@@ -138,13 +138,13 @@ Below are the most impactful options, with defaults and when you might want to c
   [statistics_tools.md](statistics_tools.md).
 
 - **`weight_index` (int)** — *weighting scheme for SIDI aggregation across scales*  
-  Default: `2` (logarithmically decreasing).  
+  Default: `2` (geometrically decreasing).  
   Options:
   - `0`: equal weights  
   - `1`: linear decreasing  
-  - `2`: **logarithmically decreasing** *(default; favors recent months)*  
+  - `2`: **geometrically decreasing** *(default; favors recent months)*  
   - `3`: linear increasing  
-  - `4`: logarithmically increasing  
+  - `4`: geometrically increasing  
 
   In practice, decreasing schemes (1–2) often improve responsiveness to recent conditions while preserving multi-scale context.
 
@@ -253,9 +253,9 @@ You can always extract raw arrays and build your own plots.
 Note that ds.SIDI holds 5 time-series, one for each weighting scheme:
   - `0`: equal weights  
   - `1`: linear decreasing  
-  - `2`: **logarithmically decreasing** *(default; favors recent months)*  
+  - `2`: **geometrically decreasing** *(default; favors recent months)*  
   - `3`: linear increasing  
-  - `4`: logarithmically increasing  
+  - `4`: geometrically increasing  
 
 ```python
 import matplotlib.pyplot as plt
@@ -465,7 +465,7 @@ It works by testing different month-scales (K) and weighting functions applied t
 
 What it does:
 - Finds the overlapping time period between the driver and streamflow data.
-- Computes SIDI values for multiple temporal scales (K) and weighting schemes (equal, linear, logarithmic).
+- Computes SIDI values for multiple temporal scales (K) and weighting schemes (equal, linear, geometric).
 - Evaluates the correlation (R²) between each SIDI configuration and the streamflow SQI1.
 - Identifies the best K and weighting scheme that maximize correlation.
 - Optionally produces plots showing how R² varies with K across weighting schemes, the relationship between the optimized SIDI and SQI1, and a diagnostic scan plot with the optimal configuration.
@@ -526,6 +526,26 @@ sidi_opt    = SIDI_matrix[:, A['col_best_weight']]            # 1D vector (time,
 
 ```
 
+**Each weighting scheme has its own optimal K.** `A['best_k']` is the K of the single
+best (K, weight) pair — applying it to all five columns leaves the other four
+calibrated at a scale that is not their own. `analyze_correlation` also reports the
+optimum of every scheme, so each column of SIDI can keep its own scale:
+
+```python
+A['best_k_per_weight']            # ndarray (5,) — optimal K of each weighting scheme
+A['max_correlation_per_weight']   # ndarray (5,) — R² each scheme reaches at its own K
+A['MatCorr']                      # ndarray (K, 5) — the full R² surface
+
+# every column optimized on its own terms; col_best_weight stays the one to read
+ds.set_optimal_SIDI(
+    optimal_k=A['best_k_per_weight'],
+    optimal_weight_index=A['col_best_weight'],
+    overwrite=True
+)
+```
+
+Passing a single integer keeps the historical behaviour, so existing code is unaffected.
+
 ### 9.1.1) Seasonal correlation analysis
 
 The method `analyze_correlation_seasonal` repeats the same optimization **per season**,
@@ -554,7 +574,7 @@ it affects how downstream methods (plotting, gap filling, forecasting) select
 the correct SIDI.
 
 **Global optimization** (`set_optimal_SIDI`):
-a single K and weight_index are applied to all months.
+the same K and weight_index are applied to all months.
 
 ```python
 A = ds.analyze_correlation(streamflow)
@@ -565,6 +585,19 @@ ds.set_optimal_SIDI(A['best_k'], A['col_best_weight'], overwrite=True)
 #   ds.optimal_weight_index  → int (the chosen column of SIDI)
 #   ds.SIDI                  → shape (N, 5), read column ds.optimal_weight_index
 #   ds.is_seasonal_sidi      → False
+```
+
+With a scalar K, **only the `optimal_weight_index` column is calibrated at its own
+optimum** — the other four are computed at a K chosen for a different scheme, so they
+should not be read. To keep all five interpretable, pass one K per scheme:
+
+```python
+ds.set_optimal_SIDI(A['best_k_per_weight'], A['col_best_weight'], overwrite=True)
+
+# After this call:
+#   ds.optimal_k             → ndarray (5,) — one K per weighting scheme
+#   ds.optimal_weight_index  → int (the column to read by default)
+#   ds.SIDI                  → shape (N, 5), every column at its own optimal K
 ```
 
 **Seasonal optimization** (`set_optimal_SIDI_seasonal`):
