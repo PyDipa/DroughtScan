@@ -2968,6 +2968,22 @@ class BaseDroughtAnalysis:
 
         return cdn
 
+    def _monthly_normals(self):
+        """
+          Compute the 12 monthly "normal" values (January..December) as the exact
+          inverse of the SPI-like index at scale 1 (SPI_like_index_1 == 0), via
+          `spi_to_native`.
+
+          Returns
+          -------
+          numpy.ndarray
+              Array of shape (12,), indexed by calendar month - 1.
+          """
+        Nn = np.zeros(12)
+        for m in range(12):
+            Nn[m] = self.spi_to_native(0.0, month_scale=1, ref_month=m + 1)
+        return Nn
+
     def normal_values(self):
         """
           Compute the "normal" values of the  climatology  using the inverse function of the SPI-like index.
@@ -2975,22 +2991,19 @@ class BaseDroughtAnalysis:
           This method calculates the "normal" values for the variable of interest based on the
           exact inverse of the SPI-like index at scale 1 (SPI_like_index_1 == 0), via
           `spi_to_native` (the fitted distribution's ppf, not the polynomial `c2r_index`
-          approximation). The normal values are computed for all months and tiled across
-          the entire timeframe.
+          approximation). Each timestep gets the normal of its own calendar month, read
+          from `self.m_cal` — so the result is aligned with `self.ts` whatever month the
+          series starts on.
 
           Returns
           -------
           numpy.ndarray
-              An array of "normal" values corresponding to the timeseries length (`self.ts`).
+              An array of "normal" values corresponding to the timeseries length (`self.ts`),
+              aligned month-by-month with it.
 
 
           """
-        Nn = np.zeros(12)
-        for m in range(12):
-            Nn[m] = self.spi_to_native(0.0, month_scale=1, ref_month=m + 1)
-        Normal = np.tile(np.squeeze(Nn),len(np.unique(self.m_cal[:,1])))
-        Normal = Normal[0:len(self.ts)]
-        return Normal
+        return self._monthly_normals()[self.m_cal[:, 0].astype(int) - 1]
 
     def deficit_from_spi(self, window, spi=None):
         """
@@ -3155,9 +3168,9 @@ class BaseDroughtAnalysis:
         if isinstance(self, Streamflow):
             DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
             seconds = np.array([DAYS_IN_MONTH[m - 1] * 86400 for m in months])
-            delta_per_month = (self.ts - normal[months - 1]) * seconds  # m³/mese
+            delta_per_month = (self.ts - normal) * seconds  # m³/mese
         else:  # Precipitation
-            delta_per_month = self.ts - normal[months - 1]  # mm/mese
+            delta_per_month = self.ts - normal  # mm/mese
 
         for i in range(window - 1, n):
             anomaly[i] = np.sum(delta_per_month[i - window + 1: i + 1])

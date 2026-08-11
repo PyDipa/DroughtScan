@@ -516,7 +516,7 @@ def plot_cdn_trends_old(DSO, windows, figsize=(14,10),ax=None,year_ext=None,unit
         fig = ax[0].figure
 
     anni = np.unique(DSO.m_cal[:, 1]).astype(int)
-    normal_values = DSO.normal_values()
+    normal_values = DSO._monthly_normals()   # 12 valori Gen..Dic (era normal_values()[0:12])
     coeff = DSO.c2r_index
     # average std, used to move from delta changes into mm
     # std_to_native_rate = [np.polyval(coeff[0, m, :], 1) - normal_values[m] for m in range(12)]

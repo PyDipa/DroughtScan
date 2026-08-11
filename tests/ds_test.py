@@ -60,16 +60,22 @@ def test_severe_events_detection():
     assert len(result[0]) > 0
 
 
-def _build_synthetic_dso(calculation_method, seed=3):
+def _build_synthetic_dso(calculation_method, seed=3, start_month=1):
     """Minimal BaseDroughtAnalysis instance from synthetic data, bypassing
     __init__ (which requires a shapefile for _area()). Shared by the
-    native_to_spi/spi_to_native roundtrip tests below."""
+    native_to_spi/spi_to_native roundtrip tests below.
+
+    `start_month` shifts the calendar so the series does not begin in January,
+    which is what exposes month-alignment bugs."""
     from drought_scan.core import BaseDroughtAnalysis
 
     rng = np.random.default_rng(seed)
     years = np.repeat(np.arange(1980, 2020), 12)
     months = np.tile(np.arange(1, 13), 40)
     m_cal = np.column_stack([months, years])
+    if start_month != 1:
+        # drop the leading months so the record starts on `start_month`
+        m_cal = m_cal[start_month - 1:]
     n = len(m_cal)
 
     from drought_scan.utils.drought_indices import f_kde, f_spi
@@ -150,3 +156,56 @@ def test_deficit_and_normal_values_real_data():
     deficit = ds.deficit_from_spi(window=3)
     assert deficit.shape == ds.ts.shape
     assert np.any(np.isfinite(deficit))
+
+
+def test_normal_values_aligned_on_non_january_start():
+    """normal_values() must give each timestep the normal of ITS OWN calendar
+    month, also when the record does not start in January (it used to tile
+    Jan..Dec from position 0, misaligning every timestep)."""
+    from drought_scan.utils.drought_indices import f_kde
+
+    obj = _build_synthetic_dso(f_kde, start_month=8)
+    normal = obj.normal_values()
+    clim = obj._monthly_normals()
+
+    assert normal.shape == obj.ts.shape
+    expected = clim[obj.m_cal[:, 0].astype(int) - 1]
+    assert np.allclose(normal, expected)
+
+
+@pytest.mark.parametrize("calculation_method_name", ["f_spi", "f_spei", "f_kde", "f_zscore"])
+def test_fit_params_is_honoured(calculation_method_name):
+    """Passing fit_params must apply the stored calibration to the new data
+    instead of recalibrating on it — otherwise scenario/forecast runs are
+    silently standardized against themselves. f_kde used to ignore it."""
+    from drought_scan.utils import drought_indices as di
+
+    f = getattr(di, calculation_method_name)
+    obj = _build_synthetic_dso(f)
+
+    _, spi_ref, _, params = f(obj.ts, 1, 3, obj.m_cal, 1981, 2010)
+    _, spi_scaled, _, _ = f(obj.ts * 2.0, 1, 3, obj.m_cal, 1981, 2010, fit_params=params)
+
+    # doubling the data under the ORIGINAL calibration must shift SPI upwards
+    assert np.nanmean(spi_scaled) > np.nanmean(spi_ref) + 0.5, (
+        f"{calculation_method_name}: fit_params appears to be ignored "
+        f"(ref={np.nanmean(spi_ref):.4f}, scaled={np.nanmean(spi_scaled):.4f})"
+    )
+
+
+def test_fit_params_legacy_shape_warns_and_falls_back():
+    """A fit_params dict without the calibration keys (the shape produced by
+    older versions) must degrade to recalibration WITH an explicit warning,
+    never a KeyError."""
+    from drought_scan.utils.drought_indices import f_kde
+
+    obj = _build_synthetic_dso(f_kde)
+    _, spi_ref, _, params = f_kde(obj.ts, 1, 3, obj.m_cal, 1981, 2010)
+    legacy = {k: params[k] for k in ("kde", "bw_factor", "n_fit", "fit_domain")}
+
+    with pytest.warns(RuntimeWarning, match="calibration keys"):
+        _, spi_legacy, _, _ = f_kde(obj.ts * 2.0, 1, 3, obj.m_cal, 1981, 2010,
+                                    fit_params=legacy)
+
+    # fallback == recalibration, i.e. same result as fitting from scratch
+    assert np.allclose(np.nanmean(spi_legacy), np.nanmean(spi_ref), atol=1e-6)

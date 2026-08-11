@@ -576,9 +576,29 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
         kde = fit_params.get("kde", None)
         if kde is None:
             raise ValueError("kde_params provided but missing key 'kde'.")
-        xb = xbase_log[finite_xbase] if log_transform else xbase[finite_xbase]
-        h = 0.9 * np.std(xb, ddof=1) * xb.size ** (-1 / 5)
-        qq = np.sum(x == 0) / len(x)
+
+        # Honour the stored calibration: xb/h/qq/log_transform ARE the fitted
+        # distribution, so reusing them is what keeps the new values in the
+        # calibration's reference frame (the whole point of passing fit_params —
+        # e.g. scenarios/forecast, where ts is modified but SPI must stay
+        # comparable to the original fit). Recomputing them here would silently
+        # recalibrate on the modified data instead.
+        if all(key in fit_params for key in ("xb", "h", "qq", "log_transform")):
+            xb = fit_params["xb"]
+            h = fit_params["h"]
+            qq = fit_params["qq"]
+            log_transform = fit_params["log_transform"]
+        else:
+            warnings.warn(
+                f"f_kde: fit_params provided without the calibration keys "
+                f"('xb', 'h', 'qq', 'log_transform') — recalibrating on the supplied "
+                f"data (month {m}, month-scale {stride}). The result is NOT in the "
+                f"reference frame of the fit that was passed in.",
+                RuntimeWarning, stacklevel=2
+            )
+            xb = xbase_log[finite_xbase] if log_transform else xbase[finite_xbase]
+            h = 0.9 * np.std(xb, ddof=1) * xb.size ** (-1 / 5)
+            qq = np.sum(x == 0) / len(x)
         out_params = None
 
     # --- CDF evaluation (exact; same formula reused by native_to_spi/spi_to_native) ---
