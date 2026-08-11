@@ -522,7 +522,7 @@ class BaseDroughtAnalysis:
         """
         from functools import partial
         from scipy.stats import norm, gamma, pearson3
-        from drought_scan.utils.drought_indices import f_spi, f_spei, f_zscore, f_kde, kde_cdf
+        from drought_scan.utils.drought_indices import f_spi, f_spei, f_zscore, f_kde, kde_cdf, PROB_CLIP
 
         method = self.calculation_method
         base_func = method.func if isinstance(method, partial) else method
@@ -530,7 +530,7 @@ class BaseDroughtAnalysis:
         if base_func == f_kde:
             fit = self._get_kde_fit(month_scale, ref_month)
             Hx = kde_cdf(value, fit['xb'], fit['h'], fit['qq'], fit['log_transform'])
-            return norm.ppf(Hx)
+            return norm.ppf(np.clip(Hx, PROB_CLIP, 1 - PROB_CLIP))
 
         # Guard: ensure fit_params has been computed for the requested scale
         if month_scale > self.fit_params.shape[0] or \
@@ -545,12 +545,12 @@ class BaseDroughtAnalysis:
         if base_func == f_spi:
             a, loc, scale_param = params
             p = gamma.cdf(value, a, loc=loc, scale=scale_param)
-            return norm.ppf(p)
+            return norm.ppf(np.clip(p, PROB_CLIP, 1 - PROB_CLIP))
 
         elif base_func == f_spei:
             c, loc, scale_param = params
             p = pearson3.cdf(value, c, loc=loc, scale=scale_param)
-            return norm.ppf(p)
+            return norm.ppf(np.clip(p, PROB_CLIP, 1 - PROB_CLIP))
 
         elif base_func == f_zscore:
             mean, std = params
@@ -591,7 +591,7 @@ class BaseDroughtAnalysis:
         """
         from functools import partial
         from scipy.stats import norm, gamma, pearson3
-        from drought_scan.utils.drought_indices import f_spi, f_spei, f_zscore, f_kde, kde_ppf
+        from drought_scan.utils.drought_indices import f_spi, f_spei, f_zscore, f_kde, kde_ppf, PROB_CLIP
 
         method = self.calculation_method
         base_func = method.func if isinstance(method, partial) else method
@@ -612,12 +612,12 @@ class BaseDroughtAnalysis:
 
         if base_func == f_spi:
             a, loc, scale_param = params
-            p = norm.cdf(spi_value)
+            p = np.clip(norm.cdf(spi_value), PROB_CLIP, 1 - PROB_CLIP)
             return gamma.ppf(p, a, loc=loc, scale=scale_param)
 
         elif base_func == f_spei:
             c, loc, scale_param = params
-            p = norm.cdf(spi_value)
+            p = np.clip(norm.cdf(spi_value), PROB_CLIP, 1 - PROB_CLIP)
             return pearson3.ppf(p, c, loc=loc, scale=scale_param)
 
         elif base_func == f_zscore:
@@ -655,6 +655,13 @@ class BaseDroughtAnalysis:
         formula as f_zscore's core standardization, factored out so
         _calculate_SIDI/recalculate_SIDI/recalculate_SIDI_seasonal share one
         implementation instead of each reimplementing it independently.
+
+        Note on ddof: np.nanstd defaults to ddof=0, which is intended here — the
+        baseline IS the reference population the index is defined against (same
+        convention as f_zscore and as scipy.stats.zscore). This deliberately
+        differs from the ddof=1 used for the KDE bandwidth in f_kde, where
+        Silverman's rule is defined on the unbiased sample sigma. The two are
+        different conventions for different purposes, not an inconsistency.
         """
         mean = np.nanmean(baseline, axis=0)
         std = np.nanstd(baseline, axis=0)
@@ -897,8 +904,8 @@ class BaseDroughtAnalysis:
         self._check_correlation_eligible()
 
         wlabel = ['equal weights (ew)', 'linearly decreasing weights (ldw)',
-                  'logarithmically decreasing weights (lgdw)', 'linearly increasing weights (liw)',
-                  'logarithmically increasing weights (lgiw)']
+                  'geometrically decreasing weights (gdw)', 'linearly increasing weights (liw)',
+                  'geometrically increasing weights (giw)']
 
         if not isinstance(streamflow, BaseDroughtAnalysis):
             raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
@@ -2959,13 +2966,30 @@ class BaseDroughtAnalysis:
         """
         # Get baseline indices and ensemble mean
         tb1_id, tb2_id = baseline_indices(self.m_cal,self.start_baseline_year,self.end_baseline_year)
-        spi1 = self.spi_like_set[0].copy()
-        # estimate the average to equalize the signal:
-        cdn = np.zeros(len(self.ts))
-        cdn[tb1_id::] = np.nancumsum(np.round(spi1[tb1_id::],3))#per evitare che si trascina errori
-        # base = np.mean(cdn)
-        # CDN = cdn-base
+        return self._cdn_from_spi1(self.spi_like_set[0], tb1_id)
 
+    @staticmethod
+    def _cdn_from_spi1(spi1, tb1_id):
+        """
+        Cumulative Deviation from Normal: running sum of SPI-1 from the start of
+        the baseline onwards, zero before it.
+
+        Single definition shared by the basin-level CDN (`_calculate_CDN`) and the
+        pixel-level one (`_process_grid_point_trends`), which used to cumulate from
+        index 0, skip the rounding and fill the pre-baseline span with NaN — giving
+        two different series under the same name (they differed by a constant offset,
+        the pre-baseline SPI-1 sum).
+
+        Args:
+            spi1 (ndarray): SPI-like series at scale 1.
+            tb1_id (int): index of the first baseline month.
+
+        Returns:
+            ndarray: CDN, same length as `spi1`.
+        """
+        cdn = np.zeros(len(spi1))
+        # rounded to 3 decimals so the running sum does not accumulate float noise
+        cdn[tb1_id:] = np.nancumsum(np.round(spi1[tb1_id:], 3))
         return cdn
 
     def _monthly_normals(self):
@@ -3083,10 +3107,20 @@ class BaseDroughtAnalysis:
 
         # Streamflow: deficit è in m³/s cumulati (somma di window medie mensili).
         # Converti a volume totale m³ moltiplicando per i secondi medi al mese.
+        # I secondi sono quelli dei mesi effettivamente contenuti nella finestra che
+        # termina in ciascun istante (non la media fissa sui 12 mesi): stessa
+        # convenzione di calendario usata da volume_anomaly_rolling, con cui questo
+        # metodo va confrontato. Si usa la media, e non la somma, perché il deficit è
+        # una somma di portate medie mensili: distribuendolo uniformemente sui `window`
+        # mesi, il volume è deficit * (secondi totali / window).
         if isinstance(self, Streamflow):
-            avg_seconds_per_month = np.mean(
-                [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]) * 86400
-            deficit = deficit * avg_seconds_per_month
+            seconds_per_month = np.array(
+                [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]) * 86400.0
+            secs = seconds_per_month[months - 1]
+            win_mean_secs = np.full(n, np.nan)
+            win_mean_secs[window - 1:] = np.convolve(
+                secs, np.ones(window) / window, mode='valid')
+            deficit = deficit * win_mean_secs
 
         return deficit
 
@@ -3317,13 +3351,13 @@ class BaseDroughtAnalysis:
                 for j in range(len(m_cal))
             ], dtype=float)
 
-            # --- replicate _calculate_SIDI ---
+            # --- replicate _calculate_SIDI (shared helper: one formula, one guard) ---
+            # A degenerate baseline raises here and is caught below, so the point is
+            # reported like any other failure instead of returning a short tuple.
             tb1_id, tb2_id = baseline_indices(m_cal, start_baseline_year, end_baseline_year)
-            baseline_mean = np.nanmean(sidi_raw[tb1_id:tb2_id + 1, :], axis=0)
-            baseline_std = np.nanstd(sidi_raw[tb1_id:tb2_id + 1, :], axis=0)
-            if np.any(baseline_std == 0):
-                return None, None
-            SIDI_ij = (sidi_raw - baseline_mean) / baseline_std
+            SIDI_ij = BaseDroughtAnalysis._zscore_baseline(
+                sidi_raw, sidi_raw[tb1_id:tb2_id + 1, :]
+            )
 
             spi_out = {m: spiset[m - 1, t_idx] for m in M_valid}
 
@@ -3632,8 +3666,7 @@ class BaseDroughtAnalysis:
                     Spi1[indices] = spi_values.copy()
 
             tb1_id, _ = baseline_indices(m_cal, start_baseline_year, end_baseline_year)
-            CDN_ij = np.nancumsum(Spi1)
-            CDN_ij[:tb1_id] = np.nan
+            CDN_ij = BaseDroughtAnalysis._cdn_from_spi1(Spi1, tb1_id)
 
             # --- deficit_from_spi per ogni window ---
             months = m_cal[:, 0].astype(int)
@@ -4016,9 +4049,9 @@ class BaseDroughtAnalysis:
             weight_names = {
                 0: 'equal weights',
                 1: 'linear decreasing',
-                2: 'logarithmically decreasing',
+                2: 'geometrically decreasing',
                 3: 'linear increasing',
-                4: 'logarithmically increasing',
+                4: 'geometrically increasing',
             }
             weight_name = weight_names.get(weight_index, f'weight {weight_index}')
             K_label = self.spatial_K if hasattr(self, 'spatial_K') else self.K
@@ -4119,9 +4152,9 @@ class Precipitation(BaseDroughtAnalysis):
             weight_index (int, optional): Index of the weighting scheme to use for SIDI calculation.
                 - weight_index = 0: Equal weights
                 - weight_index = 1: Linear decreasing weights
-                - weight_index = 2: Logarithmically decreasing weights (default)
+                - weight_index = 2: Geometrically decreasing weights (default)
                 - weight_index = 3: Linear increasing weights
-                - weight_index = 4: Logarithmically increasing weights
+                - weight_index = 4: Geometrically increasing weights
 
             threshold (int,optional) : threshold to define severe events, Default is -1 (i.e. -1 standard deviation of SIDI)
             verbose (bool, optional): Whether to print initialization messages. Default is True.
@@ -5258,9 +5291,9 @@ class Temperature(BaseDroughtAnalysis):
             weight_index (int, optional): Index of the weighting scheme to use for calculations.
                 - weight_index = 0: Equal weights
                 - weight_index = 1: Linear decreasing weights
-                - weight_index = 2: Logarithmically decreasing weights (default)
+                - weight_index = 2: Geometrically decreasing weights (default)
                 - weight_index = 3: Linear increasing weights
-                - weight_index = 4: Logarithmically increasing weights
+                - weight_index = 4: Geometrically increasing weights
 
             threshold (int, optional): Threshold to define severe events, Default is 1.
             calculation_method (callable, optional): Method to use for drought calculations. Default is f_kde.

@@ -254,3 +254,60 @@ def test_log_transform_decided_on_baseline_is_not_retroactive():
         f"altering data outside the baseline moved historical SPI by "
         f"{np.nanmax(delta)}"
     )
+
+
+def test_basin_and_pixel_cdn_match():
+    """The basin-level CDN and the pixel-level one computed inside
+    _process_grid_point_trends must be the same quantity — they used to differ
+    by a constant offset (cumsum start), the rounding and the pre-baseline fill."""
+    from drought_scan.core import BaseDroughtAnalysis
+    from drought_scan.utils.drought_indices import f_kde
+
+    obj = _build_synthetic_dso(f_kde)
+    cdn_basin = obj._calculate_CDN()
+    cdn_pixel, _, err = BaseDroughtAnalysis._process_grid_point_trends(
+        obj.ts, obj.m_cal, obj.K, 1981, 2010, f_kde, windows=[3], t_idx=300
+    )
+
+    assert err is None
+    assert np.allclose(cdn_basin, cdn_pixel, equal_nan=True)
+
+
+@pytest.mark.parametrize("calculation_method_name", ["f_spi", "f_spei", "f_kde"])
+def test_reverse_transforms_saturate_like_the_forward(calculation_method_name):
+    """The forward transform clips cumulative probabilities, capping the index
+    near +/-4. native_to_spi/spi_to_native must clip the same way instead of
+    diverging to +/-inf on values beyond anything the baseline observed."""
+    from drought_scan.utils import drought_indices as di
+
+    f = getattr(di, calculation_method_name)
+    obj = _build_synthetic_dso(f)
+    ref_month = int(obj.m_cal[0, 0])
+
+    spi = obj.native_to_spi(float(np.nanmax(obj.ts)) * 50, 1, ref_month)
+    assert np.all(np.isfinite(spi))
+    assert np.all(np.abs(spi) <= 4.01)
+
+    native = obj.spi_to_native(50.0, 1, ref_month)
+    assert np.all(np.isfinite(native))
+
+
+def test_degenerate_grid_point_reports_error_not_short_tuple():
+    """A grid point whose baseline is constant must be reported through the
+    normal (values, values, error) contract — it used to return a 2-tuple and
+    blow up the caller's unpacking."""
+    from drought_scan.core import BaseDroughtAnalysis
+    from drought_scan.utils.drought_indices import f_kde
+
+    obj = _build_synthetic_dso(f_kde)
+    ts = np.full(len(obj.m_cal), 7.0)
+    ts[-12:] = np.abs(np.random.default_rng(0).normal(7, 2, size=12))
+
+    result = BaseDroughtAnalysis._process_grid_point(
+        ts, obj.m_cal, obj.K, 1981, 2010, f_kde,
+        M_valid=[1], t_idx=300, n_weights=5,
+    )
+
+    assert len(result) == 3
+    sidi_vals, spi_vals, err = result          # must not raise
+    assert sidi_vals is None and err is not None

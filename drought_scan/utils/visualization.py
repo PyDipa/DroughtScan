@@ -189,13 +189,13 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_p
         If provided, SIDI is recomputed using the specified optimal K.
     weight_index : int, optional
         Index of the weighting scheme for SIDI calculation.
-        Defaults to 2 (logarithmically decreasing weights).
+        Defaults to 2 (geometrically decreasing weights).
         Options:
             0 = equal weights
             1 = linear decreasing
-            2 = logarithmic decreasing
+            2 = geometric decreasing
             3 = linear increasing
-            4 = logarithmic increasing
+            4 = geometric increasing
     year_ext : tuple(int, int), optional
         (start_year, end_year). If provided, limits the x-axis to this period.
     split_plot : bool, default=False

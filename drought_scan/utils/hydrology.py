@@ -189,7 +189,7 @@ def severe_events_deficits_computation_old(ds_object,weight_index=None):
         raise AttributeError("ds_object must have attributes: SIDI, ts, and m_cal.")
 
     if weight_index is None:
-        weight_index = 2  # Default to logarithmically decreasing weights
+        weight_index = 2  # Default to geometrically decreasing weights
 
     # Replace NaN values in SIDI with a placeholder
     SIDI = np.array(ds_object.SIDI[:, weight_index], copy=True)

@@ -27,6 +27,14 @@ import numpy as np
 from scipy.stats import gamma, pearson3, norm, gaussian_kde
 import warnings
 
+# Tail clip applied to cumulative probabilities before the normal-score transform.
+# Caps the index at about +/-4 sigma, so a value beyond anything the baseline
+# observed saturates instead of diverging. Used by the forward standardization
+# (f_spi/f_spei/f_kde) and, for symmetry, by the reverse transforms in core.py
+# (native_to_spi/spi_to_native) — otherwise the two directions disagree at the
+# tails, the forward saturating at 4 while the reverse returns +/-inf.
+PROB_CLIP = 3.17e-5
+
 
 # ===================================================================
 #  SIDI weights
@@ -329,7 +337,7 @@ def f_spi(prec, stride, m, m_cal, tb1, tb2, fit_params=None):
     xbase_valid = xbase[np.isfinite(xbase)]
     qq = float(np.sum(xbase_valid == 0) / xbase_valid.size) if xbase_valid.size else 0.0
     Hx = qq + (1 - qq) * Gx
-    Hx = np.clip(Hx, 3.17e-5, 1 - 3.17e-5)
+    Hx = np.clip(Hx, PROB_CLIP, 1 - PROB_CLIP)
 
     spi = np.round(norm.ppf(Hx), 4)
 
@@ -380,7 +388,7 @@ def f_spei(balance, stride, m, m_cal, tb1, tb2, fit_params=None):
 
     # --- CDF → normal quantile ---
     fx = pearson3.cdf(x, skew=c, loc=loc, scale=scale)
-    fx = np.clip(fx, 3.17e-5, 1 - 3.17e-5)
+    fx = np.clip(fx, PROB_CLIP, 1 - PROB_CLIP)
     spei = np.round(norm.ppf(fx, loc=0, scale=1), 4)
 
     # --- Reverse mapping ---
@@ -578,6 +586,10 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
             )
 
         kde = gaussian_kde(xb, bw_method="silverman")
+        # Silverman's rule of thumb: ddof=1 on purpose — the rule is defined on the
+        # unbiased sample sigma. Do not "align" it with the ddof=0 used to
+        # standardize against the baseline (see BaseDroughtAnalysis._zscore_baseline):
+        # they are different conventions for different purposes.
         h = 0.9 * np.std(xb, ddof=1) * xb.size ** (-1 / 5)
         out_params = {
             "kde": kde,
@@ -624,7 +636,7 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
     Hx = kde_cdf(x, xb, h, qq, log_transform)
 
     # --- Normal-score transform ---
-    Hx = np.clip(Hx, 3.17e-5, 1 - 3.17e-5)
+    Hx = np.clip(Hx, PROB_CLIP, 1 - PROB_CLIP)
     spi = np.round(norm.ppf(Hx), 4)
 
     # --- Reverse mapping (polynomial approximation, retained for backward
