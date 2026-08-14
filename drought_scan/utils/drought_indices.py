@@ -546,9 +546,18 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
     # --- Optional log-transform ---
     # Decided on the BASELINE only, for the same reason: the baseline defines the
     # model, and evaluation data must not silently re-decide which model was fitted.
-    if log_transform and np.nanmin(xbase) <= 0:
+    #
+    # This only concerns the shape of the CONTINUOUS (strictly-positive) part —
+    # a separate concern from `qq` above, which already masks out the exact-zero
+    # point mass before anything is fitted. Zeros therefore do NOT disable
+    # log_transform: np.log(0) = -inf is automatically dropped by the
+    # `np.isfinite(xbase_log)` mask below, same effect as explicitly excluding
+    # them. Only genuine NEGATIVE values disable it — those can't be masked as
+    # a point mass the way zeros can, and log() of a negative number is
+    # undefined, not just inconvenient.
+    if log_transform and np.any(np.isfinite(xbase) & (xbase < 0)):
         warnings.warn(
-            f"f_kde: zeros or non-positive data detected in month {m} - month-scale {stride} → log_transform disabled ",
+            f"f_kde: negative data detected in month {m} - month-scale {stride} → log_transform disabled ",
             RuntimeWarning, stacklevel=2
         )
         log_transform = False

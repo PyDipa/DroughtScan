@@ -832,10 +832,23 @@ def monthly_profile(DSO,var=None, var_name=None,cumulate=False, ax=None,highligh
     perc_10 = np.zeros(12)
     perc_90 = np.zeros(12)
 
+    # The reference line: normal_values()'s per-month "normal" (the exact
+    # inverse of SPI-like=0 at scale 1 via spi_to_native), NOT the raw
+    # arithmetic mean — consistent with deficit_from_spi/volume_anomaly_rolling,
+    # which both anchor to normal_values() as the SPI=0 reference. Only valid
+    # when profiling DSO.ts itself (the series the distribution was fitted
+    # to): an arbitrary `var` has no associated fit, so it falls back to the
+    # plain baseline mean.
+    using_normals = not cumulate and var is None
+    mean_label = 'Monthly Normal (SPI=0, baseline)' if using_normals else 'Monthly Mean (baseline)'
+    if using_normals:
+        monthly_means = DSO._monthly_normals()
+
     if not cumulate:
         for month in range(1, 13):
             monthly_data = x[(months == month) & baseline_mask]
-            monthly_means[month - 1] = np.nanmean(monthly_data)
+            if not using_normals:
+                monthly_means[month - 1] = np.nanmean(monthly_data)
             perc_25[month - 1] = np.nanpercentile(monthly_data, 25)
             perc_75[month - 1] = np.nanpercentile(monthly_data, 75)
             perc_10[month - 1] = np.nanpercentile(monthly_data, 10)
@@ -871,7 +884,7 @@ def monthly_profile(DSO,var=None, var_name=None,cumulate=False, ax=None,highligh
     # Plotting
     # plt.figure(figsize=(12, 6))
 
-    ax.plot(months_n, mean_n, color='darkgray', label='Monthly Mean (baseline)', linewidth=3)
+    ax.plot(months_n, mean_n, color='darkgray', label=mean_label, linewidth=3)
     ax.fill_between(months_n, p25_24, p75_24, color='gray', alpha=0.5, label='25–75 Percentile')
     ax.fill_between(months_n, p10_24, p90_24, color='lightgray', alpha=0.5, label='10–90 Percentile')
 

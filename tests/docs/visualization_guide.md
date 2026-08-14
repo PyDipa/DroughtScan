@@ -233,7 +233,18 @@ print(f"Peak deficit over 36 months: {d[idx]:.3e} "
 ## 6) Monthly profiles of input data
 
 Visualize the intra-annual cycle of the input variable through monthly profiles (by default: precipitation if the instance is initialized with Precipitation, snowfall if initialized with Snowfall, etc.).
-The method shows the mean and interquartile range (IQR) for each month over the available years. The name of the variable must be specified by the user.
+The method shows a central reference line and the interquartile range (IQR) for each month over the baseline years. The name of the variable must be specified by the user.
+
+When plotting the DSO's own series (`var=None`, the default), the central line
+is `normal_values()`'s per-month "normal" — the exact inverse of the SPI-like
+index at 0 (via `spi_to_native`), the same SPI=0 reference `deficit_from_spi`
+and `volume_anomaly_rolling` use — **not** the raw arithmetic mean. This
+matters for skewed and/or zero-inflated variables (typical for precipitation),
+where the mean and the SPI=0 "normal" (closer to the median) can differ
+noticeably. When plotting an arbitrary `var` instead (e.g. `ds.spi_like_set[0]`
+below), there is no associated fit to invert, so the central line falls back
+to the plain baseline arithmetic mean. The IQR/10-90 percentile bands are
+always the plain empirical baseline percentiles in both cases.
 
 ```python
 ds.plot_monthly_profile(var_name='P')

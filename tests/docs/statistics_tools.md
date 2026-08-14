@@ -218,9 +218,15 @@ in a likelihood sense, but has a much worse worst-case mismatch in the tails.
 matters more than overall likelihood. A distribution that deviates in the
 tails will distort exactly the extreme events you are trying to detect.
 
-The `goodness_percent` field (= 100 × (1 − D)) is a quick readable metric:
-values above 90% indicate a strong fit; below 80% suggest that the family
-may not be appropriate for that dataset or month.
+`error_percent`/`goodness_percent` are a **different, milder** summary than
+`KS_statistic`: instead of the worst-case/max deviation (a single point),
+they average the absolute deviation between the fitted and empirical CDF
+**point by point**, over every observed value (`error_percent` = 100 x mean
+deviation, `goodness_percent` = 100 - `error_percent`). A family can have a
+high `goodness_percent` (good on average) yet a mediocre `KS_statistic` (one
+bad tail point) — the two intentionally answer different questions ("how
+good on average" vs "how bad in the worst case"), so treat `goodness_percent`
+as a quick readability aid, not a substitute for the KS-based recommendation.
 
 ---
 
@@ -277,8 +283,8 @@ stats = fit_distribution_stats(
   | `"log_likelihood"`       | float  | Sum of log-PDF values                           |
   | `"AIC"`                  | float  | Akaike Information Criterion (`NaN` for KDE)    |
   | `"k_params"`             | int    | Number of estimated parameters (`None` for KDE) |
-  | `"error_percent"`        | float  | `100 × D`                                       |
-  | `"goodness_percent"`     | float  | `100 × (1 − D)`                                |
+  | `"error_percent"`        | float  | Point-by-point mean `\|fitted CDF − empirical CDF\|`, x100 — NOT derived from `KS_statistic` (see §1.5) |
+  | `"goodness_percent"`     | float  | `100 − error_percent`                           |
 
   **`params` structure by distribution:**
   - Gamma: `{"shape", "loc", "scale", "shift_applied", "qq"}`

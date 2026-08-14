@@ -264,6 +264,9 @@ def _fit_single_dist(dataset,dist=None,shift_for_gamma = True):
         distribution, params, KS_statistic, KS_p_value, log_likelihood,
         AIC, k_params, error_percent, goodness_percent.
         `params` includes `"qq"` (P(X=0)) for "gamma" and "kde".
+        error_percent/goodness_percent are a point-by-point mean CDF
+        deviation, NOT derived from KS_statistic (which is the worst-case/
+        max deviation instead) — see module note above `_mixture_cdf`.
 
     Raises
     ------
@@ -329,13 +332,15 @@ def _fit_single_dist(dataset,dist=None,shift_for_gamma = True):
 
     # ── Gaussian KDE (non-parametric) ───────────────────────────────────────
     elif dist == "kde":
-        # Same zero-inflation mixture as gamma, and the same log-transform
-        # rule as f_kde: attempted by default, disabled outright (for the
-        # WHOLE sample, not just the positive part) if any non-positive
-        # value is present (drought_indices.f_kde).
+        # Same zero-inflation mixture as gamma. log_transform concerns only
+        # the shape of the continuous (strictly-positive) part, a separate
+        # concern from qq above: zeros don't disable it (they're already
+        # masked out of `positive`), only genuine negative values do — those
+        # can't be masked as a point mass and log() of them is undefined,
+        # not just inconvenient (matches drought_indices.f_kde).
         qq = float(np.mean(dataset == 0)) if dataset.size else 0.0
         positive = dataset[dataset > 0]
-        log_transform = bool(dataset.size) and bool(np.all(dataset > 0))
+        log_transform = bool(dataset.size) and not np.any(np.isfinite(dataset) & (dataset < 0))
         xb = np.log(positive) if log_transform else positive
 
         if xb.size < 2:
@@ -378,6 +383,16 @@ def _fit_single_dist(dataset,dist=None,shift_for_gamma = True):
     # ── Derived metrics ─────────────────────────────────────────────────────
     aic = (2 * k - 2 * log_likelihood) if k is not None else np.nan
 
+    # error_percent/goodness_percent are a POINT-BY-POINT MEAN absolute
+    # deviation between the fitted and empirical CDF (evaluated at every
+    # observed value), not the KS statistic D (which is only the worst-case/
+    # max deviation, at a single point) — deliberately a different, milder
+    # summary than KS_statistic, kept alongside it rather than derived from it.
+    x_sorted = np.sort(dataset)
+    F_emp = np.arange(1, x_sorted.size + 1) / x_sorted.size
+    F_theo = _mixture_cdf(x_sorted, dist, params)
+    mean_abs_error = float(np.mean(np.abs(F_theo - F_emp)))
+
     return {
         "distribution":    dist,
         "params":          params,
@@ -386,8 +401,8 @@ def _fit_single_dist(dataset,dist=None,shift_for_gamma = True):
         "log_likelihood":  log_likelihood,
         "AIC":             float(aic) if not np.isnan(aic) else np.nan,
         "k_params":        k,
-        "error_percent":   float(100.0 * D),
-        "goodness_percent": float(100.0 * (1.0 - D)),
+        "error_percent":   100.0 * mean_abs_error,
+        "goodness_percent": 100.0 * (1.0 - mean_abs_error),
     }
 
 #  BOOTSTRAP KS p-VALUE CORRECTION  (optional)
