@@ -20,6 +20,8 @@ from typing import Optional
 import matplotlib.pyplot as plt
 from datetime import date,datetime,timedelta
 
+from drought_scan.utils.drought_indices import kde_cdf
+
 
 # ===================================================================
 #  Temporal Overlap and Concatenation Functions
@@ -165,6 +167,80 @@ def concatenate_m_cal(m_cal1,m_cal2):
 
 _ALL_DISTS = ("gaussian", "gamma", "pearson3", "kde")
 
+
+# ===================================================================
+#  Zero-inflation mixture helpers, shared by every fitting/plotting
+#  function below — the single place that decides how "gamma" and "kde"
+#  handle exact zeros, so it can never again drift out of sync with
+#  f_spi/f_kde (drought_indices.py) or between the functions in this file.
+#
+#  Convention (matches f_spi/f_kde exactly): qq = P(X=0), estimated as the
+#  empirical fraction of exact zeros in the sample. The continuous family
+#  (Gamma or KDE) is fitted on the strictly-positive subset ONLY — zeros are
+#  masked out of the fit, never shifted or left in. Hx(x) = qq for x<=0,
+#  Hx(x) = qq + (1-qq)*continuous_CDF(x) for x>0. "gaussian"/"pearson3" have
+#  no zero-inflation handling, matching f_zscore/f_spei (real-valued data,
+#  not naturally zero-inflated).
+# ===================================================================
+def _mixture_cdf(x, dist, params):
+    """Zero-inflation-aware CDF, shared by KS tests and CDF plots."""
+    x = np.asarray(x, dtype=float)
+    if dist == "gaussian":
+        return stats.norm.cdf(x, loc=params["mu"], scale=params["sigma"])
+    if dist == "pearson3":
+        return stats.pearson3.cdf(x, params["shape"], loc=params["loc"], scale=params["scale"])
+    qq = params.get("qq", 0.0)
+    if dist == "gamma":
+        shift = 1.0 if params["shift_applied"] else 0.0
+        with np.errstate(invalid="ignore"):
+            Gx = stats.gamma.cdf(x + shift, params["shape"], loc=params["loc"], scale=params["scale"])
+        return np.where(x > 0, qq + (1 - qq) * Gx, qq)
+    if dist == "kde":
+        return kde_cdf(x, params["xb"], params["h"], qq, params["log_transform"])
+    raise ValueError(f"Unknown distribution: '{dist}'")
+
+
+def _kde_pdf(x, xb, h):
+    """
+    Native-space KDE density, evaluated with the SAME bandwidth `h` and
+    baseline sample `xb` used by `kde_cdf` (the exact derivative of its
+    CDF formula) — not scipy's own `gaussian_kde(...).evaluate()`, whose
+    default bandwidth constant differs from f_kde's (0.9*std*n^-1/5).
+    `xb`/`x` are already in fit space (log-transformed upstream if needed);
+    callers apply the Jacobian correction for the log case themselves.
+    """
+    x = np.atleast_1d(np.asarray(x, dtype=float))
+    return stats.norm.pdf((x[:, None] - xb[None, :]) / h).mean(axis=1) / h
+
+
+def _mixture_pdf(x, dist, params):
+    """
+    Companion density to `_mixture_cdf`, for PDF plots only — the qq point
+    mass at exactly 0 is not a density and is omitted; only the continuous
+    part for x>0, scaled by (1-qq), is returned (0 elsewhere).
+    """
+    x = np.asarray(x, dtype=float)
+    if dist == "gaussian":
+        return stats.norm.pdf(x, loc=params["mu"], scale=params["sigma"])
+    if dist == "pearson3":
+        return stats.pearson3.pdf(x, params["shape"], loc=params["loc"], scale=params["scale"])
+    qq = params.get("qq", 0.0)
+    if dist == "gamma":
+        shift = 1.0 if params["shift_applied"] else 0.0
+        with np.errstate(invalid="ignore"):
+            gpdf = stats.gamma.pdf(x + shift, params["shape"], loc=params["loc"], scale=params["scale"])
+        return np.where(x > 0, (1 - qq) * gpdf, 0.0)
+    if dist == "kde":
+        xb, h, log_transform = params["xb"], params["h"], params["log_transform"]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            x_fit = np.log(x) if log_transform else x
+            dens_fit = _kde_pdf(np.where(np.isfinite(x_fit), x_fit, 0.0), xb, h)
+            jac = (1.0 / x) if log_transform else 1.0
+            pdf = (1 - qq) * dens_fit * jac
+        return np.where((x > 0) & np.isfinite(pdf), pdf, 0.0)
+    raise ValueError(f"Unknown distribution: '{dist}'")
+
+
 # helpers
 # PRIVATE CORE FITTER  (single distribution, single clean array)
 def _fit_single_dist(dataset,dist=None,shift_for_gamma = True):
@@ -177,46 +253,65 @@ def _fit_single_dist(dataset,dist=None,shift_for_gamma = True):
         Finite-only values (caller must filter).
     dist : {"gaussian", "gamma", "pearson3", "kde"}
     shift_for_gamma : bool
-        If True, apply dataset + 1 before Gamma fitting to avoid zeros.
+        If True, apply (positive part) + 1 before Gamma fitting — kept for
+        backward compatibility, but no longer needed to dodge zeros (those
+        are masked out via `qq` before fitting, see module note above);
+        only matters for otherwise-pathological positive-only samples.
 
     Returns
     -------
     dict
         distribution, params, KS_statistic, KS_p_value, log_likelihood,
         AIC, k_params, error_percent, goodness_percent.
+        `params` includes `"qq"` (P(X=0)) for "gamma" and "kde".
 
     Raises
     ------
     ValueError
-        If Gamma is requested and the data used for fitting (dataset, or
-        dataset + 1 when shift_for_gamma=True) still contains non-positive values.
+        If Gamma/KDE is requested and the strictly-positive subset of
+        `dataset` (after masking exact zeros) is empty or still contains
+        non-positive values.
     """
     if dist is None:
         dist = 'gaussian'
     dist = dist.lower()
+    dataset = np.asarray(dataset, dtype=float)
 
     # ── Gamma ──────────────────────────────────────────────────────────────
     if dist == "gamma":
-        data_used = dataset + 1.0 if shift_for_gamma else dataset
-        if np.any(data_used <= 0):
+        # Zero-inflation mixture, matching f_spi exactly: qq = P(X=0) from
+        # the full sample, Gamma fitted on the strictly-positive part only.
+        qq = float(np.mean(dataset == 0)) if dataset.size else 0.0
+        positive = dataset[dataset > 0]
+        data_used = positive + 1.0 if shift_for_gamma else positive
+        if data_used.size == 0 or np.any(data_used <= 0):
             raise ValueError(
-                "Gamma distribution requires strictly positive values. "
-                "Set shift_for_gamma=True or pre-process the data."
+                "Gamma distribution requires strictly positive values after "
+                "masking exact zeros. Set shift_for_gamma=True or pre-process the data."
             )
         shape, loc, scale = stats.gamma.fit(data_used, floc=0)
-        D, p_ks = stats.kstest(data_used, "gamma", args=(shape, loc, scale))
-        logpdf = stats.gamma.logpdf(data_used, shape, loc=loc, scale=scale)
         params = {"shape": shape, "loc": loc, "scale": scale,
-                  "shift_applied": shift_for_gamma}
+                  "shift_applied": shift_for_gamma, "qq": qq}
+
+        D, p_ks = stats.kstest(dataset, lambda x: _mixture_cdf(x, "gamma", params))
+
+        logpdf_pos = stats.gamma.logpdf(data_used, shape, loc=loc, scale=scale)
+        n_zero = dataset.size - positive.size
+        ll_zero = n_zero * np.log(qq) if qq > 0 else 0.0
+        ll_pos = float(np.sum(logpdf_pos)) + (positive.size * np.log(1 - qq) if qq < 1 else 0.0)
+        log_likelihood = float(ll_zero + ll_pos)
+        # qq is a plug-in empirical fraction, not an MLE-optimised free
+        # parameter (same convention as f_spi), so it is not counted in k.
         k = 3
 
     # ── Pearson type III ───────────────────────────────────────────────────
     elif dist == "pearson3":
         data_used = dataset
         shape, loc, scale = stats.pearson3.fit(data_used)
+        params = {"shape": shape, "loc": loc, "scale": scale}
         D, p_ks = stats.kstest(data_used, "pearson3", args=(shape, loc, scale))
         logpdf = stats.pearson3.logpdf(data_used, shape, loc=loc, scale=scale)
-        params = {"shape": shape, "loc": loc, "scale": scale}
+        log_likelihood = float(np.sum(logpdf))
         k = 3
 
     # ── Gaussian ────────────────────────────────────────────────────────────
@@ -226,42 +321,52 @@ def _fit_single_dist(dataset,dist=None,shift_for_gamma = True):
         sigma = np.std(data_used, ddof=0)
         if sigma == 0:
             raise ValueError("Gaussian fit requires non-zero variance.")
+        params = {"mu": mu, "sigma": sigma}
         D, p_ks = stats.kstest(data_used, "norm", args=(mu, sigma))
         logpdf = stats.norm.logpdf(data_used, loc=mu, scale=sigma)
-        params = {"mu": mu, "sigma": sigma}
+        log_likelihood = float(np.sum(logpdf))
         k = 2
 
     # ── Gaussian KDE (non-parametric) ───────────────────────────────────────
     elif dist == "kde":
-        data_used = dataset
-        kde = stats.gaussian_kde(data_used, bw_method="silverman")
+        # Same zero-inflation mixture as gamma, and the same log-transform
+        # rule as f_kde: attempted by default, disabled outright (for the
+        # WHOLE sample, not just the positive part) if any non-positive
+        # value is present (drought_indices.f_kde).
+        qq = float(np.mean(dataset == 0)) if dataset.size else 0.0
+        positive = dataset[dataset > 0]
+        log_transform = bool(dataset.size) and bool(np.all(dataset > 0))
+        xb = np.log(positive) if log_transform else positive
 
-        # Vectorised CDF via trapezoidal integration on a fine grid
-        std   = np.std(data_used)
-        bw    = kde.factor * std
-        x_min = data_used.min() - 4 * bw
-        x_max = data_used.max() + 4 * bw
-        x_grid   = np.linspace(x_min, x_max, 4096)
-        pdf_grid = kde.evaluate(x_grid)
-        cdf_grid = np.cumsum(pdf_grid) * (x_grid[1] - x_grid[0])
-        cdf_grid /= cdf_grid[-1]                       # ensure [0, 1]
-
-        def kde_cdf(x: np.ndarray) -> np.ndarray:
-            return np.interp(x, x_grid, cdf_grid)
-
-        D, p_ks = stats.kstest(data_used, kde_cdf)
-
-        pdf_vals = kde.evaluate(data_used)
-        pdf_vals = np.clip(pdf_vals, 1e-300, None)
-        logpdf   = np.log(pdf_vals)
-
-        # Store only serialisable primitives; expose CDF callable separately
+        if xb.size < 2:
+            raise ValueError(
+                "KDE requires at least 2 strictly-positive values after masking exact zeros."
+            )
+        # Same bandwidth formula as f_kde (Silverman's rule of thumb,
+        # ddof=1) — NOT scipy's own bw_method="silverman" factor, whose
+        # constant differs from f_kde's 0.9.
+        h = 0.9 * np.std(xb, ddof=1) * xb.size ** (-1 / 5)
+        if not np.isfinite(h) or h <= 0:
+            raise ValueError(
+                "KDE bandwidth is degenerate (data may be constant after masking zeros)."
+            )
         params = {
-            "bw_method":  "silverman",
-            "bw_factor":  float(kde.factor),
-            "n_fit":      int(len(data_used)),
-            "_kde_cdf":   kde_cdf,      # callable, not JSON-serialisable
+            "bw_method": "silverman",
+            "h": h,
+            "xb": xb,
+            "qq": qq,
+            "log_transform": log_transform,
+            "n_fit": int(xb.size),
         }
+
+        D, p_ks = stats.kstest(dataset, lambda x: _mixture_cdf(x, "kde", params))
+
+        pdf_vals = _mixture_pdf(positive, "kde", params) if positive.size else np.array([])
+        pdf_vals = np.clip(pdf_vals, 1e-300, None)
+        n_zero = dataset.size - positive.size
+        ll_zero = n_zero * np.log(qq) if qq > 0 else 0.0
+        ll_pos = float(np.sum(np.log(pdf_vals))) if pdf_vals.size else 0.0
+        log_likelihood = float(ll_zero + ll_pos)
         k = None  # AIC undefined for KDE
 
     else:
@@ -271,7 +376,6 @@ def _fit_single_dist(dataset,dist=None,shift_for_gamma = True):
         )
 
     # ── Derived metrics ─────────────────────────────────────────────────────
-    log_likelihood = float(np.sum(logpdf))
     aic = (2 * k - 2 * log_likelihood) if k is not None else np.nan
 
     return {
@@ -317,27 +421,37 @@ def _bootstrap_ks_pvalue(dataset:np.ndarray,fit_result: dict,
     D_obs  = fit_result["KS_statistic"]
     D_boot = np.empty(n_bootstrap)
 
+    qq = params.get("qq", 0.0)  # 0.0 for gaussian/pearson3 (no zero-inflation)
+
     for i in range(n_bootstrap):
-        # Draw synthetic sample from fitted distribution
+        # Draw synthetic sample from the fitted distribution. For gamma/kde,
+        # first decide exact-zero vs positive per point via `qq` (matching
+        # the mixture the fit itself uses), then draw the positive part from
+        # the continuous family.
+        is_zero = rng.random(n) < qq if qq > 0 else np.zeros(n, dtype=bool)
+        n_pos = int(np.sum(~is_zero))
+        sample = np.zeros(n, dtype=float)
+
         if dist == "gaussian":
             sample = rng.normal(params["mu"], params["sigma"], size=n)
         elif dist == "gamma":
-            sample = stats.gamma.rvs(
+            pos_sample = stats.gamma.rvs(
                 params["shape"], loc=params["loc"], scale=params["scale"],
-                size=n, random_state=rng.integers(1 << 31)
+                size=n_pos, random_state=rng.integers(1 << 31)
             )
             if params["shift_applied"]:
-                sample -= 1.0          # undo shift for consistent comparison
+                pos_sample = pos_sample - 1.0          # undo shift for consistent comparison
+            sample[~is_zero] = pos_sample
         elif dist == "pearson3":
             sample = stats.pearson3.rvs(
                 params["shape"], loc=params["loc"], scale=params["scale"],
                 size=n, random_state=rng.integers(1 << 31)
             )
-        else:  # kde — resample from original data (smoothed bootstrap)
-            std = np.std(dataset)
-            bw  = params["bw_factor"] * std
-            idx    = rng.integers(0, n, size=n)
-            sample = dataset[idx] + rng.normal(0, bw, size=n)
+        else:  # kde — smoothed bootstrap in fit space, same h/xb as the fit
+            xb, h, log_transform = params["xb"], params["h"], params["log_transform"]
+            idx = rng.integers(0, xb.size, size=n_pos)
+            pos_sample_fit = xb[idx] + rng.normal(0, h, size=n_pos)
+            sample[~is_zero] = np.exp(pos_sample_fit) if log_transform else pos_sample_fit
 
         # Refit and compute D*
         try:
@@ -444,32 +558,10 @@ def _plot_cdf_comparison(dataset,analysis,title = ""):
         if d == best:
             lbl += "  *"
 
-        # CDF curve
-        if d == "gaussian":
-            cdf = stats.norm.cdf(x_plot, loc=params["mu"], scale=params["sigma"])
-            pdf = stats.norm.pdf(x_plot, loc=params["mu"], scale=params["sigma"])
-        elif d == "gamma":
-            shift = 1.0 if params["shift_applied"] else 0.0
-            cdf = stats.gamma.cdf(
-                x_plot + shift, params["shape"],
-                loc=params["loc"], scale=params["scale"]
-            )
-            pdf = stats.gamma.pdf(
-                x_plot + shift, params["shape"],
-                loc=params["loc"], scale=params["scale"]
-            )
-        elif d == "pearson3":
-            cdf = stats.pearson3.cdf(
-                x_plot, params["shape"],
-                loc=params["loc"], scale=params["scale"]
-            )
-            pdf = stats.pearson3.pdf(
-                x_plot, params["shape"],
-                loc=params["loc"], scale=params["scale"]
-            )
-        else:  # kde
-            cdf = params["_kde_cdf"](x_plot)
-            pdf = stats.gaussian_kde(dataset, bw_method="silverman").evaluate(x_plot)
+        # CDF/PDF curves — zero-inflation-aware for gamma/kde (see
+        # _mixture_cdf/_mixture_pdf); plain theoretical curves otherwise.
+        cdf = _mixture_cdf(x_plot, d, params)
+        pdf = _mixture_pdf(x_plot, d, params)
 
         ax_cdf.plot(x_plot, cdf, color=col, lw=lw, ls=ls, label=lbl)
         ax_pdf.plot(x_plot, pdf, color=col, lw=lw, ls=ls, label=lbl)
@@ -635,35 +727,12 @@ def fit_distribution_stats(data, dist= "gamma", groups=None,
             x_plot = np.linspace(x_ecdf[0], x_ecdf[-1], 1000)
             params = res["params"]
 
-            if dist == "gaussian":
-                cdf = stats.norm.cdf(x_plot, loc=params["mu"], scale=params["sigma"])
-                pdf = stats.norm.pdf(x_plot, loc=params["mu"], scale=params["sigma"])
-                lbl = "Gaussian fit"
-            elif dist == "gamma":
-                shift = 1.0 if params["shift_applied"] else 0.0
-                cdf = stats.gamma.cdf(
-                    x_plot + shift, params["shape"],
-                    loc=params["loc"], scale=params["scale"]
-                )
-                pdf = stats.gamma.pdf(
-                    x_plot + shift, params["shape"],
-                    loc=params["loc"], scale=params["scale"]
-                )
-                lbl = "Gamma fit"
-            elif dist == "pearson3":
-                cdf = stats.pearson3.cdf(
-                    x_plot, params["shape"],
-                    loc=params["loc"], scale=params["scale"]
-                )
-                pdf = stats.pearson3.pdf(
-                    x_plot, params["shape"],
-                    loc=params["loc"], scale=params["scale"]
-                )
-                lbl = "Pearson III fit"
-            else:  # kde
-                cdf = params["_kde_cdf"](x_plot)
-                pdf = stats.gaussian_kde(dataset_clean, bw_method="silverman").evaluate(x_plot)
-                lbl = "KDE (Silverman)"
+            # Zero-inflation-aware CDF/PDF for gamma/kde (see _mixture_cdf/
+            # _mixture_pdf); plain theoretical curves otherwise.
+            cdf = _mixture_cdf(x_plot, dist, params)
+            pdf = _mixture_pdf(x_plot, dist, params)
+            lbl = {"gaussian": "Gaussian fit", "gamma": "Gamma fit",
+                   "pearson3": "Pearson III fit", "kde": "KDE (Silverman)"}[dist]
 
             ax_cdf.step(x_ecdf, y_ecdf, where="post", color="black",
                         lw=1.5, alpha=0.8, label="Empirical CDF")
@@ -781,42 +850,12 @@ def standardize_data(data,analysis_result,groups=None,plot = True):
     def _pit(dataset_clean: np.ndarray, dist: str, params: dict) -> np.ndarray:
         """
         Probability Integral Transform for one (dist, params) pair.
-        Returns CDF values ∈ (cdf_clip, 1-cdf_clip).
+        Returns CDF values in (cdf_clip, 1-cdf_clip). Zero-inflation-aware
+        for "gamma"/"kde" via `_mixture_cdf` (params already carry `qq`,
+        and for "kde" the exact `xb`/`h`/`log_transform` fit ingredients —
+        no need to refit anything here).
         """
-        x = dataset_clean
-
-        if dist == "gaussian":
-            p = stats.norm.cdf(x, loc=params["mu"], scale=params["sigma"])
-
-        elif dist == "gamma":
-            shift = 1.0 if params["shift_applied"] else 0.0
-            p = stats.gamma.cdf(
-                x + shift, params["shape"],
-                loc=params["loc"], scale=params["scale"],
-            )
-
-        elif dist == "pearson3":
-            p = stats.pearson3.cdf(
-                x, params["shape"],
-                loc=params["loc"], scale=params["scale"],
-            )
-
-        elif dist == "kde":
-            # Rebuild the CDF from scratch (kde_object not guaranteed serialisable)
-            kde = stats.gaussian_kde(dataset_clean, bw_method="silverman")
-            std  = np.std(dataset_clean)
-            bw   = kde.factor * std
-            x_min = dataset_clean.min() - 4 * bw
-            x_max = dataset_clean.max() + 4 * bw
-            grid     = np.linspace(x_min, x_max, 4096)
-            pdf_grid = kde.evaluate(grid)
-            cdf_grid = np.cumsum(pdf_grid) * (grid[1] - grid[0])
-            cdf_grid /= cdf_grid[-1]
-            p = np.interp(x, grid, cdf_grid)
-
-        else:
-            raise ValueError(f"Unknown distribution: '{dist}'")
-
+        p = _mixture_cdf(dataset_clean, dist, params)
         return np.clip(p, cdf_clip, 1.0 - cdf_clip)
 
     # ── Helper: standardize one group ──────────────────────────────────────
@@ -988,30 +1027,27 @@ def plot_cdf_comparison(data, dist="gamma", params=None, shift_for_gamma=True,un
     data = data[np.isfinite(data)]
     dist = dist.lower()
 
-    # Apply gamma shift if the user wants to be consistent with fitting step
-    if dist == "gamma":
-        data_used = data + 1 if shift_for_gamma else data
-    else:
-        data_used = data
-
-    # Fit params if not provided
+    # Fit params if not provided. Gamma is zero-inflation aware, matching
+    # f_spi/_fit_single_dist: fitted on the strictly-positive subset only,
+    # with qq = P(X=0) from the full sample (never shifted-and-kept).
     if params is None:
-        if dist == "gamma":
-            shape, loc, scale = stats.gamma.fit(data_used, floc=0)
-        elif dist == "pearson3":
-            shape, loc, scale = stats.pearson3.fit(data_used)
-        else:  # gaussian
-            mu = np.mean(data_used)
-            sigma = np.std(data_used, ddof=0)
+        fit = _fit_single_dist(data, dist, shift_for_gamma=shift_for_gamma)
+        params = fit["params"]
+
+    if dist == "gamma":
+        qq = params.get("qq", 0.0)
+        label = ["Gamma fit", "Gamma CDF"]
+    elif dist == "pearson3":
+        qq = 0.0
+        label = ["Pearson III fit", "Pearson III CDF"]
     else:
-        # read precomputed params from fit_distribution_stats()
-        if dist in {"gamma", "pearson3"}:
-            shape = params["shape"]
-            loc   = params["loc"]
-            scale = params["scale"]
-        else:
-            mu    = params["mu"]
-            sigma = params["sigma"]
+        qq = 0.0
+        label = ["Gaussian fit", "Gaussian CDF"]
+
+    # For the histogram/ECDF panels only: gamma's fitted curve describes the
+    # positive part, so exact zeros (if any) are excluded from the display
+    # sample the same way they're excluded from the fit.
+    data_used = data[data > 0] if (dist == "gamma" and qq > 0) else data
 
     # --------------------------
     # Empirical CDF
@@ -1020,23 +1056,11 @@ def plot_cdf_comparison(data, dist="gamma", params=None, shift_for_gamma=True,un
     ecdf = np.arange(1, len(sorted_data) + 1) / len(sorted_data)
 
     # --------------------------
-    # Theoretical CDF
+    # Theoretical CDF/PDF (zero-inflation-aware for gamma via _mixture_*)
     # --------------------------
-    if dist == "gamma":
-        x = np.linspace(sorted_data.min(), sorted_data.max(), 400)
-        cdf = stats.gamma.cdf(x, shape, loc=loc, scale=scale)
-        pdf = stats.gamma.pdf(x, shape, loc=loc, scale=scale)
-        label = ["Gamma fit","Gamma CDF"]
-    elif dist == "pearson3":
-        x = np.linspace(sorted_data.min(), sorted_data.max(), 400)
-        cdf = stats.pearson3.cdf(x, shape, loc=loc, scale=scale)
-        pdf = stats.pearson3.pdf(x, shape, loc=loc, scale=scale)
-        label =["Pearson III fit", "Pearson III CDF"]
-    else:
-        x = np.linspace(sorted_data.min(), sorted_data.max(), 400)
-        cdf = stats.norm.cdf(x, loc=mu, scale=sigma)
-        pdf = stats.norm.pdf(x, loc=mu, scale=sigma)
-        label = ["Gaussian fit", "Gaussian CDF"]
+    x = np.linspace(sorted_data.min(), sorted_data.max(), 400)
+    cdf = _mixture_cdf(x, dist, params)
+    pdf = _mixture_pdf(x, dist, params)
 
     fig, ax = plt.subplots(nrows=1,ncols=2,figsize=(10, 4))
     ax = ax.ravel()

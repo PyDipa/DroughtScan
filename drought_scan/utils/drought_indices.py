@@ -576,7 +576,14 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
 
     # --- KDE fit (baseline) ---
     if fit_params is None:
-        xb = xbase_log[finite_xbase] if log_transform else xbase[finite_xbase]
+        # Zero-inflation mixture, matching f_spi: the continuous part (KDE)
+        # is fitted on the strictly-positive baseline only — exact zeros are
+        # masked out here, not left in, since their probability mass is
+        # already accounted for separately via `qq` (kde_cdf/kde_ppf apply
+        # it on top of this fit). When log_transform is True there are no
+        # zeros to begin with (checked above), so this mask is a no-op in
+        # that case; it only matters on the log_transform=False path.
+        xb = xbase_log[finite_xbase] if log_transform else xbase[finite_xbase & (xbase != 0)]
 
         if xb.size < 10:
             warnings.warn(
@@ -628,7 +635,7 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
                 f"reference frame of the fit that was passed in.",
                 RuntimeWarning, stacklevel=2
             )
-            xb = xbase_log[finite_xbase] if log_transform else xbase[finite_xbase]
+            xb = xbase_log[finite_xbase] if log_transform else xbase[finite_xbase & (xbase != 0)]
             h = 0.9 * np.std(xb, ddof=1) * xb.size ** (-1 / 5)
         out_params = None
 

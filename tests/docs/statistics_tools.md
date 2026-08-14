@@ -80,7 +80,9 @@ result = test_standardization(
   If provided, the analysis is run independently per group.
 
 - `shift_for_gamma` : bool, default `True`
-  Add +1 to data before Gamma fitting to handle zeros.
+  Add +1 to the strictly-positive part of the data before Gamma fitting.
+  This no longer has anything to do with zeros (see "Handling exact zeros"
+  below) — it only matters for otherwise-pathological positive-only samples.
 
 - `plot` : bool, default `True`
   Generate empirical vs theoretical CDF/PDF comparison figures
@@ -118,9 +120,41 @@ result = test_standardization(
 > are anti-conservative (Lilliefors 1967). The KS statistic *D* itself remains a valid
 > distance metric. For formal inference, use `n_bootstrap ≥ 999`.
 
+> **Note on datasets with many exact ties (e.g. dry months with lots of zeros).**
+> The KS statistic *D* is structurally inflated by the fraction of tied values in
+> the sample, regardless of how well the model captures them — this is a property
+> of the Kolmogorov–Smirnov test itself, not specific to any one family here. For
+> a month where e.g. 40% of observations are exact zeros, expect *D* to sit around
+> 0.4 for every family, `best_by_KS` included. It is still a valid ranking between
+> families, just less discriminating than usual — don't read the raw magnitude of
+> *D* as "the fit is bad" in that case.
+
 ---
 
-### 1.3 Example usage
+### 1.3 Handling exact zeros (zero-inflation)
+
+Real precipitation series routinely have exact zeros (dry months/days). Gaussian
+and Pearson III have no special handling for them (matching `f_zscore`/`f_spei`,
+which don't either — real-valued data isn't naturally zero-inflated). **Gamma**
+and **KDE** use the same zero-inflation mixture as `f_spi`/`f_kde`
+(`drought_indices.py`), so a `test_standardization`/`fit_distribution_stats` call
+is always directly comparable to what those two functions would actually do:
+
+- `qq = P(X = 0)`, the empirical fraction of exact zeros in the sample.
+- The continuous family (Gamma or KDE) is fitted on the **strictly-positive
+  subset only** — zeros are masked out, never shifted into the fit or left in.
+- `H(x) = qq` for `x <= 0`, `H(x) = qq + (1 - qq) * G(x)` for `x > 0`, where
+  `G` is the continuous family's CDF.
+
+`params["qq"]` is present for `"gamma"` and `"kde"` fits (`0.0` — i.e. absent
+in practice — for `"gaussian"`/`"pearson3"`). If you build a `params` dict by
+hand (rather than from `_fit_single_dist`/`fit_distribution_stats`) and pass it
+to `plot_cdf_comparison`, a missing `"qq"` key is treated as `0.0` — no
+zero-inflation — so include it explicitly if the data has exact zeros.
+
+---
+
+### 1.4 Example usage
 
 ```python
 import numpy as np
@@ -163,7 +197,7 @@ print("January:", results_by_month[1]["recommendation"])
 print("July:",    results_by_month[7]["recommendation"])
 ```
 
-### 1.4 Interpreting the results: KS vs AIC
+### 1.5 Interpreting the results: KS vs AIC
 
 It is normal for `best_by_KS` and `best_by_AIC` to disagree. They measure
 different things:
@@ -221,7 +255,8 @@ stats = fit_distribution_stats(
 - `data` : array-like — input dataset.
 - `dist` : `{"gaussian", "gamma", "pearson3", "kde"}`, default `"gamma"` — target distribution.
 - `groups` : array-like or `None` — grouping labels.
-- `shift_for_gamma` : bool, default `True` — add +1 before Gamma fitting.
+- `shift_for_gamma` : bool, default `True` — add +1 to the strictly-positive
+  part before Gamma fitting (zeros are handled separately, see §1.3).
 - `plot` : bool, default `True` — show empirical vs theoretical CDF/PDF for the chosen distribution.
 - `n_bootstrap` : int, default `0` — Lilliefors-corrected p-value (≥ 999 recommended).
 - `seed` : int or `None` — random seed.
@@ -246,10 +281,13 @@ stats = fit_distribution_stats(
   | `"goodness_percent"`     | float  | `100 × (1 − D)`                                |
 
   **`params` structure by distribution:**
-  - Gamma: `{"shape", "loc", "scale", "shift_applied"}`
+  - Gamma: `{"shape", "loc", "scale", "shift_applied", "qq"}`
   - Pearson III: `{"shape", "loc", "scale"}`
   - Gaussian: `{"mu", "sigma"}`
-  - KDE: `{"bw_method", "bw_factor", "n_fit", "_kde_cdf"}`
+  - KDE: `{"bw_method", "h", "xb", "qq", "log_transform", "n_fit"}` — `xb`/`h`
+    are the exact fit ingredients (baseline sample and bandwidth), the same
+    ones `f_kde` stores in its own `out_params`; `qq`/`log_transform` are
+    needed to reproduce the CDF exactly (see §1.3).
 
 - If `groups` is provided — `{group_label: <same dict>}`.
 
@@ -461,10 +499,14 @@ plot_cdf_comparison(
 #### Parameters
 
 - `data` : array-like — input dataset.
-- `dist` : `{"gamma", "pearson3", "gaussian"}` — distribution family.
+- `dist` : `{"gamma", "pearson3", "gaussian"}` — distribution family (KDE is
+  not supported by this standalone plot; use `fit_distribution_stats(..., dist="kde", plot=True)` instead).
 - `params` : dict or `None` — pre-computed parameters from `fit_distribution_stats()`.
-  If `None`, parameters are fitted internally.
-- `shift_for_gamma` : bool, default `True` — consistent with `fit_distribution_stats`.
+  If `None`, parameters are fitted internally (zero-inflation-aware for
+  `"gamma"`, see §1.3). If you pass `params` in yourself for `dist="gamma"`,
+  include `"qq"` — a missing key defaults to `0.0` (no zero-inflation).
+- `shift_for_gamma` : bool, default `True` — consistent with `fit_distribution_stats`;
+  only used when `params=None` (internal fitting).
 - `unit` : str or `None` — label for the x-axis (e.g., `"mm"`, `"m³/s"`).
   Defaults to `"value"`.
 
