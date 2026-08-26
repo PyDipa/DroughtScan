@@ -74,14 +74,14 @@ Use the threshold to detect events:
 print("Default threshold:", ds.threshold)
 ds.threshold = -1.5  # Custom threshold
 
-tstartid, tendid, duration, deficit = ds.severe_events()
+tstartid, tendid, duration, deficit = ds.severe_events_old()
 print("Severe events started at:", ds.m_cal[tstartid])
 ```
 
 ### Show multiple events
 
 ```python
-ds.severe_events(max_events=10, labels=True)
+ds.severe_events_old(max_events=10, labels=True)
 ```
 
 
@@ -89,21 +89,28 @@ ds.severe_events(max_events=10, labels=True)
 
 ## 4) Equivalent precipitation for a target SPI
 
-`normal_values()` returns precipitation amounts equivalent to SPI=0.  
-Use regression coefficients (`c2r_index`) to convert an SPI value to precipitation.
+`normal_values()` returns precipitation amounts equivalent to SPI=0.
+Use `spi_to_native()` to convert any SPI value to precipitation.
 
 ```python
-import numpy as np
 print("Normal precipitation values:", ds.normal_values())
 
-coeff = ds.c2r_index
-spi_value = -1.5
-month_index = 3   # March
-scale_index = 18  # SPI18
-
-equivalent_precipitation = np.polyval(coeff[scale_index-1, month_index-1, :], spi_value)
+equivalent_precipitation = ds.spi_to_native(-1.5, month_scale=18, ref_month=3)
 print(f"Equivalent precipitation for SPI18=-1.5 in March: {equivalent_precipitation}")
+
+# and the other direction
+print(ds.native_to_spi(1000.0, month_scale=18, ref_month=3))
 ```
+
+`spi_to_native` / `native_to_spi` invert the fitted distribution exactly — the
+Gamma's zero-inflated ppf for `f_spi`, Pearson III for `f_spei`, the KDE
+cumulative for `f_kde`, mean+std for `f_zscore`.
+
+> **Deprecated:** `ds.c2r_index` holds a degree-3 polynomial approximation of the
+> same mapping, evaluated with `np.polyval`. It is kept for backward compatibility
+> only and is not used by any live computation: its error is non-trivial in the
+> distribution tails, and it does not represent the point mass at zero at all.
+> Do not use it for new code.
 **Visual inspection with `plot_spi_fit()`** 
 
 For exploratory purposes, the method `plot_spi_fit(K, month)` provides a graphical representation of the regression curves used to link SPI values to raw data (precipitation, PET, or balance).
@@ -204,8 +211,9 @@ for `Streamflow`) relative to the SPI=0 reference (which equals
 `normal_values()`):
 
 ```python
-# Statistical-rarity estimate (used internally by plot_trends):
-# maps the SPI-like anomaly at the window scale back to native units via c2r_index.
+# Statistical-rarity estimate (used internally by plot_trends): maps the SPI-like
+# anomaly at the window scale back to native units via the exact inverse of the
+# fitted distribution (spi_to_native), relative to the SPI=0 reference.
 deficit = ds.deficit_from_spi(window=36)
 
 # Direct observation-based water balance: sum of monthly (obs - normal) anomalies.
@@ -372,5 +380,5 @@ within the basin, see the [Spatial Guide](spatial_guide.md).
 
 Key methods:
 - `ds.spatial_maps()` — compute gridded SPI and SIDI at a target timestamp.
-- `ds.spatial_trends()` — compute pixel-wise CDN trend maps.
+- `ds.spatial_spi()` — compute pixel-wise SPI maps and their millimetre-equivalent reverse.
 - `ds.plot_spatial()` — visualize the output maps.

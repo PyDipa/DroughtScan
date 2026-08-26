@@ -31,7 +31,7 @@ Output maps are stored in the DSO and can be visualized with `plot_spatial()`.
 
 Computes, for each valid grid point within `ds.Pgrid`:
 
-- **SPI** at selected temporal scales (`month_scales`)
+- **SPI** at selected temporal scales — **moved to `spatial_spi` in 4.0.0**
 - **SIDI** across all implemented weighting schemes
 
 All results are stored as spatial arrays in the DSO at a target timestamp.
@@ -42,7 +42,6 @@ All results are stored as spatial arrays in the DSO at a target timestamp.
 
 ```python
 ds.spatial_maps(
-    month_scales=None,
     timestamp=None,
     K=None,
     seasonal_params=None
@@ -51,7 +50,13 @@ ds.spatial_maps(
 
 #### Parameters
 
-- `month_scales` : list of int, optional  
+> **Changed in 4.0.0.** `month_scales` is gone: `spatial_maps` computes the SIDI
+> grid only. SPI maps (and their millimetre-equivalent reverse) come from
+> `spatial_spi`, which is not capped by `K`. Both methods used to write `SPI_grid`,
+> so whichever ran last overwrote the other's.
+
+<!-- removed parameter -->
+- ~~`month_scales`~~ : list of int, optional  
   Temporal scales for which SPI maps are stored.  
   Default: `[1, 3, 6, 12, 18, 24]`.  
   All values must be ≤ `K`; scales exceeding `K` are silently ignored with a warning.
@@ -84,9 +89,7 @@ After running `spatial_maps`, the following attributes are added to the DSO:
   Access a specific weight with: `ds.SIDI_grid[:, :, weight_index]`  
   Default display weight: `weight_index=2` (geometrically decreasing).
 
-- **`ds.SPI_grid`** : dict `{scale: ndarray (n_rows, n_cols)}`  
-  SPI maps at the target timestamp for each scale in `month_scales`.  
-  Example: `ds.SPI_grid[12]` is the SPI-12 map.
+(`ds.SPI_grid` is written by **`spatial_spi`**, not by `spatial_maps` — see §3.)
 
 - **`ds.spatial_timestamp`** : ndarray `(2,)`, i.e. `[month, year]`  
   The timestamp corresponding to the stored maps.
@@ -117,13 +120,14 @@ ds.spatial_maps()
 
 # Compute at a specific date, with custom scales and K
 ds.spatial_maps(
-    month_scales=[1, 3, 6, 12, 18, 24],
     timestamp=(8, 2003),   # August 2003
     K=36
 )
 
 # Inspect outputs
 print("SIDI grid shape:", ds.SIDI_grid.shape)      # (n_rows, n_cols, n_weights)
+# SPI maps come from spatial_spi:
+ds.spatial_spi(windows=[12])
 print("SPI-12 map shape:", ds.SPI_grid[12].shape)  # (n_rows, n_cols)
 print("Timestamp:", ds.spatial_timestamp)           # [8, 2003]
 ```
@@ -166,7 +170,9 @@ ds.plot_spatial(var='SIDI', weight_index=0)
 
 **B. You called `set_optimal_SIDI(overwrite=True)` on the point-scale object.**  
 `self.SIDI` is now the optimized series, and `self.optimal_k` /
-`self.optimal_weight_index` are stored on the instance — but `spatial_maps`
+`self.optimal_weight_index` are stored on the instance — and since 4.0.0
+`spatial_maps` **follows them by default**. What follows describes the old
+behaviour; `spatial_maps`
 does **not** read them automatically (it still defaults to `ds.K`). If you call
 `spatial_maps()` without passing `K` explicitly, a warning reminds you of the
 mismatch:
@@ -174,8 +180,8 @@ mismatch:
 ```python
 ds.set_optimal_SIDI(optimal_k=8, optimal_weight_index=0, overwrite=True)
 
-ds.spatial_maps()
-# UserWarning: self.optimal_k=8 is set (from set_optimal_SIDI) but spatial_maps
+ds.spatial_maps()   # since 4.0.0 this already uses optimal_k
+# UserWarning (<= 3.x): self.optimal_k=8 is set (from set_optimal_SIDI) but spatial_maps
 # is using self.K=24. Pass K=self.optimal_k explicitly if you want spatial
 # consistency.
 
@@ -206,7 +212,7 @@ ds.plot_spatial(var='SIDI', weight_index=1)
 
 ---
 
-## 3. `spatial_trends`
+## 3. `spatial_spi`
 
 ### 3.1 Purpose
 
@@ -228,7 +234,7 @@ the physical magnitude of the SPI-based anomaly is the sole criterion.
 ### 3.2 Method signature
 
 ```python
-ds.spatial_trends(
+ds.spatial_spi(
     windows=None,
     timestamp=None
 )
@@ -248,20 +254,20 @@ ds.spatial_trends(
 
 ### 3.3 Stored attributes
 
-After running `spatial_trends`, the following attribute is added:
+After running `spatial_spi`, the following attribute is added:
 
-- **`ds.trend_grid`** : dict `{window: ndarray (n_rows, n_cols)}`  
+- **`ds.reverse_SPI_grid`** : dict `{window: ndarray (n_rows, n_cols)}`  
   mm-equivalent deficit/surplus over each window at the target timestamp, derived
   from the reverse-gamma transform of the SPI-like index (see §3.1).  
   Pixels with `|SPI| < 0.5` at the target timestamp are set to `0.0`.
 
 The `spatial_timestamp` attribute is also updated. If it differs from a previously
-stored timestamp, `SIDI_grid` and `SPI_grid` are invalidated — rerun `spatial_maps`
+stored timestamp, `SIDI_grid` is invalidated — rerun `spatial_maps`
 for consistency.
 
 > **Note**  
-> Every call to `spatial_trends` explicitly discards any previously stored
-> `trend_grid` before recomputing, so rerunning with different `windows` always
+> Every call to `spatial_spi` explicitly discards any previously stored
+> `reverse_SPI_grid` before recomputing, so rerunning with different `windows` always
 > reflects a clean recalculation rather than a partial update.
 
 ---
@@ -270,11 +276,11 @@ for consistency.
 
 ```python
 # Compute CDN trend maps at the last available timestamp
-ds.spatial_trends(windows=[36, 60, 120])
+ds.spatial_spi(windows=[36, 60, 120])
 
 # Inspect
-print("Available windows:", list(ds.trend_grid.keys()))
-print("Trend 60-month shape:", ds.trend_grid[60].shape)
+print("Available windows:", list(ds.reverse_SPI_grid.keys()))
+print("Trend 60-month shape:", ds.reverse_SPI_grid[60].shape)
 ```
 
 ---
@@ -287,7 +293,7 @@ Visualizes a spatial map of SIDI, SPI, or CDN trends overlaid on the basin shape
 The colormap is automatically centered on zero and uses a discrete drought/surplus scale.
 
 > **Note**  
-> This method requires that `spatial_maps` (for SIDI/SPI) or `spatial_trends` (for CDN)
+> This method requires that `spatial_maps` (for SIDI) or `spatial_spi` (for SPI / reverse SPI)
 > has been run before.
 
 ---
@@ -306,16 +312,16 @@ ds.plot_spatial(
 
 #### Parameters
 
-- `var` : `'SIDI'`, `'SPI'`, or `'CDN'`, default `'SIDI'`  
+- `var` : `'SIDI'`, `'SPI'`, or `'reverse_spi'`, default `'SIDI'`  
   Which index to display.
 
 - `weight_index` : int, default `2`  
   Weighting scheme to display when `var='SIDI'`.  
-  Ignored when `var='SPI'` or `var='CDN'`.
+  Ignored when `var='SPI'` or `var='reverse_spi'`.
 
 - `month_scale` : int, optional  
   Required when `var='SPI'`: must be one of the keys in `ds.SPI_grid`.  
-  Required when `var='CDN'`: must be one of the keys in `ds.trend_grid`.
+  Required when `var='reverse_spi'`: must be one of the keys in `ds.reverse_SPI_grid`.
 
 - `ax` : `matplotlib.axes.Axes`, optional  
   External axes for integration in multi-panel figures.  
@@ -339,7 +345,7 @@ ds.plot_spatial()
 ds.plot_spatial(var='SPI', month_scale=12)
 
 # CDN trend map (60-month window, in mm)
-ds.plot_spatial(var='CDN', month_scale=60)
+ds.plot_spatial(var='reverse_spi', month_scale=60)
 
 # Custom title
 ds.plot_spatial(var='SIDI', weight_index=0, title='SIDI (equal weights) — August 2003')
@@ -383,7 +389,7 @@ plt.tight_layout()
   precipitation, all-NaN) are automatically excluded from computation and set to `np.nan`
   in the output maps. The number of valid points processed is printed at runtime.
 
-- **Timestamp consistency between `spatial_maps` and `spatial_trends`.**  
+- **Timestamp consistency between `spatial_maps` and `spatial_spi`.**  
   If you change the timestamp between calls, the library warns you and invalidates the
   previously stored grids. Always rerun both methods if you need maps and trends at the
   same timestamp.

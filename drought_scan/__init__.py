@@ -23,7 +23,9 @@ from importlib.metadata import version, PackageNotFoundError
 try:
     __version__ = version("droughtscan")
 except PackageNotFoundError:
-    __version__ = "3.3.0"
+    # Fallback for a source tree that was never pip-installed; keep in step
+    # with pyproject.toml's `version`.
+    __version__ = "4.0.0"
 
 # --- Public API ---------------------------------------------------------------
 from .core import (

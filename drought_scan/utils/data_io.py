@@ -1273,15 +1273,27 @@ def refit_gamma_shifted(ts_daily,dates_daily,ref_day,
     Returns
     -------
     fit_params : dict
-        {month_number: (alpha, loc, beta, shift)  or  None}
+        {month_number: (alpha, loc, beta, qq)  or  None}
 
-        `shift` is a small positive constant added to handle zeros before
-        fitting.  Pass it through so that `_compute_spi` / `f_spi` can
-        apply the same shift when transforming new data.
+        Exactly the tuple `f_spi(fit_params=...)` expects, in that order:
+        the Gamma is fitted on the strictly-positive samples with `floc=0`,
+        and `qq` is the fraction of exact zeros carried as a point mass by
+        the zero-inflation mixture (see `drought_indices.gamma_cdf_zi`).
 
-        IMPORTANT: adapt the dict structure to match what your
-        _compute_spi / f_spi actually expect.  This skeleton uses
-        (alpha, loc, beta, shift) — you may need to adjust.
+        This used to return `(alpha, loc, beta, shift)` instead, where zeros
+        (and negatives) were absorbed by adding a constant before fitting.
+        That is a different model from the one `f_spi` applies, and once
+        `qq` became f_spi's fourth parameter the two tuples had the same
+        length — so a shift would have been silently read as a zero-inflation
+        fraction. The convention here now matches f_spi's.
+
+    Raises
+    ------
+    ValueError
+        If a month's baseline samples contain negative values: the Gamma is
+        defined on (0, +inf) and a negative aggregate cannot be represented
+        as a point mass the way an exact zero can. Use `f_spei`/`f_kde` for
+        real-valued variables.
     """
     from scipy.stats import gamma as gamma_dist
 
@@ -1320,17 +1332,30 @@ def refit_gamma_shifted(ts_daily,dates_daily,ref_day,
             fit_params[m] = None
             continue
 
-        # Handle zeros / negatives (same logic as f_spi)
-        shift = 0.0
-        if np.any(samples <= 0):
-            shift = float(np.abs(samples.min())) + 0.001
-            samples_fit = samples + shift
-        else:
-            samples_fit = samples
+        # Zero handling, identical to f_spi: exact zeros are NOT shifted into the
+        # positive domain, they are masked out of the fit and carried separately as
+        # the point mass `qq` of the zero-inflation mixture.
+        if np.any(samples < 0):
+            raise ValueError(
+                f"Month {m}: negative aggregates in the baseline "
+                f"(min={samples.min():.3f}). The Gamma used by f_spi is defined on "
+                f"(0, +inf); use f_spei or f_kde for real-valued variables."
+            )
+
+        qq = float(np.mean(samples == 0))
+        samples_fit = samples[samples > 0]
+
+        if samples_fit.size < 3:
+            warnings.warn(
+                f"Month {m}: only {samples_fit.size} strictly-positive baseline "
+                f"samples after masking exact zeros — gamma unreliable."
+            )
+            fit_params[m] = None
+            continue
 
         try:
             alpha, loc, beta = gamma_dist.fit(samples_fit, floc=0)
-            fit_params[m] = (alpha, loc, beta, shift)
+            fit_params[m] = (alpha, loc, beta, qq)
         except Exception as e:
             warnings.warn(f"Month {m}: gamma fit failed ({e}).")
             fit_params[m] = None

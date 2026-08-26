@@ -93,6 +93,111 @@ def generate_weights(k):
 
 
 # ===================================================================
+#  Season grouping from spi_sqi_corr's R2(month, k)
+# ===================================================================
+# MAX_K_GAP_MONTHS: two adjacent calendar months merge into the same season
+# iff their optimal accumulation scale k* differs by strictly less than this
+# many months; a gap of `MAX_K_GAP_MONTHS` or more is always a season
+# boundary (e.g. August next to a July/September block with a much larger
+# optimal k). Since k* is always integer-valued, "< MAX_K_GAP_MONTHS merges"
+# and ">= MAX_K_GAP_MONTHS cuts" are complementary and exhaustive — every
+# possible integer gap falls on exactly one side, so this single threshold
+# fully determines each boundary; no separate "closer of the two neighbours"
+# comparison is needed (an earlier draft used one, but it could split two
+# months as similar as e.g. Jan/Feb (gap 1) apart just because each of them
+# individually happened to be even closer to its other neighbour — this
+# threshold rule doesn't have that artifact). Value agreed with Arianna on
+# 2026-08-13.
+MAX_K_GAP_MONTHS = 2
+
+
+def optimal_k_per_month(R2):
+    """
+    Per calendar month (row of R2, Jan=0..Dec=11), the 1-indexed scale k
+    that maximises R^2. NaN where the whole row is 0, i.e. no scale reaches
+    significance (p < 0.05) for that month — spi_sqi_corr already zeroes
+    non-significant cells, so `row.max() == 0` is unambiguous.
+
+    Args:
+        R2 (ndarray): shape (12, K), as returned by spi_sqi_corr.
+
+    Returns:
+        ndarray, shape (12,): optimal k per calendar month (NaN if none significant).
+    """
+    k_star = np.full(R2.shape[0], np.nan)
+    for m in range(R2.shape[0]):
+        row = R2[m]
+        if np.any(row > 0):
+            k_star[m] = np.argmax(row) + 1
+    return k_star
+
+
+def seasons_from_r2(R2, max_k_gap=MAX_K_GAP_MONTHS):
+    """
+    Derive a `seasons` dict (contiguous calendar-month groups) from
+    spi_sqi_corr's R2(month, k), in the exact shape
+    `analyze_correlation_seasonal(seasons=...)` expects: {label: [months]}.
+
+    Merge rule (agreed with Arianna, 2026-08-13, revised same day to drop
+    the "closer neighbour" comparison — see MAX_K_GAP_MONTHS), walking the
+    12 calendar months circularly (the Dec-Jan boundary can merge, like any
+    other):
+      - a month merges with the PREVIOUS month iff their optimal scales k*
+        differ by less than `max_k_gap`; otherwise it starts a new season;
+      - a month with no significant k at any scale (k* is NaN) never merges
+        with a significant neighbour. Adjacent non-significant months DO
+        merge with each other, forming one contiguous "broken signal" season.
+
+    Args:
+        R2 (ndarray): shape (12, K), as returned by spi_sqi_corr.
+        max_k_gap (int): see MAX_K_GAP_MONTHS.
+
+    Returns:
+        dict[str, list[int]]: season label -> 1-indexed calendar months.
+    """
+    k_star = optimal_k_per_month(R2)
+    n = 12
+
+    # cut_before[m] = True -> a season boundary immediately before calendar
+    # month m (0-indexed, 0=Jan), decided solely from the gap to the
+    # PREVIOUS month (circular) — so all 12 circular boundaries are covered
+    # exactly once, no conflicts.
+    cut_before = [False] * n
+    for m in range(n):
+        prev_i = (m - 1) % n
+        if np.isnan(k_star[m]):
+            # start a new "broken signal" block unless the previous month is
+            # also non-significant, in which case this month extends it.
+            cut_before[m] = not np.isnan(k_star[prev_i])
+            continue
+        if np.isnan(k_star[prev_i]):
+            cut_before[m] = True  # can't merge backward into a NaN block
+            continue
+        d_prev = abs(k_star[m] - k_star[prev_i])
+        cut_before[m] = d_prev >= max_k_gap
+
+    starts = [m for m in range(n) if cut_before[m]]
+    if not starts:
+        starts = [0]  # degenerate case: whole year merges into one season
+
+    month_initials = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"]
+    seasons = {}
+    for idx, s in enumerate(starts):
+        e = starts[(idx + 1) % len(starts)]
+        months0 = list(range(s, n)) + list(range(0, e)) if e <= s else list(range(s, e))
+        months = [m + 1 for m in months0]  # 1-indexed calendar months
+        label = "".join(month_initials[m - 1] for m in months)
+        # Two non-adjacent groups can produce the same label (e.g. two
+        # isolated single-month seasons sharing a letter); disambiguate
+        # rather than silently overwrite one in the dict.
+        if label in seasons:
+            label = f"{label}_{idx}"
+        seasons[label] = months
+
+    return seasons
+
+
+# ===================================================================
 #  Calendar utilities
 # ===================================================================
 def baseline_indices(m_cal, start_baseline_year, end_baseline_year):
@@ -292,6 +397,89 @@ def _reverse_polyfit(spi, xbase, m_cal, idmesi_all, tb1, tb2, stride, m):
 
 
 # ===================================================================
+#  Zero-inflated Gamma forward/reverse — shared exact CDF/PPF for f_spi
+# ===================================================================
+def gamma_cdf_zi(x, alpha, loc, beta, qq, shift=0.0):
+    """
+    Zero-inflated Gamma cumulative probability Hx at native value(s) x.
+
+    ``Hx = qq + (1 - qq) * Gamma.cdf(x + shift)``, i.e. a point mass ``qq`` at
+    exactly zero mixed with the continuous Gamma fitted on the strictly-positive
+    part. This is THE definition of the f_spi forward transform, factored out —
+    exactly as ``kde_cdf`` is for f_kde — so that f_spi itself, the reverse
+    conversions in core.py (native_to_spi/spi_to_native), the pixel-level
+    deficit in ``_process_grid_point_trends`` and the diagnostic fits in
+    ``statistics._mixture_cdf`` all evaluate one formula instead of four.
+
+    Before this existed the reverse direction used a bare ``gamma.cdf``/
+    ``gamma.ppf`` with no ``qq`` term, so it was NOT the inverse of the forward
+    transform on zero-inflated data: with 32% exact zeros in the baseline,
+    ``native_to_spi(20 mm)`` returned 0.09 where f_spi had produced 0.49, and
+    the SPI=0 "normal value" came out at 17.5 mm instead of 6.1 mm — an error
+    that propagated into normal_values/deficit_from_spi/volume_anomaly_rolling
+    and every native-unit product downstream.
+
+    Args:
+        x (float or ndarray): native-unit value(s) to evaluate.
+        alpha, loc, beta (float): fitted Gamma shape, location and scale.
+        qq (float): fraction of exact zeros in the baseline at fit time.
+        shift (float): constant added to x before the Gamma is evaluated, for
+            fits calibrated on shifted data (``statistics``' legacy
+            ``shift_for_gamma``). f_spi itself never shifts, so this is 0.0.
+
+    Returns:
+        float or ndarray: cumulative probability Hx (not clipped — the caller
+        applies PROB_CLIP, as f_spi/f_kde do). NaN propagates from NaN input.
+    """
+    x_arr = np.atleast_1d(np.asarray(x, dtype=float))
+    is_scalar = np.ndim(x) == 0
+
+    Gx = gamma.cdf(x_arr + shift, a=alpha, loc=loc, scale=beta)
+    Hx = qq + (1 - qq) * Gx
+    # Everything at or below zero is the point mass, whatever `loc`/`shift`
+    # would make the continuous part say there; NaN stays NaN.
+    Hx = np.where(x_arr <= 0, qq, Hx)
+    Hx = np.where(np.isnan(x_arr), np.nan, Hx)
+
+    return float(Hx[0]) if is_scalar else Hx
+
+
+def gamma_ppf_zi(Hx, alpha, loc, beta, qq, shift=0.0):
+    """
+    Invert ``gamma_cdf_zi``: cumulative probability Hx -> native-unit value(s).
+
+    Values of Hx at or below the zero-inflation fraction ``qq`` map to exactly
+    0.0, matching the point mass at zero in the forward transform; above it the
+    conditional probability ``(Hx - qq) / (1 - qq)`` is fed to the Gamma ppf.
+    Same contract as ``kde_ppf`` for f_kde.
+
+    Args:
+        Hx (float or ndarray): cumulative probability value(s) to invert.
+        alpha, loc, beta, qq, shift: same fitted parameters as ``gamma_cdf_zi``.
+
+    Returns:
+        float or ndarray: native-unit value(s). NaN propagates from NaN input.
+    """
+    Hx_arr = np.atleast_1d(np.asarray(Hx, dtype=float))
+    is_scalar = np.ndim(Hx) == 0
+
+    out = np.zeros(Hx_arr.shape, dtype=float)
+    above = np.isfinite(Hx_arr) & (Hx_arr > qq)
+
+    if np.any(above):
+        if qq >= 1.0:
+            # Degenerate baseline: all mass at zero, nothing above it to invert.
+            out[above] = 0.0
+        else:
+            Gx = np.clip((Hx_arr[above] - qq) / (1 - qq), 0.0, 1.0)
+            out[above] = gamma.ppf(Gx, a=alpha, loc=loc, scale=beta) - shift
+
+    out = np.where(np.isnan(Hx_arr), np.nan, out)
+
+    return float(out[0]) if is_scalar else out
+
+
+# ===================================================================
 #  f_spi — Gamma-based (for positive, right-skewed data)
 # ===================================================================
 def f_spi(prec, stride, m, m_cal, tb1, tb2, fit_params=None):
@@ -305,14 +493,23 @@ def f_spi(prec, stride, m, m_cal, tb1, tb2, fit_params=None):
         m_cal (numpy.ndarray): Calendar array (n, 2) with [month, year].
         tb1 (int): Baseline start year.
         tb2 (int): Baseline end year.
-        fit_params (tuple, optional): Pre-computed (alpha, loc, beta).
+        fit_params (tuple, optional): Pre-computed (alpha, loc, beta, qq) — the
+            complete calibration, zero-inflation fraction included. A legacy
+            3-tuple (alpha, loc, beta) is still accepted, but then `qq` has to be
+            re-estimated from the supplied data and the result is NOT in the
+            reference frame of the fit that was passed in (a warning says so).
 
     Returns:
         tuple:
             - idmesi_all (ndarray): month indices for the full period.
             - spi (ndarray): standardized SPI values.
-            - coef (ndarray): degree-3 polyfit coefficients for inverse mapping.
-            - params (tuple or None): (alpha, loc, beta) if fitted, else None.
+            - coef (ndarray): degree-3 polyfit coefficients for inverse mapping
+              (approximate; retained for backward compatibility only — the exact
+              inverse is `gamma_ppf_zi`, used by spi_to_native).
+            - params (tuple or None): (alpha, loc, beta, qq) if fitted, else None.
+              `qq` is part of the fit, not a derived quantity: it is what makes
+              `gamma_cdf_zi`/`gamma_ppf_zi` an exact inverse pair (see
+              native_to_spi/spi_to_native).
     """
     xbase, x, idmesi_all = _resolve_indices(prec, stride, m, m_cal, tb1, tb2)
 
@@ -323,20 +520,48 @@ def f_spi(prec, stride, m, m_cal, tb1, tb2, fit_params=None):
             RuntimeWarning, stacklevel=2
         )
 
+    # --- Zero-inflation fraction, estimated on the BASELINE ---
+    # qq is P(X=0) of the fitted mixture, so it must come from the same sample the
+    # Gamma below is fitted on (xbase[xbase > 0]). Taking it from the full period
+    # would mix two samples and let appended data shift past SPI values.
+    xbase_valid = xbase[np.isfinite(xbase)]
+    qq_baseline = float(np.sum(xbase_valid == 0) / xbase_valid.size) if xbase_valid.size else 0.0
+
     # --- Gamma fit ---
     if fit_params is None:
         alpha, loc, beta = gamma.fit(xbase[xbase > 0], floc=0)
+        qq = qq_baseline
     else:
-        alpha, loc, beta = fit_params
+        # Honour the stored calibration: (alpha, loc, beta, qq) ARE the fitted
+        # distribution, so reusing qq as-is is what keeps new values in the
+        # calibration's reference frame (the whole point of passing fit_params —
+        # e.g. scenarios/forecast, where `prec` is modified but SPI must stay
+        # comparable to the original fit). Re-deriving qq from the supplied data
+        # would silently recalibrate the point mass at zero.
+        fit_params = tuple(np.ravel(fit_params))
+        if len(fit_params) == 4:
+            alpha, loc, beta, qq = (float(v) for v in fit_params)
+        elif len(fit_params) == 3:
+            alpha, loc, beta = (float(v) for v in fit_params)
+            qq = qq_baseline
+            if qq != 0.0:
+                warnings.warn(
+                    f"f_spi: fit_params provided without the zero-inflation "
+                    f"fraction qq (legacy 3-tuple) — re-estimated on the supplied "
+                    f"data as qq={qq:.4f} (month {m}, month-scale {stride}). The "
+                    f"result is NOT in the reference frame of the fit that was "
+                    f"passed in.",
+                    RuntimeWarning, stacklevel=2
+                )
+        else:
+            raise ValueError(
+                f"f_spi: fit_params must be (alpha, loc, beta, qq) — or a legacy "
+                f"(alpha, loc, beta) — got {len(fit_params)} values."
+            )
 
-    # --- CDF with zero-inflation ---
-    # qq is P(X=0) of the fitted mixture: estimated on the BASELINE, i.e. the same
-    # sample the Gamma above is fitted on (xbase[xbase > 0]). Taking it from the
-    # full period would mix two samples and let appended data shift past SPI values.
-    Gx = gamma.cdf(x, a=alpha, loc=loc, scale=beta)
-    xbase_valid = xbase[np.isfinite(xbase)]
-    qq = float(np.sum(xbase_valid == 0) / xbase_valid.size) if xbase_valid.size else 0.0
-    Hx = qq + (1 - qq) * Gx
+    # --- CDF with zero-inflation (exact; same formula reused by the reverse
+    # transforms via gamma_cdf_zi/gamma_ppf_zi) ---
+    Hx = gamma_cdf_zi(x, alpha, loc, beta, qq)
     Hx = np.clip(Hx, PROB_CLIP, 1 - PROB_CLIP)
 
     spi = np.round(norm.ppf(Hx), 4)
@@ -344,7 +569,7 @@ def f_spi(prec, stride, m, m_cal, tb1, tb2, fit_params=None):
     # --- Reverse mapping ---
     coef = _reverse_polyfit(spi, xbase, m_cal, idmesi_all, tb1, tb2, stride, m)
 
-    return idmesi_all, spi, coef, (alpha, loc, beta) if fit_params is None else None
+    return idmesi_all, spi, coef, (alpha, loc, beta, qq) if fit_params is None else None
 
 
 # ===================================================================
@@ -400,6 +625,62 @@ def f_spei(balance, stride, m, m_cal, tb1, tb2, fit_params=None):
 # ===================================================================
 #  KDE forward/reverse — shared exact CDF/PPF for f_kde
 # ===================================================================
+def kde_fit_sample(values, log_transform=True):
+    """
+    Decide, from one sample, the three things a KDE fit is made of: whether to work
+    in log space, the zero-inflation fraction ``qq``, and the sample the continuous
+    part is actually fitted on.
+
+    One implementation, so ``f_kde`` (the operational fit) and
+    ``statistics._fit_single_dist`` (the diagnostic that judges it) cannot disagree
+    about which points enter the fit — they did: on real-valued data the diagnostic
+    fitted the KDE on the strictly-positive subset only, while f_kde fitted it on
+    everything, so the page reported how well a KDE described half the sample.
+
+    Rules:
+
+    - **Negative values present** — the variable is real-valued, so it is not bounded
+      below and an exact 0.0 is just a value, not a pile-up against a floor. Then
+      ``qq = 0`` (no point mass), ``log_transform`` is forced off (log of a negative
+      is undefined, not merely inconvenient), and every finite value enters the fit.
+      Forcing a point mass at zero here would also make the mixture ill-formed: the
+      mass would sit *below* the negative half of the distribution, so the CDF would
+      start at ``qq`` instead of 0.
+    - **Otherwise** — the variable is bounded below by zero, exact zeros are a genuine
+      point mass: ``qq`` is their fraction, they are masked out of the continuous
+      part, and ``log_transform`` is honoured. (Under a log transform the masking is
+      automatic, since ``log(0) = -inf`` is not finite.)
+
+    Args:
+        values (ndarray): the sample the fit is calibrated on — the BASELINE, not the
+            full record (see f_kde).
+        log_transform (bool): requested transform; may be overridden to False.
+
+    Returns:
+        tuple: ``(xb, qq, log_transform)`` — the continuous-part sample (already in
+        fit space, i.e. log-transformed when applicable), the zero-inflation fraction
+        and the transform actually applied.
+    """
+    values = np.asarray(values, dtype=float)
+    finite = np.isfinite(values)
+    has_negative = bool(np.any(finite & (values < 0)))
+
+    if has_negative:
+        return values[finite], 0.0, False
+
+    finite_values = values[finite]
+    qq = float(np.sum(finite_values == 0) / finite_values.size) if finite_values.size else 0.0
+
+    nonzero = values[finite & (values != 0)]
+    if log_transform:
+        with np.errstate(divide='ignore', invalid='ignore'):
+            xb = np.log(nonzero)
+        xb = xb[np.isfinite(xb)]
+    else:
+        xb = nonzero
+    return xb, qq, log_transform
+
+
 def kde_cdf(x, xb, h, qq, log_transform):
     """
     Evaluate the fitted KDE-based cumulative probability Hx at native value(s) x,
@@ -416,8 +697,8 @@ def kde_cdf(x, xb, h, qq, log_transform):
         xb (ndarray): baseline sample used for the KDE fit (already
             log-transformed if log_transform=True), as in out_params['xb'].
         h (float): kernel bandwidth used for the fit, as in out_params['h'].
-        qq (float): fraction of exact zeros in the evaluation series at fit
-            time, as in out_params['qq'].
+        qq (float): zero-inflation fraction of the fit, as in out_params['qq'];
+            0 when the fitted variable is real-valued (see kde_fit_sample).
         log_transform (bool): whether x must be log-transformed before
             evaluation, as in out_params['log_transform'].
 
@@ -440,7 +721,12 @@ def kde_cdf(x, xb, h, qq, log_transform):
 
     Hx = np.full(x_arr.shape, np.nan, dtype=float)
     Hx[finite_mask] = qq + (1 - qq) * Gx[finite_mask]
-    Hx[zero_mask] = qq
+    # Pin x == 0 to the point mass only when there IS one. With qq == 0 the fit is a
+    # plain KDE over the reals (see kde_fit_sample), and zero is an ordinary interior
+    # point whose cumulative probability is whatever the kernels say — forcing it to
+    # 0.0 there put H(0) below H(-1).
+    if qq > 0:
+        Hx[zero_mask] = qq
 
     return float(Hx[0]) if is_scalar else Hx
 
@@ -536,31 +822,23 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
     finite_x = np.isfinite(x)
     finite_xbase = np.isfinite(xbase)
 
-    # --- Zero-inflation fraction, estimated on the BASELINE ---
-    # qq is P(X=0) of the fitted mixture, so it must come from the same sample as
-    # the rest of the fit. Estimating it on the full period would let data appended
-    # later change the calibration — and hence already-published SPI values.
-    xbase_valid = xbase[finite_xbase]
-    qq = float(np.sum(xbase_valid == 0) / xbase_valid.size) if xbase_valid.size else 0.0
-
-    # --- Optional log-transform ---
-    # Decided on the BASELINE only, for the same reason: the baseline defines the
-    # model, and evaluation data must not silently re-decide which model was fitted.
-    #
-    # This only concerns the shape of the CONTINUOUS (strictly-positive) part —
-    # a separate concern from `qq` above, which already masks out the exact-zero
-    # point mass before anything is fitted. Zeros therefore do NOT disable
-    # log_transform: np.log(0) = -inf is automatically dropped by the
-    # `np.isfinite(xbase_log)` mask below, same effect as explicitly excluding
-    # them. Only genuine NEGATIVE values disable it — those can't be masked as
-    # a point mass the way zeros can, and log() of a negative number is
-    # undefined, not just inconvenient.
-    if log_transform and np.any(np.isfinite(xbase) & (xbase < 0)):
+    # --- The fit's three ingredients, decided on the BASELINE ---
+    # xb / qq / log_transform ARE the fitted distribution, so all three must come
+    # from the same sample. Deciding any of them on the full period would let data
+    # appended later change the calibration — and hence already-published SPI values.
+    # The rules live in kde_fit_sample so the diagnostic fits in statistics.py apply
+    # exactly the same ones (see that function).
+    xb_baseline, qq, log_transform_resolved = kde_fit_sample(xbase, log_transform)
+    if log_transform and not log_transform_resolved:
         warnings.warn(
-            f"f_kde: negative data detected in month {m} - month-scale {stride} → log_transform disabled ",
+            f"f_kde: negative data detected in month {m} - month-scale {stride} → "
+            f"log_transform disabled, and the exact-zero point mass dropped "
+            f"(qq=0): a real-valued variable has no floor for values to pile up on.",
             RuntimeWarning, stacklevel=2
         )
-        log_transform = False
+    log_transform = log_transform_resolved
+
+    finite_xbase = np.isfinite(xbase)
 
     if log_transform:
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -577,22 +855,17 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
                 RuntimeWarning, stacklevel=2
             )
 
-    # Early exit if no valid data
+    # Early exit if no valid data. out_params is None whichever branch we were on:
+    # with fit_params given there is nothing new to report, and without it no fit was
+    # possible. (This used to read `None if fit_params is None else None`.) Callers
+    # that cache the fit therefore store None for this (scale, month) — see
+    # _get_kde_fit, which tells the two cases apart.
     if not np.any(finite_x):
-        return idmesi_all, spi, np.full(4, np.nan), (
-            None if fit_params is None else None
-        )
+        return idmesi_all, spi, np.full(4, np.nan), None
 
     # --- KDE fit (baseline) ---
     if fit_params is None:
-        # Zero-inflation mixture, matching f_spi: the continuous part (KDE)
-        # is fitted on the strictly-positive baseline only — exact zeros are
-        # masked out here, not left in, since their probability mass is
-        # already accounted for separately via `qq` (kde_cdf/kde_ppf apply
-        # it on top of this fit). When log_transform is True there are no
-        # zeros to begin with (checked above), so this mask is a no-op in
-        # that case; it only matters on the log_transform=False path.
-        xb = xbase_log[finite_xbase] if log_transform else xbase[finite_xbase & (xbase != 0)]
+        xb = xb_baseline
 
         if xb.size < 10:
             warnings.warn(
@@ -644,7 +917,7 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
                 f"reference frame of the fit that was passed in.",
                 RuntimeWarning, stacklevel=2
             )
-            xb = xbase_log[finite_xbase] if log_transform else xbase[finite_xbase & (xbase != 0)]
+            xb, qq, log_transform = kde_fit_sample(xbase, log_transform)
             h = 0.9 * np.std(xb, ddof=1) * xb.size ** (-1 / 5)
         out_params = None
 
@@ -744,4 +1017,19 @@ def c2r_eval(coeff, x, calculation_method):
 f_spi.requires_positive    = True    # Gamma → (0, +∞)
 f_spei.requires_positive   = False   # Pearson III → ℝ
 f_kde.requires_positive    = False   # KDE → ℝ
+
+# ===================================================================
+#  Numeric fit-parameter width, per method
+# ===================================================================
+# How many floats each method's `params` (4th return value) carries, so that
+# core.py sizes `self.fit_params` from the method itself instead of hard-coding
+# a width per branch — the widths stopped agreeing when f_spi gained its
+# zero-inflation fraction `qq` as a fourth parameter.
+# f_kde's real calibration is a dict living in `fit_params_kde`; its slot in the
+# numeric array is never written, and the value here only keeps the array
+# allocatable.
+f_spi.n_fit_params     = 4   # (alpha, loc, beta, qq)
+f_spei.n_fit_params    = 3   # (c, loc, scale)
+f_kde.n_fit_params     = 3   # unused placeholder — see fit_params_kde
+f_zscore.n_fit_params  = 2   # (baseline_mean, baseline_std)
 f_zscore.requires_positive = False   # z-score → ℝ

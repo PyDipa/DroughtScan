@@ -225,12 +225,11 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_p
 
 
     # -------------------- parametri di default --------------------
-    if DSO.is_seasonal_sidi:
-        print(f"Note: SIDI is seasonally optimized — "
-              f"weight_index={weight_index} is ignored (all columns identical).")
-
-    if weight_index is None:
-        weight_index = 2  # log-decreasing
+    # One resolver for the whole library (BaseDroughtAnalysis._resolve_weight_index):
+    # explicit argument -> committed calibration -> construction default -> 2. This
+    # used to hardcode 2, so a plot drawn after set_optimal_SIDI(k, w) showed column 2
+    # rather than the calibrated column w.
+    weight_index = DSO._resolve_weight_index(weight_index)
 
 
     # -------------------- SIDI: ricalcolo opzionale --------------------
@@ -646,14 +645,15 @@ def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
       for Precipitation, cubic metres for Streamflow). The deficit is computed by
       `DSO.deficit_from_spi(window)`, i.e. the SPI-like anomaly at the accumulation
       scale equal to the window length, converted back to native cumulative units
-      via the `c2r_index` calibration relative to the SPI=0 reference. Bars are set
+      via the exact inverse of the fitted distribution (`spi_to_native`), relative to
+      the SPI=0 reference — not the deprecated `c2r_index` polynomial. Bars are set
       to zero wherever the SPI-like anomaly at the window scale falls within
       [-0.5, 0.5], so that a magnitude is reported only outside this near-neutral band.
 
       Args:
           DSO: DroughtScan-like object exposing the CDN series, the calendar
-              `m_cal`, the calibration coefficients `c2r_index`, and the methods
-              `find_trends(window=...)` and `deficit_from_spi(window=...)`.
+              `m_cal`, and the methods `find_trends(window=...)` and
+              `deficit_from_spi(window=...)`.
           windows (list of int): Moving-window sizes, in months, over which to
               compute and display the deficit/surplus. One subplot is drawn per
               window.

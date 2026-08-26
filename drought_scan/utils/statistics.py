@@ -20,7 +20,13 @@ from typing import Optional
 import matplotlib.pyplot as plt
 from datetime import date,datetime,timedelta
 
-from drought_scan.utils.drought_indices import kde_cdf
+from drought_scan.utils.drought_indices import (
+    gamma_cdf_zi,
+    gamma_ppf_zi,
+    kde_cdf,
+    kde_fit_sample,
+    kde_ppf,
+)
 
 
 # ===================================================================
@@ -191,12 +197,37 @@ def _mixture_cdf(x, dist, params):
         return stats.pearson3.cdf(x, params["shape"], loc=params["loc"], scale=params["scale"])
     qq = params.get("qq", 0.0)
     if dist == "gamma":
+        # Same implementation f_spi's forward transform uses, so a diagnostic
+        # Gamma fit and the operational one cannot drift apart.
         shift = 1.0 if params["shift_applied"] else 0.0
         with np.errstate(invalid="ignore"):
-            Gx = stats.gamma.cdf(x + shift, params["shape"], loc=params["loc"], scale=params["scale"])
-        return np.where(x > 0, qq + (1 - qq) * Gx, qq)
+            return gamma_cdf_zi(x, params["shape"], params["loc"], params["scale"],
+                                qq, shift=shift)
     if dist == "kde":
         return kde_cdf(x, params["xb"], params["h"], qq, params["log_transform"])
+    raise ValueError(f"Unknown distribution: '{dist}'")
+
+
+def _mixture_ppf(Hx, dist, params):
+    """
+    Inverse of `_mixture_cdf`: cumulative probability -> native value.
+    Used to draw a calibration curve (index domain -> native units) for
+    whichever family actually won a given month, e.g. in a diagnostics
+    report — NOT tied to any particular DSO's own fixed calculation_method.
+    """
+    Hx = np.asarray(Hx, dtype=float)
+    if dist == "gaussian":
+        return stats.norm.ppf(Hx, loc=params["mu"], scale=params["sigma"])
+    if dist == "pearson3":
+        return stats.pearson3.ppf(Hx, params["shape"], loc=params["loc"], scale=params["scale"])
+    qq = params.get("qq", 0.0)
+    if dist == "gamma":
+        # Shared with spi_to_native's f_spi branch — see _mixture_cdf.
+        shift = 1.0 if params["shift_applied"] else 0.0
+        return gamma_ppf_zi(Hx, params["shape"], params["loc"], params["scale"],
+                            qq, shift=shift)
+    if dist == "kde":
+        return kde_ppf(Hx, params["xb"], params["h"], qq, params["log_transform"])
     raise ValueError(f"Unknown distribution: '{dist}'")
 
 
@@ -237,13 +268,18 @@ def _mixture_pdf(x, dist, params):
             dens_fit = _kde_pdf(np.where(np.isfinite(x_fit), x_fit, 0.0), xb, h)
             jac = (1.0 / x) if log_transform else 1.0
             pdf = (1 - qq) * dens_fit * jac
-        return np.where((x > 0) & np.isfinite(pdf), pdf, 0.0)
+        # Below zero the density is 0 only when the variable is bounded there, i.e.
+        # when a point mass at zero was fitted. A real-valued KDE (qq == 0, see
+        # kde_fit_sample) has a perfectly good density at negative x, and clamping it
+        # to 0 drew the left half of every P-PET / temperature fit as a flat line.
+        in_support = (x > 0) if qq > 0 else np.isfinite(x)
+        return np.where(in_support & np.isfinite(pdf), pdf, 0.0)
     raise ValueError(f"Unknown distribution: '{dist}'")
 
 
 # helpers
 # PRIVATE CORE FITTER  (single distribution, single clean array)
-def _fit_single_dist(dataset,dist=None,shift_for_gamma = True):
+def _fit_single_dist(dataset,dist=None,shift_for_gamma = False):
     """
     Fit *one* distribution to a clean (finite, 1-D) array and return stats.
 
@@ -252,11 +288,15 @@ def _fit_single_dist(dataset,dist=None,shift_for_gamma = True):
     dataset : np.ndarray
         Finite-only values (caller must filter).
     dist : {"gaussian", "gamma", "pearson3", "kde"}
-    shift_for_gamma : bool
-        If True, apply (positive part) + 1 before Gamma fitting — kept for
-        backward compatibility, but no longer needed to dodge zeros (those
-        are masked out via `qq` before fitting, see module note above);
-        only matters for otherwise-pathological positive-only samples.
+    shift_for_gamma : bool, default False
+        If True, apply (positive part) + 1 before Gamma fitting. Defaults to
+        False because `f_spi` does not shift: it fits `gamma.fit(x[x > 0],
+        floc=0)` on the raw positive part, with the exact zeros carried by
+        `qq` instead. Leaving this True made every diagnostic here score a
+        Gamma fitted on `x + 1` — a different model from the one the library
+        would actually apply, which is precisely what these functions exist to
+        judge. Kept as an opt-in for otherwise-pathological positive-only
+        samples only.
 
     Returns
     -------
@@ -332,20 +372,19 @@ def _fit_single_dist(dataset,dist=None,shift_for_gamma = True):
 
     # ── Gaussian KDE (non-parametric) ───────────────────────────────────────
     elif dist == "kde":
-        # Same zero-inflation mixture as gamma. log_transform concerns only
-        # the shape of the continuous (strictly-positive) part, a separate
-        # concern from qq above: zeros don't disable it (they're already
-        # masked out of `positive`), only genuine negative values do — those
-        # can't be masked as a point mass and log() of them is undefined,
-        # not just inconvenient (matches drought_indices.f_kde).
-        qq = float(np.mean(dataset == 0)) if dataset.size else 0.0
+        # The fit's three ingredients come from drought_indices.kde_fit_sample — the
+        # same call f_kde makes — so this diagnostic judges exactly the sample the
+        # library would fit. It used to compute them here: `dataset[dataset > 0]`,
+        # which on a real-valued series (P-PET balance, temperature) discarded the
+        # whole negative half, while f_kde kept it. The page then reported how well a
+        # KDE described half the data.
+        xb, qq, log_transform = kde_fit_sample(dataset)
         positive = dataset[dataset > 0]
-        log_transform = bool(dataset.size) and not np.any(np.isfinite(dataset) & (dataset < 0))
-        xb = np.log(positive) if log_transform else positive
 
         if xb.size < 2:
             raise ValueError(
-                "KDE requires at least 2 strictly-positive values after masking exact zeros."
+                "KDE requires at least 2 finite values in the continuous part "
+                "(exact zeros are masked out when the variable is bounded below)."
             )
         # Same bandwidth formula as f_kde (Silverman's rule of thumb,
         # ddof=1) — NOT scipy's own bw_method="silverman" factor, whose
@@ -366,12 +405,17 @@ def _fit_single_dist(dataset,dist=None,shift_for_gamma = True):
 
         D, p_ks = stats.kstest(dataset, lambda x: _mixture_cdf(x, "kde", params))
 
-        pdf_vals = _mixture_pdf(positive, "kde", params) if positive.size else np.array([])
+        # Likelihood over the points the continuous part actually covers: the
+        # non-zero ones when there is a point mass, every finite one when there
+        # isn't (a real-valued fit — see kde_fit_sample).
+        continuous = dataset[np.isfinite(dataset) & (dataset != 0)] if qq > 0 \
+            else dataset[np.isfinite(dataset)]
+        pdf_vals = _mixture_pdf(continuous, "kde", params) if continuous.size else np.array([])
         pdf_vals = np.clip(pdf_vals, 1e-300, None)
-        n_zero = dataset.size - positive.size
+        n_zero = dataset.size - continuous.size
         ll_zero = n_zero * np.log(qq) if qq > 0 else 0.0
-        ll_pos = float(np.sum(np.log(pdf_vals))) if pdf_vals.size else 0.0
-        log_likelihood = float(ll_zero + ll_pos)
+        ll_cont = float(np.sum(np.log(pdf_vals))) if pdf_vals.size else 0.0
+        log_likelihood = float(ll_zero + ll_cont)
         k = None  # AIC undefined for KDE
 
     else:
@@ -470,7 +514,13 @@ def _bootstrap_ks_pvalue(dataset:np.ndarray,fit_result: dict,
 
         # Refit and compute D*
         try:
-            res = _fit_single_dist(sample, dist, shift_for_gamma=(dist == "gamma"))
+            # Refit under the SAME convention as the fit under test: a shifted
+            # null compared against an unshifted D_obs (or vice versa) is not the
+            # null distribution of that statistic.
+            res = _fit_single_dist(
+                sample, dist,
+                shift_for_gamma=bool(params.get("shift_applied", False)),
+            )
             D_boot[i] = res["KS_statistic"]
         except Exception:
             D_boot[i] = np.nan
@@ -479,14 +529,27 @@ def _bootstrap_ks_pvalue(dataset:np.ndarray,fit_result: dict,
     return float(np.mean(valid >= D_obs))
 
 # Fit all four families to `dataset` and return a comparison dict.
-def _analyze_all(dataset, shift_for_gamma = True,  n_bootstrap=0, seed=None):
+def _analyze_all(dataset, shift_for_gamma = False,  n_bootstrap=0, seed=None):
     """
     Fit all four families to `dataset` and return a comparison dict.
 
     Selection rule
     --------------
-    1. Best KS (all 4) → primary recommendation.
-    2. Best AIC (parametric 3 only) → secondary note.
+    1. Lowest mean point-by-point CDF deviation (all 4) → primary recommendation.
+    2. Lowest KS statistic D (all 4) → secondary note.
+    3. Lowest AIC (parametric 3 only) → secondary note.
+
+    Why the MEAN deviation and not KS: D is the single worst point of
+    disagreement. A zero-inflated fit (gamma/kde on a month with exact zeros)
+    has a genuine vertical jump of height `qq` at x=0, and D latches onto that
+    jump — it returns ~qq no matter how well the curve tracks the data
+    everywhere else. Measured on a synthetic gamma sample: at qq=0 the four
+    families score 0.165/0.047/0.043/0.029 and kde correctly wins; at qq=0.31
+    gamma, pearson3 and kde all collapse to exactly 0.315 and the Gaussian
+    "wins" with 0.221 — solely because it has no jump to be penalised for.
+    The mean deviation weights that single point in proportion to the others,
+    so it ranks the families on how well they actually fit. On samples without
+    exact zeros (e.g. Po basin-average rainfall, qq=0) the two criteria agree.
     """
     dataset = dataset[np.isfinite(dataset)]
 
@@ -507,9 +570,10 @@ def _analyze_all(dataset, shift_for_gamma = True,  n_bootstrap=0, seed=None):
             warnings.warn(f"Fitting '{d}' failed: {exc}", RuntimeWarning)
             fits[d] = None
 
-    # ── Rank by KS statistic (lower = better), None last ──────────────────
+    # ── Rank by mean point-by-point CDF deviation (lower = better) ────────
     valid_fits = {d: v for d, v in fits.items() if v is not None}
-    best_ks  = min(valid_fits, key=lambda d: valid_fits[d]["KS_statistic"])
+    best_error = min(valid_fits, key=lambda d: valid_fits[d]["error_percent"])
+    best_ks    = min(valid_fits, key=lambda d: valid_fits[d]["KS_statistic"])
 
     # ── Best parametric by AIC ─────────────────────────────────────────────
     parametric = {d: v for d, v in valid_fits.items()
@@ -520,9 +584,10 @@ def _analyze_all(dataset, shift_for_gamma = True,  n_bootstrap=0, seed=None):
         "skewness":         skewness,
         "normality_p_value": float(p_normal),
         "fits":             fits,
-        "best_by_KS":       best_ks,
-        "best_by_AIC":      best_aic,
-        "recommendation":   best_ks,       # primary
+        "best_by_mean_error": best_error,  # primary — see the selection rule above
+        "best_by_KS":       best_ks,       # secondary, kept for comparison
+        "best_by_AIC":      best_aic,      # secondary, parametric families only
+        "recommendation":   best_error,    # primary
     }
 
 
@@ -559,7 +624,7 @@ def _plot_cdf_comparison(dataset,analysis,title = ""):
     x_plot = np.linspace(dataset.min(), dataset.max(), 1000)
 
     fits = analysis["fits"]
-    best = analysis["best_by_KS"]
+    best = analysis["recommendation"]
 
     for d, res in fits.items():
         if res is None:
@@ -608,7 +673,7 @@ def _plot_cdf_comparison(dataset,analysis,title = ""):
 
 # PUBLIC API
 
-def test_standardization(data, groups=None, shift_for_gamma = True,
+def test_standardization(data, groups=None, shift_for_gamma = False,
     plot = True, n_bootstrap = 0, seed = None):
     """
     Fit all four distribution families and recommend the best one.
@@ -628,8 +693,16 @@ def test_standardization(data, groups=None, shift_for_gamma = True,
     groups : array-like or None
         Optional grouping vector (same length as `data`). Analysis is run
         independently per group.
-    shift_for_gamma : bool, default True
-        Add 1 to data before Gamma fitting to handle zeros.
+    shift_for_gamma : bool, default False
+        Add 1 to data before Gamma fitting. False by default so that the Gamma
+        judged here is the same one `f_spi` fits (raw positive part, `floc=0`,
+        exact zeros carried by the zero-inflation fraction `qq`). Only turn it
+        on to reproduce a legacy shifted fit.
+
+        Note that this function judges whatever sample it is handed: to decide
+        a `calculation_method` for a DroughtScan object, pass the BASELINE
+        slice of the series, since that is the period `f_spi`/`f_kde` calibrate
+        on (see `diagnostics.methodology`).
     plot : bool, default True
         Generate empirical vs theoretical CDF/PDF comparison figures.
     n_bootstrap : int, default 0
@@ -642,8 +715,8 @@ def test_standardization(data, groups=None, shift_for_gamma = True,
     -------
     dict
         If groups is None:
-            {skewness, normality_p_value, fits, best_by_KS, best_by_AIC,
-             recommendation}
+            {skewness, normality_p_value, fits, best_by_mean_error,
+             best_by_KS, best_by_AIC, recommendation}
         If groups is provided:
             {group_label: <same dict>}
 
@@ -680,7 +753,7 @@ def test_standardization(data, groups=None, shift_for_gamma = True,
 
 
 def fit_distribution_stats(data, dist= "gamma", groups=None,
-    shift_for_gamma= True, plot = True, n_bootstrap: int = 0,
+    shift_for_gamma= False, plot = True, n_bootstrap: int = 0,
     seed = None):
     """
     Fit a *single* specified distribution and return goodness-of-fit stats.
@@ -694,7 +767,8 @@ def fit_distribution_stats(data, dist= "gamma", groups=None,
         Input dataset. Results reflect the input time scale as-is.
     dist : {"gaussian", "gamma", "pearson3", "kde"}, default "gamma"
     groups : array-like or None
-    shift_for_gamma : bool, default True
+    shift_for_gamma : bool, default False
+        See `test_standardization` — False matches what `f_spi` actually fits.
     plot : bool, default True
         Show empirical vs theoretical CDF/PDF for the chosen distribution.
     n_bootstrap : int, default 0
@@ -1012,7 +1086,7 @@ def _plot_standardization(original,z_scores,dist_label= ""):
     plt.show()
     return fig
 
-def plot_cdf_comparison(data, dist="gamma", params=None, shift_for_gamma=True,unit=None):
+def plot_cdf_comparison(data, dist="gamma", params=None, shift_for_gamma=False,unit=None):
     """
     Plot empirical CDF vs theoretical CDF for a fitted distribution.
     Useful to inspect where the KS error is concentrated (low tail, central body, high tail).
@@ -1026,8 +1100,9 @@ def plot_cdf_comparison(data, dist="gamma", params=None, shift_for_gamma=True,un
     params : dict or None
         Dictionary of fitted parameters from fit_distribution_stats().
         If None, parameters are fitted internally.
-    shift_for_gamma : bool
-        If True and dist == "gamma", data are shifted by +1 as in fit_distribution_stats.
+    shift_for_gamma : bool, default False
+        If True and dist == "gamma", data are shifted by +1 as in
+        fit_distribution_stats. False by default, matching `f_spi`.
     unit : str or None
         Label for the data axis (x-axis of both panels). Defaults to "value".
 

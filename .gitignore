@@ -205,3 +205,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Diagnostic pipeline scaffolding: local-only for now, not to be published.
+drought_scan/diagnostics/

@@ -167,7 +167,7 @@ You can easily adjust the threshold (e.g. –1.5 for stricter detection) and tes
 - These defaults are directly used by the method:
 
 ```python
-ds.severe_events()
+ds.severe_events_old()
 ```
 and can be visualized through:
 
@@ -601,8 +601,8 @@ ds.set_optimal_SIDI(A['best_k_per_weight'], A['col_best_weight'], overwrite=True
 ```
 
 **Seasonal optimization** (`set_optimal_SIDI_seasonal`):
-each season gets its own K and weight_index. The resulting SIDI is a single
-series (tiled to 5 identical columns for backward compatibility).
+each season gets its own K, for each weighting scheme. Two products come out of
+it and both are kept — see the note below.
 
 ```python
 S = ds.analyze_correlation_seasonal(streamflow, agg='quarter')
@@ -610,9 +610,30 @@ ds.set_optimal_SIDI_seasonal(S, agg='quarter', overwrite=True)
 
 # After this call:
 #   ds.seasonal_params       → dict with per-season config
-#   ds.SIDI                  → shape (N, 5), all 5 columns identical
+#   ds.SIDI                  → shape (N, 5), one column per weighting scheme,
+#                              each at ITS OWN per-season K
+#   ds.SIDI_seasonal_best    → shape (N,), the single best-(K, weight)-per-season
+#                              series (the real-time monitoring index)
 #   ds.is_seasonal_sidi      → True
 #   ds.optimal_k             → does NOT exist (K varies by season)
+```
+
+> **Changed in 4.0.0.** `ds.SIDI` used to be the 1-D `SIDI_seasonal_best` series
+> tiled across five identical columns. `ds.SIDI` now always means the same thing —
+> `(time, 5)` with the column being the weighting scheme — and the 1-D series lives
+> alongside it in `ds.SIDI_seasonal_best`. Code that read `ds.SIDI[:, 0]` to get
+> "the" seasonal series must read `ds.SIDI_seasonal_best` instead.
+
+The five per-scheme seasonal series are what the water-balance tables are built
+from; get them for a non-committed object with:
+
+```python
+seasons = {"DJF": [12, 1, 2], "MAM": [3, 4, 5],
+           "JJA": [6, 7, 8],  "SON": [9, 10, 11]}
+
+S = ds.analyze_correlation_seasonal(streamflow, seasons=seasons, plot=False)
+all_schemes = ds.recalculate_SIDI_seasonal_all_schemes(S, seasons)   # (N, 5)
+best_only   = ds.recalculate_SIDI_seasonal(S, seasons)               # (N,)
 ```
 
 **How downstream code selects SIDI:**

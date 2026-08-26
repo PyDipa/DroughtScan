@@ -62,7 +62,7 @@ from drought_scan.utils.statistics import test_standardization
 result = test_standardization(
     data,
     groups=None,
-    shift_for_gamma=True,
+    shift_for_gamma=False,
     plot=True,
     n_bootstrap=0,
     seed=None
@@ -79,10 +79,20 @@ result = test_standardization(
   Grouping labels (e.g., months, seasons). Same length as `data`.
   If provided, the analysis is run independently per group.
 
-- `shift_for_gamma` : bool, default `True`
+- `shift_for_gamma` : bool, default `False`
   Add +1 to the strictly-positive part of the data before Gamma fitting.
-  This no longer has anything to do with zeros (see "Handling exact zeros"
-  below) — it only matters for otherwise-pathological positive-only samples.
+  **Defaults to `False` since 4.0.0**, because `f_spi` does not shift: it fits
+  `gamma.fit(x[x > 0], floc=0)` on the raw positive part, carrying the exact zeros
+  in `qq` instead. With the old default of `True`, this function scored a Gamma
+  fitted on `x + 1` — a different model from the one the library would actually
+  apply, which is precisely what it exists to judge. It has nothing to do with
+  zeros (see "Handling exact zeros" below); leave it `False` unless you are
+  reproducing a legacy shifted fit.
+
+> **Which sample to pass.** This function judges whatever you hand it. To choose a
+> `calculation_method` for a DroughtScan object, pass the **baseline** slice of the
+> series — that is the period `f_spi`/`f_kde` calibrate the fit, the zero-inflation
+> fraction and the log decision on. The diagnostics report does this for you.
 
 - `plot` : bool, default `True`
   Generate empirical vs theoretical CDF/PDF comparison figures
@@ -104,9 +114,10 @@ result = test_standardization(
   | `"skewness"`         | float  | Sample skewness                               |
   | `"normality_p_value"`| float  | p-value from D'Agostino & Pearson test        |
   | `"fits"`             | dict   | `{family: fit_dict}` for all four families    |
+  | `"best_by_mean_error"` | str  | Family with lowest mean point-by-point CDF deviation |
   | `"best_by_KS"`       | str    | Family with lowest KS statistic               |
   | `"best_by_AIC"`      | str    | Family with lowest AIC (parametric only)      |
-  | `"recommendation"`   | str    | Primary recommendation (= `best_by_KS`)      |
+  | `"recommendation"`   | str    | Primary recommendation (= `best_by_mean_error`) |
 
   Each entry in `"fits"` is a dictionary with keys:
   `distribution`, `params`, `KS_statistic`, `KS_p_value`,
@@ -120,14 +131,25 @@ result = test_standardization(
 > are anti-conservative (Lilliefors 1967). The KS statistic *D* itself remains a valid
 > distance metric. For formal inference, use `n_bootstrap ≥ 999`.
 
-> **Note on datasets with many exact ties (e.g. dry months with lots of zeros).**
-> The KS statistic *D* is structurally inflated by the fraction of tied values in
-> the sample, regardless of how well the model captures them — this is a property
-> of the Kolmogorov–Smirnov test itself, not specific to any one family here. For
-> a month where e.g. 40% of observations are exact zeros, expect *D* to sit around
-> 0.4 for every family, `best_by_KS` included. It is still a valid ranking between
-> families, just less discriminating than usual — don't read the raw magnitude of
-> *D* as "the fit is bad" in that case.
+> **Why the recommendation is not the KS winner (changed in 4.0.0).**
+> The KS statistic *D* is the single **worst** point of disagreement. A
+> zero-inflated fit (gamma/kde on a month with exact zeros) has a genuine vertical
+> jump of height `qq` at *x* = 0, and *D* latches onto that jump: it returns ≈ `qq`
+> however well the curve tracks the data everywhere else. It is therefore not just
+> "less discriminating" on such samples — it stops ranking the families at all, and
+> hands the win to whichever family has no jump to be penalised for. Measured on a
+> synthetic gamma sample:
+>
+> | zero fraction | gaussian | gamma | pearson3 | kde | winner by *D* |
+> |---|---|---|---|---|---|
+> | 0.00 | 0.165 | 0.047 | 0.043 | **0.029** | kde ✓ |
+> | 0.12 | 0.170 | 0.123 | 0.123 | 0.123 | pearson3 (tie) |
+> | 0.31 | **0.221** | 0.315 | 0.315 | 0.315 | gaussian ✗ |
+>
+> `"recommendation"` is therefore `error_percent`, the **mean** deviation over all
+> observations, where the tie at zero counts in proportion instead of dominating.
+> *D* is still reported alongside; on samples with no exact zeros the two criteria
+> agree.
 
 ---
 
@@ -199,7 +221,8 @@ print("July:",    results_by_month[7]["recommendation"])
 
 ### 1.5 Interpreting the results: KS vs AIC
 
-It is normal for `best_by_KS` and `best_by_AIC` to disagree. They measure
+It is normal for `best_by_mean_error`, `best_by_KS` and `best_by_AIC` to
+disagree. They measure
 different things:
 
 - **KS statistic *D*** measures the maximum pointwise distance between the
@@ -213,8 +236,8 @@ A practical example: if Gamma has D = 0.08 and Pearson III has D = 0.21 but
 lower AIC, it means Pearson III explains the bulk of the data marginally better
 in a likelihood sense, but has a much worse worst-case mismatch in the tails.
 
-**Rule of thumb for drought indices**: prefer the KS-based recommendation
-(`best_by_KS`). SPI/SPEI are built on the CDF transform, so the CDF shape
+**Rule of thumb for drought indices**: prefer `"recommendation"`
+(`best_by_mean_error`). SPI/SPEI are built on the CDF transform, so the CDF shape
 matters more than overall likelihood. A distribution that deviates in the
 tails will distort exactly the extreme events you are trying to detect.
 
@@ -249,7 +272,7 @@ stats = fit_distribution_stats(
     data,
     dist="gamma",
     groups=None,
-    shift_for_gamma=True,
+    shift_for_gamma=False,
     plot=True,
     n_bootstrap=0,
     seed=None
@@ -261,7 +284,7 @@ stats = fit_distribution_stats(
 - `data` : array-like — input dataset.
 - `dist` : `{"gaussian", "gamma", "pearson3", "kde"}`, default `"gamma"` — target distribution.
 - `groups` : array-like or `None` — grouping labels.
-- `shift_for_gamma` : bool, default `True` — add +1 to the strictly-positive
+- `shift_for_gamma` : bool, default `False` — add +1 to the strictly-positive
   part before Gamma fitting (zeros are handled separately, see §1.3).
 - `plot` : bool, default `True` — show empirical vs theoretical CDF/PDF for the chosen distribution.
 - `n_bootstrap` : int, default `0` — Lilliefors-corrected p-value (≥ 999 recommended).
@@ -497,7 +520,7 @@ plot_cdf_comparison(
     data,
     dist="gamma",
     params=None,
-    shift_for_gamma=True,
+    shift_for_gamma=False,
     unit=None
 )
 ```
@@ -511,7 +534,7 @@ plot_cdf_comparison(
   If `None`, parameters are fitted internally (zero-inflation-aware for
   `"gamma"`, see §1.3). If you pass `params` in yourself for `dist="gamma"`,
   include `"qq"` — a missing key defaults to `0.0` (no zero-inflation).
-- `shift_for_gamma` : bool, default `True` — consistent with `fit_distribution_stats`;
+- `shift_for_gamma` : bool, default `False` — consistent with `fit_distribution_stats`;
   only used when `params=None` (internal fitting).
 - `unit` : str or `None` — label for the x-axis (e.g., `"mm"`, `"m³/s"`).
   Defaults to `"value"`.
