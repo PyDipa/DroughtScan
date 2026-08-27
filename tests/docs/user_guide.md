@@ -566,6 +566,16 @@ seasonal_corr = ds.analyze_correlation_seasonal(streamflow, agg='custom',
 # Apply seasonal optimization
 ds.set_optimal_SIDI_seasonal(seasonal_corr, agg='quarter', overwrite=True)
 ```
+
+For the **gridded** seasonal SIDI, pass the same `seasonal_corr` (with its `agg`)
+straight to `spatial_sidi` — no need to commit it first:
+
+```python
+ds.spatial_sidi(seasonal_params=seasonal_corr, agg='quarter')
+```
+
+See the [Spatial Guide](spatial_guide.md) §2.6 for both the committed and
+non-committed routes.
 ### 9.1.2) Understanding SIDI optimization states
 
 After running `analyze_correlation` or `analyze_correlation_seasonal`, the SIDI

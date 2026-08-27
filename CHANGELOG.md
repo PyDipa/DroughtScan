@@ -22,13 +22,21 @@ here.
   chosen for a different scheme — values with no interpretation, yet
   indistinguishable from valid ones. Passing `best_k_per_weight` gives every column
   its own optimum. A scalar keeps the previous behaviour, bit-for-bit.
+- `spatial_sidi(seasonal_params=...)` now also accepts the **raw output of
+  `analyze_correlation_seasonal()`** directly, not only the `set_optimal_SIDI_seasonal`
+  wrapper (`self.seasonal_params`). Pass `agg=` (or `seasons=`) alongside it so months
+  map to seasons; it falls back to a committed `self.seasonal_params['agg']`. This
+  lets you map a seasonal calibration without committing it to `self.SIDI`. New
+  `agg` / `seasons` parameters on `spatial_sidi`.
 
 ### Changed
-- `spatial_maps` no longer computes SPI maps: it owns the SIDI grid, `spatial_spi`
+- `spatial_maps()` is renamed **`spatial_sidi()`**, so the gridded-index pair reads
+  `spatial_sidi()` (SIDI) / `spatial_spi()` (SPI). No behaviour change from the rename.
+- `spatial_sidi` no longer computes SPI maps: it owns the SIDI grid, `spatial_spi`
   owns `SPI_grid` and `reverse_SPI_grid`. Both used to write `SPI_grid` — one capped
   at K, one uncapped — so whichever ran last won and a warning told you to mind the
   order. The `month_scales` argument is gone with it.
-- `spatial_maps` with no `K` now follows whatever calibration the object carries:
+- `spatial_sidi` with no `K` now follows whatever calibration the object carries:
   `self.seasonal_params` if a seasonal SIDI was committed, else `self.optimal_k`,
   else `self.K`. It used to always fall back to `self.K` and merely warn that a
   committed `optimal_k` was being ignored, so the map silently showed a different
@@ -123,19 +131,19 @@ here.
   are geometric and are now named so (`gdw`/`giw` replace `lgdw`/`lgiw`).
 
 ### Fixed
-- `spatial_maps` passed `self.K` to the grid workers instead of the resolved `K`, so
+- `spatial_sidi` passed `self.K` to the grid workers instead of the resolved `K`, so
   an explicit `K=` (or a seasonal/committed calibration) was accepted, reported in
   `spatial_K`, and then ignored by the actual computation — every pixel was built at
   `self.K`.
 - `_process_grid_point_spi` took a `K` argument it never used.
-- `spatial_maps(seasonal_params=...)` produced the GLOBAL SIDI evaluated at a seasonal
+- `spatial_sidi(seasonal_params=...)` produced the GLOBAL SIDI evaluated at a seasonal
   K, not the seasonal SIDI: it resolved the season's K but then standardized every
   pixel against the whole baseline, while `recalculate_SIDI_seasonal` standardizes
   per season. On the Po the two differed by up to 0.16 index units (JJA); the map was
   labelled seasonal and was not. `_process_grid_point` takes a `season_months`
-  argument and `spatial_maps` forwards the season's months alongside its K. Agreement
+  argument and `spatial_sidi` forwards the season's months alongside its K. Agreement
   with the basin-level seasonal SIDI is now ~1e-15.
-- `spatial_maps` assigned `self.K = K` for the duration of the computation and
+- `spatial_sidi` assigned `self.K = K` for the duration of the computation and
   restored it at the end, so any exception in between (a failing grid point, an
   interrupt) left the object permanently carrying the spatial K — and a per-scheme
   sequence left `self.K` as a list. It no longer touches `self.K` at all.
@@ -324,22 +332,22 @@ here.
   `recommendation` is now the lowest mean CDF deviation rather than the lowest KS.
 - `ds_balance_all_schemes(streamflow, seasonal_corr, seasons)` — the last two
   arguments are now optional.
-- `spatial_maps(month_scales=...)` — the argument is gone; SPI maps come from
-  `spatial_spi()`. With no `K`, `spatial_maps` now follows the committed calibration
-  instead of `self.K`.
+- `spatial_maps()` is renamed **`spatial_sidi()`** (pairs with `spatial_spi()`).
+  Its `month_scales` argument is gone; SPI maps come from `spatial_spi()`. With no
+  `K`, `spatial_sidi` now follows the committed calibration instead of `self.K`.
 - `spatial_maps_old`, `_process_grid_point_trends_old`, `spatial_trends()` and the
   `trend_grid` property are removed.
 
 ## [3.6.2] - Unreleased
 
 ### Added
-- `spatial_maps`: new `seasonal_params` argument. When passed the output of
+- `spatial_sidi`: new `seasonal_params` argument. When passed the output of
   `set_optimal_SIDI_seasonal`'s `self.seasonal_params`, `K` is automatically
   resolved to the season-specific `best_k` matching the requested `timestamp`,
   and a warning reports the corresponding `weight_index` to use for consistent
   plotting. This allows the spatial SIDI grid to reflect a seasonal optimization
   that a single global `K` cannot represent.
-- `spatial_maps`: emits a warning when `K` is left unspecified and `self.optimal_k`
+- `spatial_sidi`: emits a warning when `K` is left unspecified and `self.optimal_k`
   is present on the instance (i.e. `set_optimal_SIDI` was called), signalling that
   the spatial grid is being computed with `self.K` rather than the optimized value,
   and pointing to `K=self.optimal_k` as the fix.
@@ -373,15 +381,17 @@ here.
 - `plot_spatial(var='SIDI', ...)`: title now shows the temporal scale (`K=...`)
   and the weighting scheme spelled out (e.g. "logarithmically decreasing")
   instead of the bare `weight_index` int, matching the naming used in
-  `user_guide.md`. `spatial_maps` now stores the `K` it actually ran with in
+  `user_guide.md`. `spatial_sidi` now stores the `K` it actually ran with in
   `self.spatial_K`, since it resets `self.K` to its pre-call value on exit —
   reading `self.K` alone at plot time could report a stale/wrong scale.
 
 ### Documentation
-- `spatial_guide.md` §2.6 (new): "Using an optimized SIDI" — documents the three
-  supported workflows for aligning `spatial_maps` with a point-scale SIDI
-  optimization: explicit manual `K`, `set_optimal_SIDI` (with the new warning),
-  and `set_optimal_SIDI_seasonal` (via `seasonal_params`).
+- `spatial_guide.md` §2.6 (new): "Using an optimized SIDI" — documents the
+  supported workflows for aligning `spatial_sidi` with a point-scale SIDI
+  optimization: explicit manual `K`; `set_optimal_SIDI` (picked up automatically);
+  and seasonal, either by passing the raw `analyze_correlation_seasonal` output
+  (with `agg=`) to score it without committing, or by `set_optimal_SIDI_seasonal
+  (overwrite=True)` then a bare `spatial_sidi()`.
 - `spatial_guide.md` §3.1: updated to describe `spatial_trends`'s deficit/surplus
   computation via the reverse-gamma transform (`deficit_from_spi`-consistent),
   replacing the previous description based on the linear `std_to_mm`

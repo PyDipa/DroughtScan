@@ -379,6 +379,6 @@ For spatially distributed maps of SPI, SIDI, and CDN trends at every grid point
 within the basin, see the [Spatial Guide](spatial_guide.md).
 
 Key methods:
-- `ds.spatial_maps()` — compute gridded SPI and SIDI at a target timestamp.
+- `ds.spatial_sidi()` — compute the gridded SIDI at a target timestamp.
 - `ds.spatial_spi()` — compute pixel-wise SPI maps and their millimetre-equivalent reverse.
 - `ds.plot_spatial()` — visualize the output maps.

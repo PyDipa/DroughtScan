@@ -149,7 +149,7 @@ All classes share the same base (`BaseDroughtAnalysis`) and produce the same cor
 - **`spi_sqi_corr(streamflow)`**: month-wise SPIₖ–SQI₁ correlation heatmap (R² matrix).
 
 ### Precipitation only
-- **`spatial_maps()`**: compute gridded SPI and SIDI at a target timestamp.
+- **`spatial_sidi()`**: compute the gridded SIDI at a target timestamp (SPI grid: `spatial_spi()`).
 - **`spatial_trends()`**: compute pixel-wise CDN trend maps.
 - **`plot_spatial()`**: visualize spatial maps of SIDI, SPI, or CDN trends.
 

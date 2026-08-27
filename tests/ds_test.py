@@ -458,7 +458,7 @@ def test_grid_point_sidi_matches_the_basin_sidi():
 
 def test_grid_point_sidi_matches_the_seasonal_sidi():
     """With season_months given, the pixel SIDI must equal the seasonal SIDI at that
-    timestamp. Without it, spatial_maps(seasonal_params=...) applied the season's K
+    timestamp. Without it, spatial_sidi(seasonal_params=...) applied the season's K
     but standardized against the whole baseline — the global SIDI at a seasonal K,
     not the seasonal SIDI."""
     from drought_scan.core import BaseDroughtAnalysis
@@ -722,8 +722,8 @@ def test_degenerate_grid_point_reports_error_not_short_tuple():
     assert sidi_vals is None and err is not None
 
 
-def test_spatial_maps_and_spatial_spi_own_separate_products():
-    """spatial_maps owns the SIDI, spatial_spi owns the SPI and its millimetre
+def test_spatial_sidi_and_spatial_spi_own_separate_products():
+    """spatial_sidi owns the SIDI, spatial_spi owns the SPI and its millimetre
     reverse. They used to both write SPI_grid, so whichever ran last won."""
     from drought_scan.core import Precipitation
     from drought_scan.utils.drought_indices import f_kde
@@ -742,19 +742,19 @@ def test_spatial_maps_and_spatial_spi_own_separate_products():
     obj.spi_like_set, obj.c2r_index = obj._calculate_spi_like_set()
     obj.SIDI = obj._calculate_SIDI()
 
-    obj.spatial_maps()
+    obj.spatial_sidi()
     assert obj.SIDI_grid.shape == (3, 4, 5)
-    assert not hasattr(obj, 'SPI_grid'), "spatial_maps must not write SPI_grid"
+    assert not hasattr(obj, 'SPI_grid'), "spatial_sidi must not write SPI_grid"
 
     obj.spatial_spi(windows=[3, 6])
     assert sorted(obj.SPI_grid) == [3, 6]
 
-    obj.spatial_maps()                          # order no longer matters
+    obj.spatial_sidi()                          # order no longer matters
     assert sorted(obj.SPI_grid) == [3, 6]
 
 
-def test_spatial_maps_follows_the_committed_calibration():
-    """With no K given, spatial_maps uses whatever calibration the object carries,
+def test_spatial_sidi_follows_the_committed_calibration():
+    """With no K given, spatial_sidi uses whatever calibration the object carries,
     so the grid matches self.SIDI instead of silently falling back to self.K."""
     from drought_scan.core import Precipitation
     from drought_scan.utils.drought_indices import f_kde
@@ -774,11 +774,11 @@ def test_spatial_maps_follows_the_committed_calibration():
     obj.spi_like_set, obj.c2r_index = obj._calculate_spi_like_set()
     obj.SIDI = obj._calculate_SIDI()
 
-    obj.spatial_maps()
+    obj.spatial_sidi()
     assert obj.spatial_K == 8                   # nothing committed yet
 
     obj.set_optimal_SIDI([2, 3, 4, 5, 6], 2, overwrite=True)
-    obj.spatial_maps()
+    obj.spatial_sidi()
     assert list(np.ravel(obj.spatial_K)) == [2, 3, 4, 5, 6]
 
 

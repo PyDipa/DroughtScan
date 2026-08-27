@@ -1170,7 +1170,7 @@ class BaseDroughtAnalysis:
                 ``analyze_correlation_seasonal`` now does), it is preserved in
                 ``self.seasonal_params['config']`` too — SIDI itself here still
                 collapses to the single best (K, weight) per season, but
-                ``spatial_maps(seasonal_params=self.seasonal_params)`` can then use
+                ``spatial_sidi(seasonal_params=self.seasonal_params)`` can then use
                 the per-scheme K list instead of just the scalar ``best_k``.
 
         Returns:
@@ -1220,7 +1220,7 @@ class BaseDroughtAnalysis:
                     name: {'best_k': v['best_k'],
                            'col_best_weight': v['col_best_weight'],
                            # Carried through when analyze_correlation_seasonal computed
-                           # it, so spatial_maps(seasonal_params=...) can pass a K per
+                           # it, so spatial_sidi(seasonal_params=...) can pass a K per
                            # weighting scheme instead of a single scalar for this season.
                            **({'best_k_per_weight': v['best_k_per_weight']}
                               if 'best_k_per_weight' in v else {})}
@@ -1514,7 +1514,7 @@ class BaseDroughtAnalysis:
             ``R2_matrix``, ``sample number``. ``best_k_per_weight`` (ndarray, shape (5,))
             is the optimal K of *each* weighting scheme for that season — the seasonal
             analogue of ``analyze_correlation``'s ``best_k_per_weight`` — for use with
-            ``spatial_maps(K=..., seasonal_params=...)`` when a single scale per season
+            ``spatial_sidi(K=..., seasonal_params=...)`` when a single scale per season
             would waste 4 of the 5 weighting schemes.
         """
         self._check_correlation_eligible()
@@ -3775,7 +3775,7 @@ class BaseDroughtAnalysis:
         when given (a list of 1-indexed calendar months), the z-score references only
         the baseline months belonging to that season, exactly as the seasonal SIDI
         does. Left None, the reference is the whole baseline — the non-seasonal case.
-        Without it, spatial_maps(seasonal_params=...) picked the season's K but then
+        Without it, spatial_sidi(seasonal_params=...) picked the season's K but then
         standardized against the whole year, so the map was the GLOBAL SIDI evaluated
         at a seasonal K, not the seasonal SIDI (on the Po, up to 0.16 index units
         apart in JJA).
@@ -3832,7 +3832,7 @@ class BaseDroughtAnalysis:
         except Exception as e:
             return None, str(e)
 
-    def spatial_maps(self, timestamp=None, K=None, seasonal_params=None):
+    def spatial_sidi(self, timestamp=None, K=None, seasonal_params=None, agg=None, seasons=None):
         """
         Gridded SIDI for each point in Pgrid, at one timestamp.
 
@@ -3860,12 +3860,24 @@ class BaseDroughtAnalysis:
                 if a seasonal SIDI was committed, else `self.optimal_k` if a global one
                 was, else `self.K`. It used to always fall back to `self.K` and merely
                 warn that a committed `optimal_k` was being ignored.
-            seasonal_params (dict, optional): a `set_optimal_SIDI_seasonal`-style
-                `self.seasonal_params`. K is resolved to the per-scheme optima of the
-                season containing `timestamp`, and each pixel is standardized on that
-                season's baseline months — the same per-season reference
-                `recalculate_SIDI_seasonal` uses. Overrides `K` if both are given.
-                Pass it explicitly to score a calibration the object has not committed.
+            seasonal_params (dict, optional): a seasonal calibration to score without
+                committing it to the object. Two shapes are accepted:
+                  * the `set_optimal_SIDI_seasonal` wrapper (i.e. `self.seasonal_params`),
+                    with `'seasons'` and `'config'` keys — the month->season mapping
+                    travels inside it; or
+                  * the raw output of `analyze_correlation_seasonal()` (keys are season
+                    names, values carry `best_k`/`col_best_weight`/`best_k_per_weight`).
+                    Then also pass `agg=` (or `seasons=`) so months can be mapped to
+                    seasons; it falls back to a committed `self.seasonal_params['agg']`.
+                K is resolved to the per-scheme optima of the season containing
+                `timestamp`, and each pixel is standardized on that season's baseline
+                months — the same per-season reference `recalculate_SIDI_seasonal` uses.
+                Overrides `K` if both are given.
+            agg (str, optional): aggregation scheme ('quarter', 'semiannual', ...) — used
+                only when `seasonal_params` is the raw `analyze_correlation_seasonal`
+                output. Must match the `agg` that output was computed with.
+            seasons (dict, optional): `{season_name: [month_ints]}` for `agg='custom'`,
+                same role as `agg`.
 
         Stores in self:
             SIDI_grid        : ndarray (n_rows, n_cols, n_weights) — all weighting schemes.
@@ -3892,12 +3904,33 @@ class BaseDroughtAnalysis:
         # --- resolve K from seasonal_params, if given ---
         season_months = None
         if seasonal_params is not None:
+            # Accept either the set_optimal_SIDI_seasonal wrapper ({'seasons', 'config',
+            # 'agg'} — i.e. self.seasonal_params) or the raw analyze_correlation_seasonal
+            # output ({season_name: {'best_k', 'col_best_weight', ...}}). The raw form
+            # does not carry the month->season mapping, so it needs agg=/seasons=
+            # (falling back to a committed self.seasonal_params['agg']).
+            if 'seasons' in seasonal_params and 'config' in seasonal_params:
+                seasons_dict = seasonal_params['seasons']
+                config = seasonal_params['config']
+            else:
+                _agg, _seasons = agg, seasons
+                if _agg is None and _seasons is None:
+                    committed = getattr(self, 'seasonal_params', None)
+                    _agg = committed.get('agg') if isinstance(committed, dict) else None
+                    if _agg is None:
+                        raise ValueError(
+                            "spatial_sidi: seasonal_params looks like the raw "
+                            "analyze_correlation_seasonal output; also pass agg=... "
+                            "(or seasons=...) so months can be mapped to seasons."
+                        )
+                seasons_dict = self._build_seasons_dict(_agg, _seasons)
+                config = seasonal_params
+
             target_month = int(self.m_cal[t_idx, 0])
-            seasons_dict = seasonal_params['seasons']
             season_name = next((s for s, months in seasons_dict.items() if target_month in months), None)
             if season_name is None:
-                raise ValueError(f"Month {target_month} not covered by seasonal_params['seasons'].")
-            cfg = seasonal_params['config'][season_name]
+                raise ValueError(f"Month {target_month} not covered by the seasonal months.")
+            cfg = config[season_name]
             # Prefer the per-scheme K list when available (analyze_correlation_seasonal
             # now reports it) — one optimal K per weighting scheme, like the non-seasonal
             # K=best_k_per_weight case, instead of forcing every scheme to the single K
@@ -3918,7 +3951,7 @@ class BaseDroughtAnalysis:
         if seasonal_params is None and K is None and self.is_seasonal_sidi:
             # A committed seasonal SIDI is a seasonal_params in all but name; re-enter
             # the branch above with it rather than silently mapping a global index.
-            return self.spatial_maps(timestamp=timestamp,
+            return self.spatial_sidi(timestamp=timestamp,
                                      seasonal_params=self.seasonal_params)
 
         if K is None:
@@ -3928,7 +3961,7 @@ class BaseDroughtAnalysis:
             else:
                 import warnings
                 warnings.warn(
-                    f"spatial_maps: using the committed optimal_k={K}, so the grid "
+                    f"spatial_sidi: using the committed optimal_k={K}, so the grid "
                     f"matches self.SIDI. Pass K=self.K explicitly for the "
                     f"un-calibrated index."
                 )
@@ -4026,7 +4059,7 @@ class BaseDroughtAnalysis:
                              copy), not a hole punched in the data.
             spi_at_tidx    : dict {window: float} — standardized SPI value at t_idx for that
                              window, independent of any K/SIDI ensemble (this is the same
-                             the only place SPI maps come from — spatial_maps computes
+                             the only place SPI maps come from — spatial_sidi computes
                              the SIDI only).
             error          : str or None
         """
@@ -4096,7 +4129,7 @@ class BaseDroughtAnalysis:
 
         For each valid grid point and each requested window (accumulation scale), returns
         the standardized SPI and its native-unit reverse transform (deficit/surplus).
-        Unlike spatial_maps(), these SPI windows are NOT capped by K: K only governs the
+        Unlike spatial_sidi(), these SPI windows are NOT capped by K: K only governs the
         SIDI ensemble computed separately, while SPI at any accumulation scale is defined
         on its own and computed here without limit.
 
@@ -4128,7 +4161,7 @@ class BaseDroughtAnalysis:
 
         Notes:
             If spatial_timestamp already exists and differs from the requested timestamp,
-            SIDI_grid is invalidated — rerun spatial_maps() for consistency.
+            SIDI_grid is invalidated — rerun spatial_sidi() for consistency.
         """
         from joblib import Parallel, delayed, cpu_count
 
@@ -4157,7 +4190,7 @@ class BaseDroughtAnalysis:
             import warnings
             warnings.warn(
                 f"timestamp changed from {self.spatial_timestamp} to {new_ts}. "
-                f"SIDI_grid has been invalidated — rerun spatial_maps() for consistency."
+                f"SIDI_grid has been invalidated — rerun spatial_sidi() for consistency."
             )
             if hasattr(self, 'SIDI_grid'):
                 del self.SIDI_grid
@@ -4171,7 +4204,7 @@ class BaseDroughtAnalysis:
         n_valid = len(valid_ij)
 
         n_cores = cpu_count()
-        t_per_point = 1.5  # per-window SPI only, lighter than full spatial_maps
+        t_per_point = 1.5  # per-window SPI only, lighter than full spatial_sidi
         estimated_min = (n_valid * t_per_point / n_cores) / 60
         print(f"spatial_spi: {n_valid}/{n_rows * n_cols} valid grid points.")
         print(f"Running on {n_cores} cores — may take up to {estimated_min:.0f} min.")
@@ -4423,7 +4456,7 @@ class BaseDroughtAnalysis:
         b_norm = BoundaryNorm(bounds, cmap.N)
 
         if var =='SIDI' and not hasattr(self, 'SIDI_grid'):
-            raise ValueError("No spatial data found. Run compute_spatial_maps() first.")
+            raise ValueError("No spatial data found. Run spatial_sidi() first.")
         if var == 'CDN':
             raise ValueError(
                 "var='CDN' is no longer supported: it was an alias for 'reverse_spi', "
