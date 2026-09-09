@@ -1278,3 +1278,291 @@ def _rolling_phase_test(DSO, window=60, alpha=0.05, min_valid=None):
     return {'phase': phase, 'mean': mean_w, 'p_value': pval}
 
 
+
+# =====================================================================
+# Generic year-aligned block-bootstrap primitives
+# ---------------------------------------------------------------------
+# Paired moving-block resampling of a raw monthly (P, Q) overlap: whole
+# years are drawn in contiguous blocks and laid end-to-end under a fresh
+# January-anchored synthetic calendar, so f_spi/f_kde still see a gap-free
+# monotonic m_cal. The k-month accumulation is meaningless for the first
+# (k-1) months after every block join, so those cells are NaN-masked per
+# scale; the fraction lost grows with k and is reported by
+# _print_contamination_table. Ported from Drought-Scan.
+# =====================================================================
+
+_BOOT_BASE_YEAR = 2000   # arbitrary anchor for the synthetic calendar
+
+
+def _round_to_year(L):
+    """Nearest whole number of years, at least 2 (24 months)."""
+    return 12 * max(2, int(round(L / 12)))
+
+
+def _year_block_index(n_years, block_years, rng, circular):
+    """Row indices (into a year-major layout) for a bootstrap replica:
+    ceil(n_years / block_years) contiguous runs of whole years."""
+    n_draw = int(np.ceil(n_years / block_years))
+    if circular:
+        starts = rng.integers(0, n_years, size=n_draw)
+        yr = np.concatenate([(np.arange(s, s + block_years) % n_years) for s in starts])
+    else:
+        hi = max(1, n_years - block_years + 1)
+        starts = rng.integers(0, hi, size=n_draw)
+        yr = np.concatenate([np.arange(s, s + block_years) for s in starts])
+    return yr[:n_years]
+
+
+def _junction_distance(T, L):
+    """Months since the last block start (blocks tile [0, T) at 0, L, 2L, ...)."""
+    pos = np.arange(T)
+    return pos - (pos // L) * L
+
+
+def _contamination_fraction(T, L, K):
+    """Fraction of timesteps whose scale-k rolling accumulation crosses a
+    block join (hence NaN-masked), for k = 1..K. Independent of the draw."""
+    dist = _junction_distance(T, L)
+    return np.array([float(np.mean(dist < (k - 1))) for k in range(1, K + 1)])
+
+
+def _spi_set_from_series(ts, m_cal, calc_method, tb1, tb2, K):
+    """spi_like_set (K, T) for an arbitrary (ts, m_cal), mirroring
+    BaseDroughtAnalysis._compute_spi's inner loop with no side effects on
+    any instance. Used only by the bootstrap workers."""
+    T = len(ts)
+    sset = np.full((K, T), np.nan, dtype=float)
+    for k in range(1, K + 1):
+        for ref_month in range(1, 13):
+            out = calc_method(ts, k, ref_month, m_cal, tb1, tb2)
+            indices, spi_values = out[0], out[1]
+            if indices is None or spi_values is None:
+                continue
+            sset[k - 1, indices] = spi_values
+    return sset
+
+
+def _print_contamination_table(meta, K_range):
+    """The 'dati persi' table: per scale, the share of timesteps whose rolling
+    accumulation crosses a block join and the effective N that survives."""
+    cf = meta["contaminated_fraction"]
+    en = meta["eff_n_per_scale"]
+    print(f"  junction contamination (L={meta['block_length']} months / "
+          f"{meta['block_years']}y, {meta['n_blocks']} blocks over "
+          f"T={meta['overlap_length']} months):")
+    print("    K    masked%   eff_N")
+    for k, c, n in zip(K_range, cf, en):
+        mark = "  <-- >50%" if c > 0.5 else ""
+        print(f"   {int(k):3d}   {c * 100:5.1f}    {int(n):5d}{mark}")
+
+
+# =====================================================================
+# Block-bootstrap CI for the parametric rainfall-runoff benchmarks
+# ---------------------------------------------------------------------
+# Same paired year-aligned moving-block resampling of the raw (P, Q)
+# overlap as the primitives above (fresh synthetic calendar, per-scale
+# junction masking), but each replica re-runs ONE benchmark's own fit on
+# the synthetic series and returns a flat dict of scalar estimates (fitted
+# parameters + skill). Percentiles of those give the CI. Kernel ordinates
+# h(j) and the OLS rescaling coefficients are deliberately NOT bootstrapped.
+# =====================================================================
+
+
+class _BenchmarkReplica:
+    """The synthetic contiguous series for one resample, handed to the
+    per-benchmark fit dispatch. Junction-aware: ``spi_P`` is already
+    NaN-masked at every block join per scale; ``junction_dist`` lets the
+    lag-convolution benchmarks mask their own windows."""
+    __slots__ = ("P", "Q", "spi_P", "sqi1", "months", "junction_dist", "K")
+
+    def __init__(self, P, Q, spi_P, sqi1, months, junction_dist, K):
+        self.P, self.Q = P, Q
+        self.spi_P, self.sqi1 = spi_P, sqi1
+        self.months = months
+        self.junction_dist = junction_dist
+        self.K = K
+
+
+def _benchmark_fit(kind, rep, season_mask, bench_K, l_step):
+    """Re-run one benchmark's fit on a bootstrap replica; return only scalars.
+
+    kind : 'conv_P' | 'conv_SPI' | 'dspi_free' | 'nash' | 'ihacres'
+    """
+    from drought_scan.core import BaseDroughtAnalysis as _B
+
+    jd = rep.junction_dist
+    K_range = np.arange(1, bench_K + 1)
+
+    def _num(v):
+        return np.nan if v is None else float(v)
+
+    if kind == "nash":
+        r = _B._nash_fit(rep.P, rep.sqi1, bench_K, season_mask=season_mask,
+                         junction_dist=jd, l_step=l_step, verbose=False)
+        return {"optimal_n": _num(r["optimal_n"]), "optimal_k": _num(r["optimal_k"]),
+                "optimal_K": _num(r["optimal_K"]), "R2": _num(r["R2"]),
+                "RMSE": _num(r["metrics"]["RMSE"]), "KGE": _num(r["metrics"]["KGE"])}
+
+    if kind == "ihacres":
+        r = _B._ihacres_fit(rep.P, rep.sqi1, bench_K, season_mask=season_mask,
+                            junction_dist=jd, l_step=l_step, verbose=False)
+        return {"optimal_tau_f": _num(r["optimal_tau_f"]),
+                "optimal_tau_s": _num(r["optimal_tau_s"]),
+                "optimal_alpha": _num(r["optimal_alpha"]),
+                "optimal_K": _num(r["optimal_K"]), "R2": _num(r["R2"]),
+                "RMSE": _num(r["metrics"]["RMSE"]), "KGE": _num(r["metrics"]["KGE"])}
+
+    if kind == "dspi_free":
+        r = _B._dspi_free_fit(rep.spi_P, rep.sqi1, K_range,
+                              season_mask=season_mask, verbose=False)
+    elif kind == "conv_P":
+        r = _B._ols_convolution_fit(rep.P, rep.Q, K_range, season_mask=season_mask,
+                                    junction_dist=jd, verbose=False)
+    elif kind == "conv_SPI":
+        r = _B._ols_convolution_fit(rep.spi_P[0], rep.sqi1, K_range,
+                                    season_mask=season_mask, junction_dist=jd,
+                                    verbose=False)
+    else:
+        raise ValueError(f"unknown benchmark kind {kind!r}")
+
+    if r is None:
+        return {"optimal_K": np.nan, "R2_adj_opt": np.nan, "R2": np.nan,
+                "RMSE": np.nan, "KGE": np.nan}
+    ok = int(r["optimal_K"])
+    return {"optimal_K": float(ok),
+            "R2_adj_opt": float(r["R2_adj"][ok - 1]),
+            "R2": _num(r["metrics"]["R2"]), "RMSE": _num(r["metrics"]["RMSE"]),
+            "KGE": _num(r["metrics"]["KGE"])}
+
+
+def _one_benchmark_replica(P_yr, Q_yr, calcP, n_base_years, calcQ, n_base_years_Q,
+                           spi_K, block_years, circular, seed, kind, bench_K, l_step,
+                           season_months=None):
+    """One paired year-aligned block-bootstrap replica for a benchmark: build
+    the synthetic (P, Q) series + its junction-masked SPI/SQI set, then call
+    ``_benchmark_fit``. Returns its scalar dict (non-seasonal) or
+    ``{season: scalar dict}`` (seasonal)."""
+    rng = np.random.default_rng(seed)
+    n_years = P_yr.shape[0]
+    rows = _year_block_index(n_years, block_years, rng, circular)
+
+    P_b = P_yr[rows].reshape(-1).astype(float)
+    Q_b = Q_yr[rows].reshape(-1).astype(float)
+    T = P_b.size
+    months = (np.arange(T) % 12) + 1
+    years = _BOOT_BASE_YEAR + np.arange(T) // 12
+    m_cal_b = np.column_stack([months, years])
+
+    L = block_years * 12
+    dist = _junction_distance(T, L)
+
+    # The full K-scale SPI set of the synthetic P (spi_K per-calendar-month fits,
+    # the dominant cost of a replica) is only needed by the two SPI-driven
+    # benchmarks. 'conv_P' / 'nash' / 'ihacres' drive on raw P, so skip it there
+    # entirely - this is what takes benchmark_nash's bootstrap from hours to
+    # minutes.
+    need_spi = kind in ("conv_SPI", "dspi_free")
+    tb2P = _BOOT_BASE_YEAR + min(n_base_years, n_years) - 1
+    tb2Q = _BOOT_BASE_YEAR + min(n_base_years_Q, n_years) - 1
+    if need_spi:
+        spi_P = _spi_set_from_series(P_b, m_cal_b, calcP, _BOOT_BASE_YEAR, tb2P, spi_K)
+        for k in range(2, spi_K + 1):
+            spi_P[k - 1, dist < (k - 1)] = np.nan
+    else:
+        spi_P = None
+    sqi1 = _spi_set_from_series(Q_b, m_cal_b, calcQ, _BOOT_BASE_YEAR, tb2Q, 1)[0]
+
+    rep = _BenchmarkReplica(P_b, Q_b, spi_P, sqi1, months, dist, spi_K)
+    if season_months is None:
+        return _benchmark_fit(kind, rep, None, bench_K, l_step)
+    return {name: _benchmark_fit(kind, rep, np.isin(months, mlist), bench_K, l_step)
+            for name, mlist in season_months.items()}
+
+
+def _bootstrap_benchmark(self_obj, streamflow, self_indices, streamflow_indices,
+                         kind, bench_K, n_boot, block_length, ci, circular,
+                         random_state, seasons=None, l_step=1):
+    """Paired year-aligned block-bootstrap CI for one parametric benchmark.
+
+    Returns
+    -------
+    non-seasonal : (boot {param: (B,)}, ci {param: (lo, hi)}, meta)
+    seasons given : ({season: boot}, {season: ci}, meta)
+    """
+    from joblib import Parallel, delayed, cpu_count
+
+    m_cal_ov = self_obj.m_cal[self_indices]
+    P_ov = np.asarray(self_obj.ts, float)[self_indices]
+    Q_ov = np.asarray(streamflow.ts, float)[streamflow_indices]
+
+    jan = np.where(m_cal_ov[:, 0].astype(int) == 1)[0]
+    if jan.size == 0:
+        raise ValueError("block bootstrap needs at least one January in the overlap.")
+    j0 = int(jan[0])
+    n_years = (len(P_ov) - j0) // 12
+    if n_years < 4:
+        raise ValueError(f"block bootstrap needs >= 4 whole overlap years, got {n_years}.")
+    end = j0 + 12 * n_years
+    P_yr = P_ov[j0:end].reshape(n_years, 12)
+    Q_yr = Q_ov[j0:end].reshape(n_years, 12)
+    T = n_years * 12
+
+    L = int(block_length) if block_length else max(24, 2 * self_obj.K)
+    L = min(_round_to_year(L), 12 * n_years)
+    block_years = L // 12
+
+    n_base_years = self_obj.end_baseline_year - self_obj.start_baseline_year + 1
+    n_base_years_Q = streamflow.end_baseline_year - streamflow.start_baseline_year + 1
+
+    rng = np.random.default_rng(random_state)
+    seeds = rng.integers(0, 2 ** 32 - 1, size=int(n_boot))
+    season_months = dict(seasons) if seasons is not None else None
+
+    n_jobs = max(1, min(4, cpu_count() // 2))
+    step_note = f", L-search stride {l_step}" if l_step > 1 and kind in ("nash", "ihacres") else ""
+    spi_note = ("rebuilds the full SPI set" if kind in ("conv_SPI", "dspi_free")
+                else "SQI1 only, raw-P driven")
+    print(f"  benchmark block bootstrap [{kind}]: B={n_boot}, L={L} months "
+          f"({block_years}y) {'circular' if circular else 'moving'} blocks over "
+          f"{n_years} overlap years{step_note} ({spi_note}; refits {n_boot}x on "
+          f"{n_jobs} workers)...")
+
+    import matplotlib.pyplot as plt
+    plt.close("all")
+
+    with Parallel(n_jobs=n_jobs) as parallel:
+        reps = parallel(
+            delayed(_one_benchmark_replica)(
+                P_yr, Q_yr, self_obj.calculation_method, n_base_years,
+                streamflow.calculation_method, n_base_years_Q,
+                self_obj.K, block_years, circular, int(s), kind, bench_K, l_step,
+                season_months)
+            for s in seeds
+        )
+
+    contam = _contamination_fraction(T, L, self_obj.K)
+    meta = {
+        "n_boot": int(n_boot), "block_length": int(L), "block_years": int(block_years),
+        "circular": bool(circular), "ci": tuple(ci),
+        "n_blocks": int(np.ceil(n_years / block_years)),
+        "overlap_years": int(n_years), "overlap_length": int(T),
+        "l_step": int(l_step),
+        "contaminated_fraction": contam,
+        "eff_n_per_scale": np.rint(T * (1.0 - contam)).astype(int),
+    }
+
+    def _reduce(dicts):
+        keys = list(dicts[0])
+        boot = {k: np.array([d[k] for d in dicts], float) for k in keys}
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")          # all-NaN param -> NaN CI
+            cis = {k: tuple(np.nanpercentile(v, list(ci))) for k, v in boot.items()}
+        return boot, cis
+
+    if season_months is None:
+        boot, cis = _reduce(reps)
+        return boot, cis, meta
+    boot_by_season, ci_by_season = {}, {}
+    for name in season_months:
+        boot_by_season[name], ci_by_season[name] = _reduce([r[name] for r in reps])
+    return boot_by_season, ci_by_season, meta

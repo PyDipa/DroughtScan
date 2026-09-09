@@ -81,6 +81,32 @@ from drought_scan.utils.statistics import (
 )
 
 
+def _plot_benchmark_ci_box(ax, ci, k_hat, r2_hat, color="#c1121f"):
+    """Overlay the block-bootstrap CI of ``(optimal_K, R²)`` on a benchmark's
+    R²_adj(K) panel: a translucent rectangle spanning the K-CI on x (lag months)
+    and the R²-CI on y, plus an errorbar cross at the point estimate. ``ci`` is
+    a benchmark result's ``'ci'`` dict; a no-op when it lacks finite
+    ``optimal_K`` / ``R2_adj_opt`` intervals."""
+    from matplotlib.patches import Rectangle
+    from matplotlib.colors import to_rgba
+
+    klo, khi = ci.get("optimal_K", (np.nan, np.nan))
+    rlo, rhi = ci.get("R2_adj_opt", (np.nan, np.nan))
+    if np.all(np.isfinite([klo, khi, rlo, rhi])):
+        ax.add_patch(Rectangle(
+            (klo, rlo), max(khi - klo, 0.4), max(rhi - rlo, 1e-3),
+            facecolor=to_rgba(color, 0.12), edgecolor=to_rgba(color, 0.55),
+            linewidth=0.8, zorder=0, label="bootstrap 95% CI"))
+        for xv in (klo, khi):
+            ax.plot([xv, xv], [0, rhi], color="0.8", ls=":", lw=0.8, zorder=0.5)
+    xerr = ([[max(0.0, k_hat - klo)], [max(0.0, khi - k_hat)]]
+            if np.all(np.isfinite([klo, khi])) else None)
+    yerr = ([[max(0.0, r2_hat - rlo)], [max(0.0, rhi - r2_hat)]]
+            if np.all(np.isfinite([rlo, rhi])) else None)
+    ax.errorbar(k_hat, r2_hat, xerr=xerr, yerr=yerr, fmt='o', ms=5, color=color,
+                ecolor=color, elinewidth=1.1, capsize=3, zorder=5)
+
+
 class BaseDroughtAnalysis:
     def __init__(self, ts, m_cal, K, start_baseline_year, end_baseline_year,basin_name,
                  calculation_method,threshold,index_name='SPI',day=None):
@@ -2017,7 +2043,8 @@ class BaseDroughtAnalysis:
     # =====================================================================
     # BENCHMARKING D(SPI) | SIDI
     def benchmark_convolution(self, streamflow, var=None, Kmax=None, plot=True,
-                              agg=None, seasons=None):
+                              agg=None, seasons=None, n_boot=0, block_length=None,
+                              ci=(2.5, 97.5), circular=True, random_state=None):
         """
         Unified linear convolution benchmark via OLS (Benchmark A and B).
 
@@ -2066,6 +2093,22 @@ class BaseDroughtAnalysis:
             Custom month mapping when ``agg='custom'`` or when passing a dict
             directly (sets agg='custom' automatically). If None and agg is None,
             no seasonal split is performed.
+        n_boot : int, default 0
+            If > 0, attach a block-bootstrap confidence interval to the point
+            estimate, using the SAME paired year-aligned moving-block resampling
+            of the raw (P, Q) overlap as ``analyze_correlation``'s bootstrap
+            (``utils.statistics._bootstrap_r2``): ``n_boot`` synthetic records
+            are drawn in whole-year blocks, the whole benchmark is re-fitted on
+            each, and percentiles are taken. CI is reported for the SCALARS only
+            — ``optimal_K``, ``R2_adj`` at that K, and R²/RMSE/KGE — never for the
+            kernel ordinates h(j) or the OLS rescaling coefficients.
+        block_length : int, optional
+            Block length in months. Default ``max(24, 2 * self.K)`` (rounded to a
+            whole number of years, min 2). Pass e.g. 72 for 6-year blocks.
+        ci : tuple, default (2.5, 97.5)
+            Percentile pair for the interval.
+        circular, random_state
+            As in ``analyze_correlation``.
 
         Returns
         -------
@@ -2077,9 +2120,13 @@ class BaseDroughtAnalysis:
                 'beta'            : np.ndarray, shape (optimal_K + 1,)
                 'condition_number': float
                 'metrics'         : dict
+                'ci'      : dict {name: (lo, hi)}   (only if n_boot > 0)
+                'boot'    : dict {name: ndarray (n_boot,)}   (only if n_boot > 0)
+                'boot_meta' : dict (block length, contamination table)  (n_boot > 0)
         Else:
             dict keyed by season name, each value being the same dict as above,
-            with an additional key 'sample_number'.
+            with an additional key 'sample_number' (and per-season 'ci'/'boot'/
+            'boot_meta' when n_boot > 0).
 
         Notes
         -----
@@ -2148,97 +2195,12 @@ class BaseDroughtAnalysis:
         K_range = np.arange(1, Kmax + 1)
         n = len(driver)
 
-        def _monotonic_plateau(x):
-            """
-            Returns the index of the last element in the initial monotonic
-            increasing sequence of x. Used to identify the plateau of R²_adj
-            vs K, stopping before overfitting or numerical noise takes over.
-            """
-            last = 0
-            for i in range(1, len(x)):
-                if np.isfinite(x[i]) and x[i] >= x[i - 1]:
-                    last = i
-                else:
-                    break
-            return last
-
         def _run_benchmark(driver_sub, target_sub, season_mask=None):
-            """OLS convolution for a given data subset. Returns the full result dict."""
-            MatCorr = []
-            for K in K_range:
-                rows, y_rows = [], []
-                for t in range(K - 1, len(driver_sub)):
-                    if season_mask is not None and not season_mask[t]:
-                        continue
-                    if np.isnan(target_sub[t]):
-                        continue
-                    lag_vec = driver_sub[t - K + 1:t + 1][::-1]
-                    if np.any(np.isnan(lag_vec)):
-                        continue
-                    rows.append(lag_vec)
-                    y_rows.append(target_sub[t])
-
-                if len(rows) < K + 2:
-                    MatCorr.append(np.nan)
-                    continue
-
-                X = np.column_stack([np.array(rows), np.ones(len(rows))])
-                y_v = np.array(y_rows)
-                beta, _, _, _ = np.linalg.lstsq(X, y_v, rcond=None)
-                y_hat = X @ beta
-                ss_res = np.sum((y_v - y_hat) ** 2)
-                ss_tot = np.sum((y_v - y_v.mean()) ** 2)
-                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-                n_v, p = len(y_v), K
-                MatCorr.append(1 - (1 - r2) * (n_v - 1) / (n_v - p - 1))
-
-            MatCorr = np.array(MatCorr)
-
-            # === FIX: plateau-based selection instead of global argmax ===
-            # Aligns `result['optimal_K']` with the K shown by the plot,
-            # and stabilises beta against multicollinearity at large K.
-            plateau_idx = _monotonic_plateau(MatCorr)
-            best_K = int(K_range[plateau_idx])
-            # =============================================================
-
-            rows, y_rows, t_idx = [], [], []
-            for t in range(best_K - 1, len(driver_sub)):
-                if season_mask is not None and not season_mask[t]:
-                    continue
-                if np.isnan(target_sub[t]):
-                    continue
-                lag_vec = driver_sub[t - best_K + 1:t + 1][::-1]
-                if np.any(np.isnan(lag_vec)):
-                    continue
-                rows.append(lag_vec)
-                y_rows.append(target_sub[t])
-                t_idx.append(t)
-
-            X_opt = np.column_stack([np.array(rows), np.ones(len(rows))])
-            y_opt = np.array(y_rows)
-            beta_opt, _, _, sv = np.linalg.lstsq(X_opt, y_opt, rcond=None)
-            cond_num = float(np.max(sv) / np.min(sv[sv > 0])) if len(sv) > 0 else np.nan
-
-            if cond_num > 30:
-                import warnings
-                warnings.warn(
-                    f"benchmark_convolution (var='{var}'): condition number = {cond_num:.1f} > 30. "
-                    f"Multicollinearity at K={best_K} — beta coefficients may be unstable.",
-                    UserWarning
-                )
-
-            # Compute complementary skill metrics at optimal K
-            y_pred_opt = X_opt @ beta_opt
-            metrics = self._eval_metrics(y_opt, y_pred_opt)
-
-            return {
-                'R2_adj': MatCorr,
-                'optimal_K': best_K,
-                'K_range': K_range,
-                'beta': beta_opt,
-                'condition_number': cond_num,
-                'metrics': metrics,
-            }
+            """OLS convolution for a given data subset (thin wrapper over the
+            lifted static core, kept for readability of the two call sites below)."""
+            return self._ols_convolution_fit(
+                driver_sub, target_sub, K_range, season_mask=season_mask,
+                label=f"benchmark_convolution (var='{var}')")
 
         # ---------------------------------------------------------------
         # CASE 1: no seasonal split — original behaviour
@@ -2246,6 +2208,13 @@ class BaseDroughtAnalysis:
         if agg is None:
             print("Starting correlation analysis...")
             result = _run_benchmark(driver, target)
+
+            if n_boot > 0:
+                self._attach_benchmark_ci(
+                    'conv_P' if var == 'P' else 'conv_SPI', streamflow,
+                    self_indices, streamflow_indices, Kmax, result, None, None,
+                    n_boot=n_boot, block_length=block_length, ci=ci,
+                    circular=circular, random_state=random_state)
 
             if plot:
                 best_K = result['optimal_K']
@@ -2255,6 +2224,9 @@ class BaseDroughtAnalysis:
                 fig, axes = plt.subplots(1, 2, figsize=(10, 3))
                 axes[0].plot(K_range, MatCorr, 'k-o', lw=2)
                 axes[0].axvline(best_K, color='r', ls='--', label=f'optimal K={best_K}')
+                if result.get('ci'):
+                    _plot_benchmark_ci_box(axes[0], result['ci'], best_K,
+                                           MatCorr[best_K - 1])
                 axes[0].set_xlabel('K (lag months)')
                 axes[0].set_ylabel('R²_adj')
                 axes[0].set_title(title_A)
@@ -2301,6 +2273,13 @@ class BaseDroughtAnalysis:
                   f"(K={res['optimal_K']})")
             results[name] = res
 
+        if n_boot > 0 and results:
+            self._attach_benchmark_ci(
+                'conv_P' if var == 'P' else 'conv_SPI', streamflow,
+                self_indices, streamflow_indices, Kmax, results, agg, seasons_dict,
+                n_boot=n_boot, block_length=block_length, ci=ci,
+                circular=circular, random_state=random_state)
+
         if plot:
             n_seasons = len(results)
             if n_seasons == 0:
@@ -2318,6 +2297,9 @@ class BaseDroughtAnalysis:
 
                 axes[i, 0].plot(K_range, MatCorr, 'k-o', lw=2)
                 axes[i, 0].axvline(best_K, color='r', ls='--', label=f'optimal K={best_K}')
+                if res.get('ci'):
+                    _plot_benchmark_ci_box(axes[i, 0], res['ci'], best_K,
+                                           MatCorr[best_K - 1])
                 axes[i, 0].set_xlabel('K (lag months)')
                 axes[i, 0].set_ylabel('R²_adj')
                 axes[i, 0].set_title(f'{title_A} — {season}')
@@ -2338,7 +2320,8 @@ class BaseDroughtAnalysis:
         return results
 
     def Dspi_free(self, streamflow, Kmax=None, plot=True,
-                  agg=None, seasons=None):
+                  agg=None, seasons=None, n_boot=0, block_length=None,
+                  ci=(2.5, 97.5), circular=True, random_state=None):
         """
         Benchmark B-multi: Linear convolution of standardized anomalies via OLS.
 
@@ -2384,6 +2367,10 @@ class BaseDroughtAnalysis:
             Custom month mapping when ``agg='custom'`` or when passing a dict
             directly (sets agg='custom' automatically). If None and agg is None,
             no seasonal split is performed.
+        n_boot, block_length, ci, circular, random_state
+            Block-bootstrap CI, same procedure and semantics as in
+            ``benchmark_convolution`` (scalars only: ``optimal_K``, ``R2_adj``
+            at that K, R²/RMSE/KGE — not the OLS weights h(k)).
 
         Returns
         -------
@@ -2395,9 +2382,11 @@ class BaseDroughtAnalysis:
                 'beta'            : np.ndarray, shape (optimal_K + 1,)
                 'condition_number': float
                 'metrics'         : dict
+                'ci' / 'boot' / 'boot_meta' : only if n_boot > 0
         Else:
             dict keyed by season name, each value being the same dict as above,
-            with an additional key 'sample_number'.
+            with an additional key 'sample_number' (and per-season 'ci'/'boot'/
+            'boot_meta' when n_boot > 0).
 
         Notes
         -----
@@ -2436,97 +2425,11 @@ class BaseDroughtAnalysis:
 
         K_range = np.arange(1, Kmax + 1)
 
-        def _monotonic_plateau(x):
-            """
-            Returns the index of the last element in the initial monotonic
-            increasing sequence of x. Used to identify the plateau of R²_adj
-            vs K, stopping before overfitting or numerical noise takes over.
-            """
-            last = 0
-            for i in range(1, len(x)):
-                if np.isfinite(x[i]) and x[i] >= x[i - 1]:
-                    last = i
-                else:
-                    break
-            return last
-
         def _run_dspi_free(SPIset_sub, SQI1_sub, season_mask=None):
-            """OLS multi-scale regression for a given data subset.
-            Returns the full result dict. Same logic as the all-data case;
-            `season_mask` restricts the rows entering the OLS fit."""
-            MatCorr = []
-
-            for K in K_range:
-                # predictors: [SPI_1(t), SPI_2(t), ..., SPI_K(t)]
-                X_block = SPIset_sub[0:K, :].T  # shape (n, K)
-
-                valid = ~np.isnan(SQI1_sub)
-                for k in range(K):
-                    valid &= ~np.isnan(SPIset_sub[k, :])
-                if season_mask is not None:
-                    valid &= season_mask
-
-                if valid.sum() < K + 2:
-                    MatCorr.append(np.nan)
-                    continue
-
-                X = np.column_stack([X_block[valid], np.ones(valid.sum())])
-                y = SQI1_sub[valid]
-
-                beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-                y_hat = X @ beta
-                ss_res = np.sum((y - y_hat) ** 2)
-                ss_tot = np.sum((y - y.mean()) ** 2)
-                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-                n_v, p = valid.sum(), K
-                MatCorr.append(1 - (1 - r2) * (n_v - 1) / (n_v - p - 1))
-
-            MatCorr = np.array(MatCorr)
-            if np.all(np.isnan(MatCorr)):
-                return None
-
-            # === FIX: plateau-based selection instead of global argmax ===
-            # Take the end of the initial monotonic-increasing run as optimal K.
-            # This avoids distant peaks driven by overfitting/numerical noise
-            # at large K, where condition_number explodes and beta becomes
-            # unstable but R²_adj may still spuriously creep up.
-            plateau_idx = _monotonic_plateau(MatCorr)
-            best_K = int(K_range[plateau_idx])
-            # =============================================================
-
-            # Recompute at optimal K
-            X_block_opt = SPIset_sub[0:best_K, :].T
-            valid_opt = ~np.isnan(SQI1_sub)
-            for k in range(best_K):
-                valid_opt &= ~np.isnan(SPIset_sub[k, :])
-            if season_mask is not None:
-                valid_opt &= season_mask
-
-            X_opt = np.column_stack([X_block_opt[valid_opt], np.ones(valid_opt.sum())])
-            y_opt = SQI1_sub[valid_opt]
-            beta_opt, _, _, sv = np.linalg.lstsq(X_opt, y_opt, rcond=None)
-            cond_num = float(np.max(sv) / np.min(sv[sv > 0])) if len(sv) > 0 else np.nan
-
-            if cond_num > 30:
-                import warnings
-                warnings.warn(
-                    f"Dspi_free: condition number = {cond_num:.1f} > 30. "
-                    f"SPI scales are structurally correlated — "
-                    f"beta coefficients unstable at K={best_K}.",
-                    UserWarning
-                )
-
-            y_pred_opt = X_opt @ beta_opt
-            metrics = self._eval_metrics(y_opt, y_pred_opt)
-
-            return {
-                'R2_adj': MatCorr,
-                'optimal_K': best_K,
-                'K_range': K_range,
-                'beta': beta_opt,
-                'condition_number': cond_num,
-                'metrics': metrics,
-            }
+            """OLS multi-scale regression for a given data subset (thin wrapper
+            over the lifted static core)."""
+            return self._dspi_free_fit(SPIset_sub, SQI1_sub, K_range,
+                                       season_mask=season_mask)
 
         # ---------------------------------------------------------------
         # CASE 1: no seasonal split
@@ -2534,6 +2437,13 @@ class BaseDroughtAnalysis:
         if agg is None:
             print("Starting correlation analysis...")
             result = _run_dspi_free(SPIset, SQI1)
+
+            if n_boot > 0 and result is not None:
+                self._attach_benchmark_ci(
+                    'dspi_free', streamflow, self_indices, streamflow_indices,
+                    Kmax, result, None, None,
+                    n_boot=n_boot, block_length=block_length, ci=ci,
+                    circular=circular, random_state=random_state)
 
             if plot and result is not None:
                 MatCorr = result['R2_adj']
@@ -2543,6 +2453,9 @@ class BaseDroughtAnalysis:
                 fig, axes = plt.subplots(1, 2, figsize=(10, 3))
                 axes[0].plot(K_range, MatCorr, 'k-o', lw=2)
                 axes[0].axvline(best_K, color='r', ls='--', label=f'optimal K={best_K}')
+                if result.get('ci'):
+                    _plot_benchmark_ci_box(axes[0], result['ci'], best_K,
+                                           MatCorr[best_K - 1])
                 axes[0].set_xlabel('K (number of SPI scales)')
                 axes[0].set_ylabel('R²_adj')
                 axes[0].set_title('Dspi_free — SPI multi-scale OLS')
@@ -2593,6 +2506,13 @@ class BaseDroughtAnalysis:
                   f"(K={res['optimal_K']})")
             results[name] = res
 
+        if n_boot > 0 and results:
+            self._attach_benchmark_ci(
+                'dspi_free', streamflow, self_indices, streamflow_indices,
+                Kmax, results, agg, seasons_dict,
+                n_boot=n_boot, block_length=block_length, ci=ci,
+                circular=circular, random_state=random_state)
+
         if plot:
             n_seasons = len(results)
             if n_seasons == 0:
@@ -2610,6 +2530,9 @@ class BaseDroughtAnalysis:
 
                 axes[i, 0].plot(K_range, MatCorr, 'k-o', lw=2)
                 axes[i, 0].axvline(best_K, color='r', ls='--', label=f'optimal K={best_K}')
+                if res.get('ci'):
+                    _plot_benchmark_ci_box(axes[i, 0], res['ci'], best_K,
+                                           MatCorr[best_K - 1])
                 axes[i, 0].set_xlabel('K (number of SPI scales)')
                 axes[i, 0].set_ylabel('R²_adj')
                 axes[i, 0].set_title(f'Dspi_free — SPI multi-scale OLS — {season}')
@@ -2714,18 +2637,29 @@ class BaseDroughtAnalysis:
 
     @staticmethod
     def _convolve_r2(driver: np.ndarray, target: np.ndarray,
-                     kernel: np.ndarray, season_mask: np.ndarray = None) -> float:
+                     kernel: np.ndarray, season_mask: np.ndarray = None,
+                     junction_dist: np.ndarray = None) -> float:
         """
         Convolve driver with kernel, fit intercept via OLS, return R².
         NaN rows are excluded.
+
+        junction_dist : ndarray, optional
+            Months since the last block start, one per timestep (see the block
+            bootstrap in utils.statistics). When given, a timestep whose K-month
+            convolution window straddles a block join (``junction_dist < K - 1``)
+            is left NaN, so it drops out of the fit. None in normal (non-boot) use.
         """
         n = len(driver)
         K = len(kernel)
-        y_hat = np.full(n, np.nan)
-        for t in range(K - 1, n):
-            # the weighted sum of past rainfall:
-            # sum ( kernel x last K monhts of precipitation) == scalar product with np.dot
-            y_hat[t] = np.dot(kernel, driver[t - K + 1: t + 1][::-1])
+        # y_hat[t] = Σ_{j=0..K-1} kernel[j]·driver[t-j] — vectorised via np.convolve,
+        # bit-for-bit the old per-t np.dot loop but ~50-100× faster (this is the
+        # hot path of benchmark_nash's Nelder-Mead, called thousands of times per
+        # fit). NaNs in `driver` still propagate to every window containing them,
+        # since every Gamma-kernel weight is > 0, so the drop-out set is identical.
+        y_hat = np.convolve(np.asarray(driver, float), kernel, mode='full')[:n]
+        y_hat[:K - 1] = np.nan                      # windows before the first full lag
+        if junction_dist is not None:
+            y_hat[np.asarray(junction_dist)[:n] < K - 1] = np.nan
 
         # apply seasonal mask AFTER convolution on full series
         if season_mask is not None:
@@ -2770,10 +2704,398 @@ class BaseDroughtAnalysis:
         # /s serves to nornalize thw weights!
         return h / s if s > 0 else np.ones(K) / K
 
+    # =====================================================================
+    # ▸ Benchmark numeric cores (lifted out of the public methods)
+    # ---------------------------------------------------------------------
+    # Each public benchmark (benchmark_convolution, Dspi_free, benchmark_nash,
+    # benchmark_ihacres) used to carry its fit as a nested closure over `self`.
+    # They are static now so the block-bootstrap workers in
+    # utils.statistics._bootstrap_benchmark can call them on a synthetic
+    # (P, Q) replica without pickling the whole DroughtScan object. The public
+    # methods call these for the point estimate too — same code, one copy.
+    # =====================================================================
+    @staticmethod
+    def _monotonic_plateau(x):
+        """Index of the last element of the initial monotonic-increasing run
+        of x — the end of the R²_adj(K) plateau, before overfitting/numerical
+        noise takes over at large K."""
+        last = 0
+        for i in range(1, len(x)):
+            if np.isfinite(x[i]) and x[i] >= x[i - 1]:
+                last = i
+            else:
+                break
+        return last
+
+    @staticmethod
+    def _ols_convolution_fit(driver, target, K_range, season_mask=None,
+                             junction_dist=None, verbose=True,
+                             label="benchmark_convolution"):
+        """OLS lag-convolution benchmark (A: raw P, or B: SPI1) for one data
+        subset. Returns the result dict (R2_adj curve, plateau optimal_K, beta,
+        condition_number, metrics), or None if every K is unscorable.
+
+        `junction_dist` (block-bootstrap only): drop timesteps whose K-month lag
+        window crosses a block join."""
+        MatCorr = []
+        for K in K_range:
+            rows, y_rows = [], []
+            for t in range(K - 1, len(driver)):
+                if season_mask is not None and not season_mask[t]:
+                    continue
+                if junction_dist is not None and junction_dist[t] < K - 1:
+                    continue
+                if np.isnan(target[t]):
+                    continue
+                lag_vec = driver[t - K + 1:t + 1][::-1]
+                if np.any(np.isnan(lag_vec)):
+                    continue
+                rows.append(lag_vec)
+                y_rows.append(target[t])
+
+            if len(rows) < K + 2:
+                MatCorr.append(np.nan)
+                continue
+
+            X = np.column_stack([np.array(rows), np.ones(len(rows))])
+            y_v = np.array(y_rows)
+            beta, _, _, _ = np.linalg.lstsq(X, y_v, rcond=None)
+            y_hat = X @ beta
+            ss_res = np.sum((y_v - y_hat) ** 2)
+            ss_tot = np.sum((y_v - y_v.mean()) ** 2)
+            r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+            n_v, p = len(y_v), K
+            MatCorr.append(1 - (1 - r2) * (n_v - 1) / (n_v - p - 1))
+
+        MatCorr = np.array(MatCorr)
+        if np.all(np.isnan(MatCorr)):
+            return None
+
+        plateau_idx = BaseDroughtAnalysis._monotonic_plateau(MatCorr)
+        best_K = int(K_range[plateau_idx])
+
+        rows, y_rows = [], []
+        for t in range(best_K - 1, len(driver)):
+            if season_mask is not None and not season_mask[t]:
+                continue
+            if junction_dist is not None and junction_dist[t] < best_K - 1:
+                continue
+            if np.isnan(target[t]):
+                continue
+            lag_vec = driver[t - best_K + 1:t + 1][::-1]
+            if np.any(np.isnan(lag_vec)):
+                continue
+            rows.append(lag_vec)
+            y_rows.append(target[t])
+
+        X_opt = np.column_stack([np.array(rows), np.ones(len(rows))])
+        y_opt = np.array(y_rows)
+        beta_opt, _, _, sv = np.linalg.lstsq(X_opt, y_opt, rcond=None)
+        cond_num = float(np.max(sv) / np.min(sv[sv > 0])) if len(sv) > 0 else np.nan
+
+        if cond_num > 30 and verbose:
+            import warnings
+            warnings.warn(
+                f"{label}: condition number = {cond_num:.1f} > 30. "
+                f"Multicollinearity at K={best_K} — beta coefficients may be unstable.",
+                UserWarning
+            )
+
+        metrics = BaseDroughtAnalysis._eval_metrics(y_opt, X_opt @ beta_opt)
+        return {
+            'R2_adj': MatCorr,
+            'optimal_K': best_K,
+            'K_range': K_range,
+            'beta': beta_opt,
+            'condition_number': cond_num,
+            'metrics': metrics,
+        }
+
+    @staticmethod
+    def _dspi_free_fit(spi_set, sqi1, K_range, season_mask=None, verbose=True):
+        """Multi-scale (no-lag) OLS: SQI1(t) ~ Σ h(k)·SPI_k(t). One data subset.
+        Returns the result dict or None if every K is unscorable. `spi_set` is
+        (>=max(K_range), T); in the bootstrap it is already junction-masked."""
+        MatCorr = []
+        for K in K_range:
+            X_block = spi_set[0:K, :].T
+            valid = ~np.isnan(sqi1)
+            for k in range(K):
+                valid &= ~np.isnan(spi_set[k, :])
+            if season_mask is not None:
+                valid &= season_mask
+            if valid.sum() < K + 2:
+                MatCorr.append(np.nan)
+                continue
+            X = np.column_stack([X_block[valid], np.ones(valid.sum())])
+            y = sqi1[valid]
+            beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+            y_hat = X @ beta
+            ss_res = np.sum((y - y_hat) ** 2)
+            ss_tot = np.sum((y - y.mean()) ** 2)
+            r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+            n_v, p = valid.sum(), K
+            MatCorr.append(1 - (1 - r2) * (n_v - 1) / (n_v - p - 1))
+
+        MatCorr = np.array(MatCorr)
+        if np.all(np.isnan(MatCorr)):
+            return None
+
+        best_K = int(K_range[BaseDroughtAnalysis._monotonic_plateau(MatCorr)])
+        X_block_opt = spi_set[0:best_K, :].T
+        valid_opt = ~np.isnan(sqi1)
+        for k in range(best_K):
+            valid_opt &= ~np.isnan(spi_set[k, :])
+        if season_mask is not None:
+            valid_opt &= season_mask
+        X_opt = np.column_stack([X_block_opt[valid_opt], np.ones(valid_opt.sum())])
+        y_opt = sqi1[valid_opt]
+        beta_opt, _, _, sv = np.linalg.lstsq(X_opt, y_opt, rcond=None)
+        cond_num = float(np.max(sv) / np.min(sv[sv > 0])) if len(sv) > 0 else np.nan
+        if cond_num > 30 and verbose:
+            import warnings
+            warnings.warn(
+                f"Dspi_free: condition number = {cond_num:.1f} > 30. "
+                f"SPI scales are structurally correlated — beta unstable at K={best_K}.",
+                UserWarning
+            )
+        metrics = BaseDroughtAnalysis._eval_metrics(y_opt, X_opt @ beta_opt)
+        return {
+            'R2_adj': MatCorr,
+            'optimal_K': best_K,
+            'K_range': K_range,
+            'beta': beta_opt,
+            'condition_number': cond_num,
+            'metrics': metrics,
+        }
+
+    @staticmethod
+    def _nash_fit(driver, target, K, season_mask=None, junction_dist=None,
+                  l_step=1, verbose=True):
+        """Nash IUH: jointly optimise (n, τ) by Nelder-Mead from a coarse grid,
+        for every kernel length L in ``range(2, K + 1, l_step)``; keep the best
+        (L, n, τ). Returns the result dict; all-NaN params if nothing was
+        feasible. `l_step > 1` thins the L search (block-bootstrap speed-up)."""
+        from scipy.optimize import minimize
+
+        best = {'R2': -np.inf, 'L': None, 'n': None, 'k': None}
+        for L in range(2, K + 1, l_step):
+            def neg_r2(params, _L=L):
+                n_, k_ = params
+                if n_ <= 0 or k_ <= 0 or n_ > 20 or k_ > K:
+                    return 1.0
+                h = BaseDroughtAnalysis._nash_kernel(n_, k_, _L)
+                r2 = BaseDroughtAnalysis._convolve_r2(
+                    driver, target, h, season_mask=season_mask,
+                    junction_dist=junction_dist)
+                return -r2 if np.isfinite(r2) else 1.0
+
+            for n0 in [1.0, 2.0, 4.0]:
+                for k0 in [1.0, 2.0, 4.0]:
+                    res = minimize(neg_r2, x0=[n0, k0], method='Nelder-Mead',
+                                   options={'xatol': 1e-4, 'fatol': 1e-4,
+                                            'maxiter': 2000})
+                    r2 = -res.fun
+                    if r2 > best['R2']:
+                        best.update({'R2': r2, 'L': L,
+                                     'n': res.x[0], 'k': res.x[1]})
+
+        if best['L'] is None:
+            return {'optimal_K': None, 'optimal_n': np.nan, 'optimal_k': np.nan,
+                    'R2': np.nan, 'kernel': np.array([]),
+                    'metrics': BaseDroughtAnalysis._eval_metrics(
+                        np.array([np.nan]), np.array([np.nan]))}
+
+        kernel = BaseDroughtAnalysis._nash_kernel(best['n'], best['k'], best['L'])
+        if verbose:
+            print(f"  Nash IUH: R²={best['R2']:.3f}  L={best['L']}  "
+                  f"n={best['n']:.2f}   τ={best['k']:.2f}")
+
+        Lb = best['L']
+        y_hat = np.convolve(np.asarray(driver, float), kernel, mode='full')[:len(driver)]
+        y_hat[:Lb - 1] = np.nan
+        if junction_dist is not None:
+            y_hat[np.asarray(junction_dist)[:len(driver)] < Lb - 1] = np.nan
+
+        if season_mask is not None:
+            y_hat_eval, target_eval = y_hat[season_mask], target[season_mask]
+        else:
+            y_hat_eval, target_eval = y_hat, target
+
+        mask_v = np.isfinite(y_hat_eval) & np.isfinite(target_eval)
+        X = np.column_stack([y_hat_eval[mask_v], np.ones(mask_v.sum())])
+        b, _, _, _ = np.linalg.lstsq(X, target_eval[mask_v], rcond=None)
+        sim_rescaled = np.full_like(y_hat_eval, np.nan, dtype=float)
+        sim_rescaled[mask_v] = X @ b
+        metrics = BaseDroughtAnalysis._eval_metrics(target_eval, sim_rescaled)
+
+        return {
+            'optimal_K': best['L'],
+            'optimal_n': best['n'],
+            'optimal_k': best['k'],
+            'R2': best['R2'],
+            'kernel': kernel,
+            'metrics': metrics,
+        }
+
+    @staticmethod
+    def _ihacres_fit(driver, target, K, season_mask=None, junction_dist=None,
+                     l_step=1, verbose=True):
+        """IHACRES two-reservoir routing: optimise (τ_fast, τ_slow, α) by
+        L-BFGS-B under physical bounds, for every L in ``range(2, K + 1, l_step)``;
+        keep the best (L, τ_fast, τ_slow, α). Returns the result dict; all-NaN
+        params if nothing was feasible."""
+        from scipy.optimize import minimize
+
+        def _exp_kernel(tau, L):
+            j = np.arange(L, dtype=float)
+            h = np.exp(-j / tau)
+            return h / h.sum()
+
+        best = {'R2': -np.inf, 'K': None,
+                'tau_f': None, 'tau_s': None, 'alpha': None}
+        TAU_F_MIN, TAU_F_MAX = 0.5, 6.0
+        TAU_S_MIN = 2.0
+        ALPHA_MIN, ALPHA_MAX = 0.05, 0.95
+        DELTA_MIN = 1.0
+
+        for L_ in range(2, K + 1, l_step):
+            def neg_r2(params, _L=L_):
+                tau_f, tau_s, alpha = params
+                if tau_s - tau_f < DELTA_MIN:
+                    return 1.0 + (DELTA_MIN - (tau_s - tau_f))
+                h_f = _exp_kernel(tau_f, _L)
+                h_s = _exp_kernel(tau_s, _L)
+                n = len(driver)
+                Q_fast = np.convolve(driver, h_f[::-1], mode='full')[:n]
+                Q_slow = np.convolve(driver, h_s[::-1], mode='full')[:n]
+                Q_fast[:_L - 1] = np.nan
+                Q_slow[:_L - 1] = np.nan
+                if junction_dist is not None:
+                    bad = junction_dist < (_L - 1)
+                    Q_fast[bad] = np.nan
+                    Q_slow[bad] = np.nan
+                Q_sim = alpha * Q_fast + (1 - alpha) * Q_slow
+                if season_mask is not None:
+                    Q_sim, tgt_loc = Q_sim[season_mask], target[season_mask]
+                else:
+                    tgt_loc = target
+                mask = np.isfinite(tgt_loc) & np.isfinite(Q_sim)
+                if mask.sum() < 5:
+                    return 1.0
+                X = np.column_stack([Q_sim[mask], np.ones(mask.sum())])
+                y = tgt_loc[mask]
+                beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+                ss_res = np.sum((y - X @ beta) ** 2)
+                ss_tot = np.sum((y - y.mean()) ** 2)
+                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else -1.0
+                return -r2 if np.isfinite(r2) else 1.0
+
+            bounds = [(TAU_F_MIN, TAU_F_MAX), (TAU_S_MIN, 2.0 * K),
+                      (ALPHA_MIN, ALPHA_MAX)]
+            for tf0, ts0, a0 in [(1.0, 4.0, 0.7), (2.0, 8.0, 0.5), (2.0, 12.0, 0.3)]:
+                tf0_c = np.clip(tf0, TAU_F_MIN, TAU_F_MAX)
+                ts0_c = np.clip(ts0, max(TAU_S_MIN, tf0_c + DELTA_MIN), 2.0 * K)
+                a0_c = np.clip(a0, ALPHA_MIN, ALPHA_MAX)
+                res = minimize(neg_r2, x0=[tf0_c, ts0_c, a0_c], method='L-BFGS-B',
+                               bounds=bounds, options={'ftol': 1e-6, 'maxiter': 300})
+                r2 = -res.fun
+                if r2 > best['R2']:
+                    best.update({'R2': r2, 'K': L_, 'tau_f': res.x[0],
+                                 'tau_s': res.x[1], 'alpha': res.x[2]})
+
+        if best['K'] is None:
+            return {'optimal_K': None, 'optimal_tau_f': np.nan,
+                    'optimal_tau_s': np.nan, 'optimal_alpha': np.nan,
+                    'R2': np.nan, 'kernel_fast': np.array([]),
+                    'kernel_slow': np.array([]),
+                    'metrics': BaseDroughtAnalysis._eval_metrics(
+                        np.array([np.nan]), np.array([np.nan]))}
+
+        h_f = _exp_kernel(best['tau_f'], best['K'])
+        h_s = _exp_kernel(best['tau_s'], best['K'])
+        if verbose:
+            print(f"  IHACRES: R²={best['R2']:.3f}  K={best['K']}  "
+                  f"τ_fast={best['tau_f']:.2f}  τ_slow={best['tau_s']:.2f}  "
+                  f"α={best['alpha']:.2f}")
+
+        # skill metrics at the optimum (OLS-rescaled two-reservoir sim vs target)
+        L_ = best['K']
+        n = len(driver)
+        Q_fast = np.convolve(driver, h_f[::-1], mode='full')[:n]
+        Q_slow = np.convolve(driver, h_s[::-1], mode='full')[:n]
+        Q_fast[:L_ - 1] = np.nan
+        Q_slow[:L_ - 1] = np.nan
+        if junction_dist is not None:
+            bad = junction_dist < (L_ - 1)
+            Q_fast[bad] = np.nan
+            Q_slow[bad] = np.nan
+        Q_sim = best['alpha'] * Q_fast + (1 - best['alpha']) * Q_slow
+        if season_mask is not None:
+            Q_sim, tgt_eval = Q_sim[season_mask], target[season_mask]
+        else:
+            tgt_eval = target
+        mv = np.isfinite(Q_sim) & np.isfinite(tgt_eval)
+        X = np.column_stack([Q_sim[mv], np.ones(mv.sum())])
+        bb, _, _, _ = np.linalg.lstsq(X, tgt_eval[mv], rcond=None)
+        sim_rescaled = np.full_like(Q_sim, np.nan, dtype=float)
+        sim_rescaled[mv] = X @ bb
+        metrics = BaseDroughtAnalysis._eval_metrics(tgt_eval, sim_rescaled)
+
+        return {
+            'optimal_K': best['K'],
+            'optimal_tau_f': best['tau_f'],
+            'optimal_tau_s': best['tau_s'],
+            'optimal_alpha': best['alpha'],
+            'R2': best['R2'],
+            'kernel_fast': h_f,
+            'kernel_slow': h_s,
+            'metrics': metrics,
+        }
+
+    def _attach_benchmark_ci(self, kind, streamflow, self_indices, streamflow_indices,
+                             bench_K, result, agg, seasons_dict, *, n_boot,
+                             block_length, ci, circular, random_state, l_step=1):
+        """Run the paired year-aligned block-bootstrap for one benchmark and
+        attach ``'ci'`` / ``'boot'`` / ``'boot_meta'`` in place.
+
+        ``kind`` selects which fit the workers re-run per replica: 'conv_P',
+        'conv_SPI', 'dspi_free', 'nash', 'ihacres'. ``result`` is the point
+        estimate: a single dict when ``agg is None``, else the ``{season: dict}``
+        mapping (each season entry gets its own CI). Only scalar quantities get
+        an interval — never the kernel ordinates or the OLS rescaling betas.
+        ``l_step`` thins the kernel-length search inside 'nash'/'ihacres'
+        replicas (speed-up; ignored by the OLS benchmarks)."""
+        from drought_scan.utils.statistics import (
+            _bootstrap_benchmark, _print_contamination_table)
+
+        season_months = seasons_dict if agg is not None else None
+        boot, boot_ci, meta = _bootstrap_benchmark(
+            self, streamflow, self_indices, streamflow_indices,
+            kind, bench_K, n_boot, block_length, ci, circular, random_state,
+            seasons=season_months, l_step=l_step)
+        _print_contamination_table(meta, np.arange(1, self.K + 1))
+
+        if agg is None:
+            result['boot'] = boot
+            result['ci'] = boot_ci
+            result['boot_meta'] = meta
+        else:
+            for name, sdict in result.items():
+                if name in boot:
+                    sdict['boot'] = boot[name]
+                    sdict['ci'] = boot_ci[name]
+                    sdict['boot_meta'] = meta
+        return result
+
+
+
     # --------------------------------------------------------------------------------
     # METHOD 1 — benchmark_nash
     def benchmark_nash(self, streamflow, K=None, plot=True,
-                       agg=None, seasons=None):
+                       agg=None, seasons=None, n_boot=0, block_length=None,
+                       ci=(2.5, 97.5), circular=True, random_state=None,
+                       boot_l_step=3):
         """
         This method predicts the standardized streamflow anomaly SQI_1(t) from raw precipitation P(t-j)
         via a parametric kernel. Standardization of the target makes R² directly comparable to D(SPI).
@@ -2821,6 +3143,26 @@ class BaseDroughtAnalysis:
             Seasonal aggregation scheme (same API as benchmark_convolution).
         seasons : dict, optional
             Custom season dict (sets agg='custom').
+        n_boot : int, default 0
+            If > 0, attach a block-bootstrap CI (same paired year-aligned
+            moving-block resampling of the raw (P, Q) overlap as
+            ``analyze_correlation``'s bootstrap). The Nelder-Mead search over
+            (n, τ) is re-run on every synthetic record and percentiles are taken
+            for the SCALARS: ``optimal_n``, ``optimal_k`` (τ), ``optimal_K`` (L)
+            and R²/RMSE/KGE. The kernel ordinates h(j) and the OLS intercept/
+            slope are NOT bootstrapped.
+        block_length : int, optional
+            Block length in months; default ``max(24, 2 * self.K)`` rounded to
+            whole years. Pass e.g. 72 for 6-year blocks.
+        ci : tuple, default (2.5, 97.5)
+        circular, random_state
+            As in ``analyze_correlation``.
+        boot_l_step : int, default 3
+            Stride of the kernel-length (L) search INSIDE the bootstrap replicas
+            only: L runs over ``range(2, K + 1, boot_l_step)`` instead of every
+            integer, cutting the per-replica cost ~``boot_l_step``-fold. The
+            point estimate always uses the full L sweep. A coarser stride makes
+            the ``optimal_K`` bootstrap distribution correspondingly granular.
 
         Returns
         -------
@@ -2832,6 +3174,8 @@ class BaseDroughtAnalysis:
             'kernel'     : ndarray, shape (optimal_K,)
             'metrics'    : dict of evaluation metrics (see _eval_metrics)
             'sample_number' : int  (only in seasonal mode)
+            'ci' / 'boot' / 'boot_meta' : only if n_boot > 0 (per season in
+                                          seasonal mode)
 
         References
         ----------
@@ -2858,86 +3202,9 @@ class BaseDroughtAnalysis:
         months_overlap = np.array([m[0] for m in m_cal_overlap], dtype=int)
 
         def _optimize_nash(driver, target, season_mask=None):
-            """Optimise Nash IUH for a given data subset.
-            the challange is figure out the two paramters definish the best gamma-shaped kernel
-            testing incresing kernle from 2 to K"""
-
-
-
-            best = {'R2': -np.inf, 'L': None, 'n': None, 'k': None}
-
-            for L in range(2, K + 1):
-                def neg_r2(params):
-                    """Scipy minimize look to the minima!
-                    we pass -R² so the minimum corresponds to the maximum of R².
-                    """
-                    n_, k_ = params
-                    if n_ <= 0 or k_ <= 0 or n_ > 20 or k_ > K:
-                        return 1.0  # infeasible
-                    # given possible n_ and k_, build the bell-shaped kernel of lenght L,
-                    h = self._nash_kernel(n_, k_, L)
-                    # now fit the convolutional model and estimate the R2
-                    r2 = self._convolve_r2(driver, target, h,season_mask=season_mask)
-                    return -r2 if np.isfinite(r2) else 1.0
-
-                # grid of starting points: (n, k) ∈ {1,2,4} × {1,2,4}
-                # Starting grid (n, k) ∈ {1,2,4} × {1,2,4}: covers the physically plausible
-                # space for monthly data. n=1 is a pure exponential (reactive basin), n=4 is
-                # a broad bell (slow/inertial basin); k=1..4 months spans typical Mediterranean
-                # memory scales. The grid is intentionally coarse — Nelder-Mead refines locally
-                # from each starting point, so we only need seeds spread across the domain,
-                # not a dense coverage. For basins with very long memory (k>>4, e.g. deep
-                # aquifers), consider replacing k_grid with [1.0, Lmax/8, Lmax/4].
-                for n0 in [1.0, 2.0, 4.0]:
-                    for k0 in [1.0, 2.0, 4.0]:
-                        # Minimize moves [n, k] (the params defininf the shape of the bell-kernle
-                        # in the parameter space looking for where -R² is lowest
-                        res = minimize(neg_r2, x0=[n0, k0],
-                                       method='Nelder-Mead',
-                                       options={'xatol': 1e-4, 'fatol': 1e-4,
-                                                'maxiter': 2000})
-                        r2 = -res.fun
-                        if r2 > best['R2']:
-                            best.update({'R2': r2, 'L': L,
-                                         'n': res.x[0], 'k': res.x[1]})
-
-            #
-            kernel = self._nash_kernel(best['n'], best['k'], best['L'])
-            print(f"  Nash IUH: R²={best['R2']:.3f}  "
-                  f"L={best['L']}  n={best['n']:.2f}   τ={best['k']:.2f}")
-
-            # After best is identified, recompute simulated series for metrics
-            kernel = self._nash_kernel(best['n'], best['k'], best['L'])
-
-            # Replicate _convolve_r2 logic to obtain sim aligned with target
-            y_hat = np.full(len(driver), np.nan)
-            for t in range(best['L'] - 1, len(driver)):
-                y_hat[t] = np.dot(kernel, driver[t - best['L'] + 1: t + 1][::-1])
-
-            if season_mask is not None:
-                y_hat_eval = y_hat[season_mask]
-                target_eval = target[season_mask]
-            else:
-                y_hat_eval = y_hat
-                target_eval = target
-
-            # OLS rescaling (same as _convolve_r2) to match target scale
-            mask_v = np.isfinite(y_hat_eval) & np.isfinite(target_eval)
-            X = np.column_stack([y_hat_eval[mask_v], np.ones(mask_v.sum())])
-            b, _, _, _ = np.linalg.lstsq(X, target_eval[mask_v], rcond=None)
-            sim_rescaled = np.full_like(y_hat_eval, np.nan, dtype=float)
-            sim_rescaled[mask_v] = X @ b
-
-            metrics = self._eval_metrics(target_eval, sim_rescaled)
-
-            return {
-                'optimal_K': best['L'],
-                'optimal_n': best['n'],
-                'optimal_k': best['k'],
-                'R2': best['R2'],
-                'kernel': kernel,
-                'metrics': metrics,
-            }
+            """Optimise Nash IUH for a given data subset (thin wrapper over the
+            lifted static core ``_nash_fit``)."""
+            return self._nash_fit(driver, target, K, season_mask=season_mask)
 
         # ── no seasonal split ──────────────────────────────────────────────────
         if agg is None:
@@ -2946,6 +3213,13 @@ class BaseDroughtAnalysis:
             # K* optimal lenght of the kernel (how many months we have to look backwards)
             # n*,k* = optimal two-params defining the gamma-shape of the kernel
             result = _optimize_nash(driver, target)
+
+            if n_boot > 0:
+                self._attach_benchmark_ci(
+                    'nash', streamflow, self_idx, sf_idx, K, result, None, None,
+                    n_boot=n_boot, block_length=block_length, ci=ci,
+                    circular=circular, random_state=random_state,
+                    l_step=boot_l_step)
 
             if plot:
                 K = result['optimal_K']
@@ -3005,6 +3279,12 @@ class BaseDroughtAnalysis:
             res['sample_number'] = int(np.count_nonzero(idx))
             results[name] = res
 
+        if n_boot > 0 and results:
+            self._attach_benchmark_ci(
+                'nash', streamflow, self_idx, sf_idx, K, results, agg, seasons_dict,
+                n_boot=n_boot, block_length=block_length, ci=ci,
+                circular=circular, random_state=random_state, l_step=boot_l_step)
+
         if plot and results:
             n_seasons = len(results)
             fig, axes = plt.subplots(nrows=n_seasons, ncols=2,
@@ -3059,7 +3339,9 @@ class BaseDroughtAnalysis:
     # METHOD 2 — benchmark_ihacres
     # ──────────────────────────────────────────────────────────────────────────────
     def benchmark_ihacres(self, streamflow, K=None, plot=True,
-                          agg=None, seasons=None):
+                          agg=None, seasons=None, n_boot=0, block_length=None,
+                          ci=(2.5, 97.5), circular=True, random_state=None,
+                          boot_l_step=3):
         """
         This method predicts the standardized streamflow anomaly SQI_1(t) from raw precipitation P(t-j)
         via a parametric kernel. Standardization of the target makes R² directly comparable to D(SPI).
@@ -3108,6 +3390,12 @@ class BaseDroughtAnalysis:
         agg : str or None
             Seasonal aggregation (same API as benchmark_convolution).
         seasons : dict, optional
+        n_boot, block_length, ci, circular, random_state, boot_l_step
+            Block-bootstrap CI, same procedure and semantics as in
+            ``benchmark_nash`` (scalars only: ``optimal_tau_f``,
+            ``optimal_tau_s``, ``optimal_alpha``, ``optimal_K``, R²/RMSE/KGE —
+            never the two exponential kernels or the OLS mix intercept/slope).
+            ``boot_l_step`` thins the L search inside the replicas.
 
         Returns
         -------
@@ -3119,7 +3407,10 @@ class BaseDroughtAnalysis:
             'R2'           : float
             'kernel_fast'  : ndarray
             'kernel_slow'  : ndarray
+            'metrics'      : dict of evaluation metrics (see _eval_metrics)
             'sample_number': int  (seasonal mode only)
+            'ci' / 'boot' / 'boot_meta' : only if n_boot > 0 (per season in
+                                          seasonal mode)
 
         References
         ----------
@@ -3128,6 +3419,7 @@ class BaseDroughtAnalysis:
             Water Resources Research, 29(8), 2637-2649.
         """
         self._check_correlation_eligible()
+        from scipy.optimize import minimize
 
 
         if K is None:
@@ -3154,114 +3446,21 @@ class BaseDroughtAnalysis:
             return h / h.sum()
 
         def _run_ihacres(drv, tgt, season_mask=None):
-            """Optimise IHACRES two-component model for a given data subset.
+            """Optimise the IHACRES two-component model for a data subset (thin
+            wrapper over the lifted static core ``_ihacres_fit``)."""
+            return self._ihacres_fit(drv, tgt, K, season_mask=season_mask)
 
-            Fix 1: vectorized convolution via np.convolve (≈50-100× faster).
-            Fix 2: reduced multi-start grid (3 physically-motivated seeds).
-            Fix 3: hard bounds on tau_f, tau_s, alpha via L-BFGS-B instead of
-                   Nelder-Mead with penalty. Prevents collapse of tau_f → 0 and
-                   ensures tau_s > tau_f + delta_min.
-            """
-            from scipy.optimize import minimize
-
-            best = {'R2': -np.inf, 'K': None,
-                    'tau_f': None, 'tau_s': None, 'alpha': None}
-
-            # --- Hard bounds (physical constraints) ---
-            TAU_F_MIN = 0.5  # fast reservoir: at least 0.5 months
-            TAU_F_MAX = 6.0  # fast reservoir: at most 6 months
-            TAU_S_MIN = 2.0  # slow reservoir: at least 2 months
-            # TAU_S_MAX set dynamically as 2*K to allow long memory
-            ALPHA_MIN = 0.05  # at least 5% fast component
-            ALPHA_MAX = 0.95  # at most 95% fast component
-            DELTA_MIN = 1.0  # slow reservoir must exceed fast by at least 1 month
-
-            def neg_r2_factory(L_):
-                def neg_r2(params):
-                    tau_f, tau_s, alpha = params
-
-                    # Soft separation penalty (additional to bounds, keeps tau_s > tau_f)
-                    if tau_s - tau_f < DELTA_MIN:
-                        return 1.0 + (DELTA_MIN - (tau_s - tau_f))
-
-                    h_f = _exp_kernel(tau_f, L_)
-                    h_s = _exp_kernel(tau_s, L_)
-
-                    n = len(drv)
-                    Q_fast = np.convolve(drv, h_f[::-1], mode='full')[:n]
-                    Q_slow = np.convolve(drv, h_s[::-1], mode='full')[:n]
-                    Q_fast[:L_ - 1] = np.nan
-                    Q_slow[:L_ - 1] = np.nan
-                    Q_sim = alpha * Q_fast + (1 - alpha) * Q_slow
-
-                    if season_mask is not None:
-                        Q_sim = Q_sim[season_mask]
-                        tgt_loc = tgt[season_mask]
-                    else:
-                        tgt_loc = tgt
-
-                    mask = np.isfinite(tgt_loc) & np.isfinite(Q_sim)
-                    if mask.sum() < 5:
-                        return 1.0
-                    X = np.column_stack([Q_sim[mask], np.ones(mask.sum())])
-                    y = tgt_loc[mask]
-                    beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-                    ss_res = np.sum((y - X @ beta) ** 2)
-                    ss_tot = np.sum((y - y.mean()) ** 2)
-                    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else -1.0
-                    return -r2 if np.isfinite(r2) else 1.0
-
-                return neg_r2
-
-            starting_points = [
-                (1.0, 4.0, 0.7),
-                (2.0, 8.0, 0.5),
-                (2.0, 12.0, 0.3),
-            ]
-
-            for L_ in range(2, K + 1):
-                neg_r2 = neg_r2_factory(L_)
-                # bounds: tau_f ∈ [0.5, 6], tau_s ∈ [2, 2*K], alpha ∈ [0.05, 0.95]
-                bounds = [
-                    (TAU_F_MIN, TAU_F_MAX),
-                    (TAU_S_MIN, 2.0 * K),
-                    (ALPHA_MIN, ALPHA_MAX),
-                ]
-                for tf0, ts0, a0 in starting_points:
-                    # Clip starting point within bounds
-                    tf0_c = np.clip(tf0, TAU_F_MIN, TAU_F_MAX)
-                    ts0_c = np.clip(ts0, max(TAU_S_MIN, tf0_c + DELTA_MIN), 2.0 * K)
-                    a0_c = np.clip(a0, ALPHA_MIN, ALPHA_MAX)
-
-                    res = minimize(neg_r2, x0=[tf0_c, ts0_c, a0_c],
-                                   method='L-BFGS-B',
-                                   bounds=bounds,
-                                   options={'ftol': 1e-6, 'maxiter': 300})
-                    r2 = -res.fun
-                    if r2 > best['R2']:
-                        best.update({'R2': r2, 'K': L_,
-                                     'tau_f': res.x[0],
-                                     'tau_s': res.x[1],
-                                     'alpha': res.x[2]})
-
-            h_f = _exp_kernel(best['tau_f'], best['K'])
-            h_s = _exp_kernel(best['tau_s'], best['K'])
-            print(f"  IHACRES: R²={best['R2']:.3f}  K={best['K']}  "
-                  f"τ_fast={best['tau_f']:.2f}  τ_slow={best['tau_s']:.2f}  "
-                  f"α={best['alpha']:.2f}")
-            return {
-                'optimal_K': best['K'],
-                'optimal_tau_f': best['tau_f'],
-                'optimal_tau_s': best['tau_s'],
-                'optimal_alpha': best['alpha'],
-                'R2': best['R2'],
-                'kernel_fast': h_f,
-                'kernel_slow': h_s,
-            }
         # ── no seasonal split ──────────────────────────────────────────────────
         if agg is None:
             print("Starting IHACRES benchmark...")
             result = _run_ihacres(driver, target)
+
+            if n_boot > 0:
+                self._attach_benchmark_ci(
+                    'ihacres', streamflow, self_idx, sf_idx, K, result, None, None,
+                    n_boot=n_boot, block_length=block_length, ci=ci,
+                    circular=circular, random_state=random_state,
+                    l_step=boot_l_step)
 
             if plot:
                 K = result['optimal_K']
@@ -3332,6 +3531,12 @@ class BaseDroughtAnalysis:
             res = _run_ihacres(driver, target, season_mask=idx)
             res['sample_number'] = int(np.count_nonzero(idx))
             results[name] = res
+
+        if n_boot > 0 and results:
+            self._attach_benchmark_ci(
+                'ihacres', streamflow, self_idx, sf_idx, K, results, agg, seasons_dict,
+                n_boot=n_boot, block_length=block_length, ci=ci,
+                circular=circular, random_state=random_state, l_step=boot_l_step)
 
         if plot and results:
             n_seasons = len(results)
