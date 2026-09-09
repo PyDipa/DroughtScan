@@ -77,8 +77,76 @@ from drought_scan.utils.visualization import (
 # --- statistics -------------------------------------------------------------
 from drought_scan.utils.statistics import (
     find_overlap,
+    bootstrap_summary_table,
+    _peak_summary,
+    _bootstrap_r2,
+    _print_contamination_table,
+    _print_summary_table,
     # _rolling_trend_analysis,
 )
+
+
+def _plot3_peak_clusters(ax, MatCorr, K_range, summary, title="", legend=True):
+    """The peak/cluster figure of analyze_correlation[_seasonal]: the per-scheme R²(K) curves, a
+    dark CROSS at every scheme's peak (x = peak K with its bootstrap CI, y = peak
+    R² with its CI), and the clusters. Each K cluster is drawn as one or more
+    very transparent boxes that share its K extent (``K_cluster_CI`` wide) and
+    are stacked at the ``R2_CI`` height of each response sub-cluster, tinted with
+    that sub-cluster's leading-scheme hue. A cluster that does not sub-split by
+    R² shows a single box, as before."""
+    from matplotlib.patches import Rectangle
+    from matplotlib.colors import to_rgba
+
+    pbf = summary.get("peak_by_family", {})
+    xk = np.arange(1, len(K_range) + 1)
+    for wi, name in enumerate(pbf):
+        ax.plot(xk, MatCorr[:, wi], linewidth=1.6, label=name)
+        d = pbf[name]
+        pr, kk = d.get("peak_R2"), d.get("argmax_K")
+        if kk and pr is not None and np.isfinite(pr):
+            clo, chi = d["peak_CI"]
+            klo, khi = d.get("K_CI", (np.nan, np.nan))
+            yerr = [[max(0.0, pr - clo)], [max(0.0, chi - pr)]]
+            xerr = ([[max(0.0, kk - klo)], [max(0.0, khi - kk)]]
+                    if np.all(np.isfinite([klo, khi])) else None)
+            ax.errorbar(kk, pr, yerr=yerr, xerr=xerr, fmt='o', ms=5, color='0.3',
+                        ecolor='0.3', elinewidth=1.1, capsize=3, zorder=5)
+
+    for c in summary.get("clusters", []):
+        klo, khi = c["K_cluster_CI"]
+        if not np.all(np.isfinite([klo, khi])):
+            continue
+        subs = c.get("subclusters") or [{"R2_CI": c["R2_cluster_CI"],
+                                         "color": c.get("color", "#efe08c")}]
+        subs = [su for su in subs if np.all(np.isfinite(su["R2_CI"]))]
+        if not subs:
+            continue
+        rtop = max(su["R2_CI"][1] for su in subs)
+        # shared vertical dotted segments: the K-CI edges of the whole cluster.
+        for xv in (klo, khi):
+            ax.plot([xv, xv], [0, rtop], color="0.8", ls=":", lw=0.8, zorder=0.5)
+        # one tinted box per response sub-cluster, all sharing the K extent; a
+        # thin coloured edge separates stacked sub-boxes.
+        for su in subs:
+            rlo, rhi = su["R2_CI"]
+            col = su.get("color", c.get("color", "#efe08c"))
+            ax.add_patch(Rectangle(
+                (klo, rlo), max(khi - klo, 0.4), max(rhi - rlo, 1e-3),
+                facecolor=to_rgba(col, 0.15), edgecolor=to_rgba(col, 0.55),
+                linewidth=0.8, zorder=0))
+            # dotted segments to the R² axis: the two edges that define this box.
+            for yv in (rlo, rhi):
+                ax.plot([1, khi], [yv, yv], color="0.8", ls=":", lw=0.8, zorder=0.5)
+
+    ax.set_xlim(1, len(K_range))
+    ax.set_ylim(0, 1)
+    ax.set_xlabel("Month-scale (K)", fontweight="bold", fontsize=11)
+    ax.set_ylabel(r"$R^2$", fontweight="bold", fontsize=11)
+    ax.grid(alpha=0.3)
+    if legend:
+        ax.legend(fontsize=9, loc="lower right")
+    if title:
+        ax.set_title(title, fontsize=11, fontweight="bold")
 
 
 def _plot_benchmark_ci_box(ax, ci, k_hat, r2_hat, color="#c1121f"):
@@ -1040,6 +1108,11 @@ class BaseDroughtAnalysis:
         for w in range(n_weights):
             params_w = {}
             for name, info in seasonal_corr.items():
+                # analyze_correlation_seasonal(n_boot>0) adds a top-level
+                # "summary" DataFrame alongside the season dicts; skip any
+                # entry that is not a season's own dict.
+                if not isinstance(info, dict):
+                    continue
                 if "best_k_per_weight" in info:
                     k = int(np.ravel(info["best_k_per_weight"])[w])
                 elif "R2_matrix" in info:
@@ -1350,7 +1423,9 @@ class BaseDroughtAnalysis:
                     MatCorr[ki, w] = r ** 2
         return MatCorr
 
-    def analyze_correlation(self, streamflow, plot=True, plot_mode="all"):
+    def analyze_correlation(self, streamflow, plot=True, plot_mode="all",
+                            n_boot=0, block_length=None, ci=(2.5, 97.5),
+                            circular=True, random_state=None):
         """
         Analyze correlations between this object's SIDI and a streamflow target
         (SQI₁) for different weighting schemes and K (month-scale) values.
@@ -1365,6 +1440,20 @@ class BaseDroughtAnalysis:
             Whether to generate diagnostic plots.
         plot_mode : {'all', 'seasonal', 'monthly'}, default 'all'
             Scatter-plot coloring mode.
+        n_boot : int, default 0
+            If > 0, run a paired block bootstrap of the whole SPI/SQI/SIDI/R²
+            pipeline and attach a confidence band to the R² surface. 0 keeps the
+            method's behaviour and return value exactly as before.
+        block_length : int, optional
+            Block length L (months) for the bootstrap. Default ``max(24, 2*K)``.
+            Larger L means less cross-junction contamination but fewer distinct
+            replicas (coarser band) — see the ``boot_meta`` table.
+        ci : (float, float), default (2.5, 97.5)
+            Lower/upper percentiles of the band.
+        circular : bool, default True
+            Wrap bootstrap blocks around the series end.
+        random_state : int or None
+            Seed for reproducibility.
 
         Returns
         -------
@@ -1380,6 +1469,22 @@ class BaseDroughtAnalysis:
               each scheme at its own optimal K.
             - "MatCorr" (ndarray, shape (K, 5)): the full R² surface, i.e. the score
               of every (K, weight) combination.
+            When ``n_boot > 0`` also:
+            - "MatCorr_boot" (ndarray, shape (n_boot, K, 5)): every replica's surface.
+            - "MatCorr_ci" (ndarray, shape (2, K, 5)): the [lo, hi] percentile band.
+            - "boot_meta" (dict): block_length, n_blocks, ``contaminated_fraction``
+              (K,) and ``eff_n_per_scale`` (K,) — the share of timesteps whose
+              k-month accumulation crosses a block join and is NaN-masked, and the
+              N that survives. This grows with K: the band at large K rests on
+              fewer effective points and should be read with that in mind.
+            - "summary" (DataFrame): one row per **(K cluster, R² sub-cluster)** —
+              level 1 groups weighting schemes by the K they peak at (``cluster``
+              1..N by increasing ``K``); level 2 re-applies the same rule on peak
+              R² inside each K cluster (``sub-cluster`` 1..M by decreasing ``R2``),
+              so schemes that share a scale but differ in response split apart.
+              Columns: ``season, cluster, K, K_CI, sub-cluster, families, R2,
+              R2_CI``. See ``utils.statistics.bootstrap_summary_table`` and
+              ``_peak_summary``.
         """
         self._check_correlation_eligible()
 
@@ -1426,30 +1531,38 @@ class BaseDroughtAnalysis:
 
         print(f"Best correlation: R2  = {max_corr:.3f} (K={K_range[best_k]}, Weight={wlabel[best_weight]})")
 
+        # --- optional block-bootstrap confidence band -------------------------
+        MatCorr_boot = MatCorr_ci = boot_meta = summary_raw = None
+        if n_boot and n_boot > 0:
+            MatCorr_boot, MatCorr_ci, boot_meta = _bootstrap_r2(
+                self, streamflow, self_indices, streamflow_indices,
+                n_boot, block_length, ci, circular, random_state)
+            _print_contamination_table(boot_meta, K_range)
+            summary_raw = _peak_summary(MatCorr, MatCorr_boot, ci=ci)
+
         W = generate_weights(K_range[best_k])
 
         # --- plots ----------------------------------------------------------------
         if plot:
             # The series plotted is the one set_optimal_SIDI would commit:
             # recalculate_SIDI standardizes on the BASELINE via _zscore_baseline.
-            # Rebuilding it here and rescaling on the overlap instead put the scatter's
-            # x-axis on a different reference from self.SIDI, so a point read off this
-            # figure did not correspond to the SIDI value the rest of the library
-            # reports for that month. Computed only when it is going to be drawn.
+            # Rescaling on the overlap instead put the scatter's x-axis on a different
+            # reference from self.SIDI.
             SIDI = self.recalculate_SIDI(K=int(K_range[best_k]))[self_indices, best_weight]
 
-            plt.figure(figsize=(10, 5))
-            for w in range(len(W.T)):
-                plt.plot(MatCorr[:, w], label=wlabel[w], linewidth=2)
-            plt.grid()
-            plt.legend(loc=3)
-            plt.xticks(np.arange(len(K_range)), K_range)
-            plt.ylabel(r"$R^2$", fontweight="bold", fontsize=12)
-            plt.xlabel("Month-scale (K)", fontweight="bold", fontsize=12)
-            plt.title(f"Correlation Analysis: {self.SIDI_name}  vs.  {streamflow.index_name}1",
-                      fontsize=14, fontweight="bold")
-            plt.tight_layout()
-            plt.show(block=False)
+            # --- Plot 1: each scheme = a CROSS at its peak (x = peak K CI,
+            #     y = peak R² CI); each K cluster as one or more very transparent
+            #     boxes sharing its K extent, stacked at the R2_CI of each
+            #     response sub-cluster and tinted with that sub-cluster's hue,
+            #     framed by light-grey dotted CI reference lines. Bootstrap only.
+            if summary_raw is not None:
+                _plot3_peak_clusters(
+                    plt.figure(figsize=(10, 6)).gca(), MatCorr, K_range, summary_raw,
+                    title=f"{self.basin_name} — {self.SIDI_name} vs. "
+                          f"{streamflow.index_name}1 — per-scheme peak (cross = 95% CI) "
+                          f"and scale clusters")
+                plt.tight_layout()
+                plt.show(block=False)
 
             # basic scan plot
             self.plot_scan(optimal_k=K_range[best_k], weight_index=best_weight)
@@ -1465,17 +1578,25 @@ class BaseDroughtAnalysis:
                 m2summer = np.isin(streamflow.m_cal[streamflow_indices, 0], g1)
                 f = np.isfinite(SIDI[m1summer]) & np.isfinite(y[m2summer])
                 rho, pval = stats.pearsonr(SIDI[m1summer][f], y[m2summer][f])
-                rho = 0 if pval > 0.5 else rho
+                # Report the verdict, not a fake zero. A non-significant correlation
+                # used to be forced to rho = 0 and printed as "R2 = 0.0", which reads
+                # as "no relationship" when what was meant is "not distinguishable
+                # from zero" - a different statement, and one that depends on n (at
+                # n=10, r=0.6 gives p=0.066 and would have been shown as 0.0, hiding
+                # 36% of explained variance). The threshold is now the library's own
+                # `pval < 0.05`, as used by spi_sqi_corr; it read 0.5 here, at which
+                # level the null is rejected half the time under pure noise.
+                r2_lbl = 'n.s.' if pval >= 0.05 else f'{rho ** 2:.2f}'
                 plt.plot(SIDI[m1summer], y[m2summer], 'o', color='tab:olive', alpha=0.4,
-                         label=f'Apr-Oct; $R^2$ = {np.round(rho ** 2, 2)}')
+                         label=f'Apr-Oct; $R^2$ = {r2_lbl}')
                 # winter
                 m1winter = np.isin(self.m_cal[self_indices, 0], g2)
                 m2winter = np.isin(streamflow.m_cal[streamflow_indices, 0], g2)
                 f = np.isfinite(SIDI[m1winter]) & np.isfinite(y[m2winter])
                 rho, pval = stats.pearsonr(SIDI[m1winter][f], y[m2winter][f])
-                rho = 0 if pval > 0.5 else rho
+                r2_lbl = 'n.s.' if pval >= 0.05 else f'{rho ** 2:.2f}'  # see above
                 plt.plot(SIDI[m1winter], y[m2winter], 'o', color='tab:blue', alpha=0.4,
-                         label=f'Nov-Mar; $R^2$ = {np.round(rho ** 2, 2)}')
+                         label=f'Nov-Mar; $R^2$ = {r2_lbl}')
             elif plot_mode == 'monthly':
                 if cmc is not None:
                     c = plt.get_cmap(cmc.romaO, 12)
@@ -1497,6 +1618,25 @@ class BaseDroughtAnalysis:
             plt.tight_layout()
             plt.show(block=False)
 
+            # --- Last figure: the plain R²(k) curves, with the per-cell
+            #     percentile CI band under each curve.
+            plt.figure(figsize=(10, 5))
+            xk = np.arange(len(K_range))
+            for w in range(len(W.T)):
+                line, = plt.plot(xk, MatCorr[:, w], label=wlabel[w], linewidth=2)
+                if MatCorr_ci is not None:
+                    plt.fill_between(xk, MatCorr_ci[0, :, w], MatCorr_ci[1, :, w],
+                                    color=line.get_color(), alpha=0.15, linewidth=0)
+            plt.grid()
+            plt.legend(loc=3)
+            plt.xticks(np.arange(len(K_range)), K_range)
+            plt.ylabel(r"$R^2$", fontweight="bold", fontsize=12)
+            plt.xlabel("Month-scale (K)", fontweight="bold", fontsize=12)
+            plt.title(f"Correlation Analysis: {self.SIDI_name}  vs.  {streamflow.index_name}1",
+                      fontsize=14, fontweight="bold")
+            plt.tight_layout()
+            plt.show(block=False)
+
         # Each weighting scheme peaks at its own K: MatCorr already scores every
         # (K, weight) pair, so the per-scheme optimum is just the argmax of each
         # column. Reported alongside the global best so that set_optimal_SIDI can
@@ -1508,16 +1648,43 @@ class BaseDroughtAnalysis:
         for w, (kw, rw) in enumerate(zip(best_k_per_weight, max_corr_per_weight)):
             print(f"   {wlabel[w]:<40s} K={kw:<3d} R2={rw:.3f}")
 
-        return {"best_k": K_range[best_k], "col_best_weight": best_weight,
-                "max_correlation": max_corr, 'spi_corr': R2_spi,
-                "best_k_per_weight": best_k_per_weight,
-                "max_correlation_per_weight": max_corr_per_weight,
-                "MatCorr": MatCorr}
+        result = {"best_k": K_range[best_k], "col_best_weight": best_weight,
+                  "max_correlation": max_corr, 'spi_corr': R2_spi,
+                  "best_k_per_weight": best_k_per_weight,
+                  "max_correlation_per_weight": max_corr_per_weight,
+                  "MatCorr": MatCorr}
+        if MatCorr_ci is not None:
+            result["MatCorr_boot"] = MatCorr_boot
+            result["MatCorr_ci"] = MatCorr_ci
+            result["boot_meta"] = boot_meta
+            # summary_raw: the _peak_summary dict (peak_by_family + clusters);
+            # "summary": the scale-cluster DataFrame from it. Consumers that need
+            # the crosses/boxes (e.g. diagnostics) read summary_raw and do NOT
+            # recompute _peak_summary.
+            result["summary_raw"] = summary_raw
+            result["summary"] = bootstrap_summary_table(
+                {"whole period": {"R2_matrix": MatCorr, "R2_boot": MatCorr_boot,
+                                  "summary": summary_raw}}, ci=ci)
+            _print_summary_table(result["summary"])
+        return result
 
-    def analyze_correlation_seasonal(self, streamflow, agg='quarter', plot=True, seasons=None):
+    def analyze_correlation_seasonal(self, streamflow, agg='quarter', plot=True, seasons=None,
+                                     n_boot=0, block_length=None, ci=(2.5, 97.5),
+                                     circular=True, random_state=None):
         """
         Perform seasonal correlation analysis between this object's SIDI and a
         streamflow target (SQI₁) for different weighting schemes and K values.
+
+        ``n_boot``/``block_length``/``ci``/``circular``/``random_state``: see
+        ``analyze_correlation``. With ``n_boot > 0`` a single set of block-bootstrap
+        replicas of the full pipeline is built on the continuous overlap and then
+        sliced by season, so each season's dict gains ``"R2_boot"`` (n_boot, K, 5),
+        ``"R2_ci"`` (2, K, 5), ``"boot_meta"`` and ``"summary"``; the returned dict
+        also gains a top-level ``"summary"`` — the cluster table, one row per
+        (season, K cluster, R² sub-cluster): level 1 groups schemes by peak K,
+        level 2 re-splits each K cluster by peak R² (see
+        ``utils.statistics.bootstrap_summary_table``).
+        ``n_boot=0`` leaves the return value unchanged.
 
         Applicable to: Precipitation, Pet, Balance.
 
@@ -1536,12 +1703,7 @@ class BaseDroughtAnalysis:
         -------
         dict
             Per-season dictionary with keys:
-            ``best_k``, ``col_best_weight``, ``best_k_per_weight``, ``max_correlation``,
-            ``R2_matrix``, ``sample number``. ``best_k_per_weight`` (ndarray, shape (5,))
-            is the optimal K of *each* weighting scheme for that season — the seasonal
-            analogue of ``analyze_correlation``'s ``best_k_per_weight`` — for use with
-            ``spatial_sidi(K=..., seasonal_params=...)`` when a single scale per season
-            would waste 4 of the 5 weighting schemes.
+            ``best_k``, ``col_best_weight``, ``max_correlation``, ``R2_matrix``, ``sample number``.
         """
         self._check_correlation_eligible()
 
@@ -1603,16 +1765,32 @@ class BaseDroughtAnalysis:
             M = self._r2_surface(spi_like_set[:, idx], y[idx], K_range, min_valid=10)
             max_corr = np.nanmax(M)
             bk, bw = np.unravel_index(np.nanargmax(M), M.shape)
-            best_k_per_weight = K_range[np.nanargmax(M, axis=0)]
             print(f" Season {name}: best R²={max_corr:.3f} (K={K_range[bk]}, Weight={wlabel[bw]})")
+            best_k_per_weight = K_range[np.nanargmax(M, axis=0)]
             MatCorr[name] = {
                 "best_k": int(K_range[bk]),
                 "col_best_weight": int(bw),
+                # Each weighting scheme peaks at its own K within the season — the
+                # per-scheme optimum is just the argmax of each column of the surface.
                 "best_k_per_weight": best_k_per_weight,
                 "max_correlation": float(max_corr),
                 "R2_matrix": M,
                 "sample number": np.count_nonzero(idx),
             }
+
+        # --- optional block-bootstrap confidence band (one replica set,
+        #     built on the continuous overlap, then sliced per season) ---------
+        if n_boot and n_boot > 0:
+            boot_by_season, ci_by_season, boot_meta = _bootstrap_r2(
+                self, streamflow, self_indices, streamflow_indices,
+                n_boot, block_length, ci, circular, random_state, seasons=seasons)
+            _print_contamination_table(boot_meta, K_range)
+            for name in MatCorr:
+                MatCorr[name]["R2_boot"] = boot_by_season[name]
+                MatCorr[name]["R2_ci"] = ci_by_season[name]
+                MatCorr[name]["boot_meta"] = boot_meta
+                MatCorr[name]["summary"] = _peak_summary(
+                    MatCorr[name]["R2_matrix"], boot_by_season[name], ci=ci)
 
         # --- Plot 1: R² vs K ---
         if agg == 'monthly':
@@ -1633,28 +1811,30 @@ class BaseDroughtAnalysis:
             plt.show(block=False)
         else:
             if plot:
-                fig, ax = plt.subplots(figsize=figsize1, nrows=nrows, ncols=ncols)
-                ax = ax.ravel()
-                for i, name in enumerate(MatCorr.keys()):
-                    mat = MatCorr[name]['R2_matrix']
-                    for w in range(mat.shape[1]):
-                        ax[i].plot(mat[:, w], label=wlabel[w], linewidth=2)
-                    ax[i].grid()
-                    ax[i].set_xticks(np.arange(0, len(K_range), 3))
-                    ax[i].set_xticklabels(K_range[0:-1:3])
-                    ax[i].tick_params(axis='x', labelsize=14)
-                    ax[i].tick_params(axis='y', labelsize=14)
-                    ax[i].set_ylabel(r"$R^2$", fontweight="bold", fontsize=16)
-                    ax[i].set_xlabel("Month-scale (K)", fontweight="bold", fontsize=16)
-                    ax[i].set_title(name, fontweight="bold", fontsize=16)
-                    if i == 0:
-                        ax[i].legend(loc=3)
-                fig.suptitle(
-                    f"{self.basin_name} - Correlation Analysis: "
-                    f"{self.SIDI_name} vs. {streamflow.index_name}1",
-                    fontsize=16, fontweight="bold")
-                plt.tight_layout()
-                plt.show(block=False)
+                # --- Plot 1: per-scheme R²(K) with a CROSS at each peak (x = peak
+                #     K CI, y = peak R² CI) and each K cluster as very transparent
+                #     boxes sharing its K extent, stacked at the R2_CI of each
+                #     response sub-cluster and tinted with that sub-cluster's hue.
+                #     Only when the bootstrap ran.
+                if n_boot and n_boot > 0:
+                    seas3 = [nm for nm in MatCorr if MatCorr[nm].get("summary") is not None]
+                    if seas3:
+                        f1, ax1 = plt.subplots(figsize=figsize1, nrows=nrows,
+                                               ncols=ncols, squeeze=False)
+                        ax1 = ax1.ravel()
+                        for i, name in enumerate(seas3):
+                            _plot3_peak_clusters(ax1[i], MatCorr[name]["R2_matrix"],
+                                                 K_range, MatCorr[name]["summary"],
+                                                 title=name, legend=(i == 0))
+                        for j in range(len(seas3), len(ax1)):
+                            f1.delaxes(ax1[j])
+                        f1.suptitle(
+                            f"{self.basin_name} — {self.SIDI_name} vs. "
+                            f"{streamflow.index_name}1 — per-scheme peak (cross = 95% CI) "
+                            f"and scale clusters",
+                            fontsize=12, fontweight="bold")
+                        f1.tight_layout()
+                        plt.show(block=False)
 
                 # --- Plot 2: Scatter plots ---
                 if len(seasons) > 5:
@@ -1669,10 +1849,8 @@ class BaseDroughtAnalysis:
                 ax = ax.ravel()
                 # The mosaic set_optimal_SIDI_seasonal would commit: each month built
                 # with its own season's (K, weight), then standardized PER SEASON on the
-                # baseline. Rebuilding it per panel and rescaling on the whole overlap
-                # instead — as this loop used to — mixed the seasons back together in the
-                # very step the seasonal SIDI exists to keep apart, so the scatter's
-                # x-axis was not the axis of the series the commit produces.
+                # baseline. Rescaling on the whole overlap instead mixed the seasons back
+                # together in the very step the seasonal SIDI exists to keep apart.
                 SIDI_full = self.recalculate_SIDI_seasonal(MatCorr, seasons)[self_indices]
                 for i, (season, vals) in enumerate(MatCorr.items()):
                     best_k = vals['best_k']
@@ -1706,6 +1884,43 @@ class BaseDroughtAnalysis:
                     fig.delaxes(ax[-1])
                 plt.tight_layout()
                 plt.show(block=False)
+
+                # --- Last figure: the plain R²(k) curves per season, with the
+                #     per-cell percentile CI band under each curve.
+                fig, ax = plt.subplots(figsize=figsize1, nrows=nrows, ncols=ncols)
+                ax = ax.ravel()
+                for i, name in enumerate(MatCorr.keys()):
+                    mat = MatCorr[name]['R2_matrix']
+                    mat_ci = MatCorr[name].get('R2_ci')
+                    xk = np.arange(mat.shape[0])
+                    for w in range(mat.shape[1]):
+                        line, = ax[i].plot(xk, mat[:, w], label=wlabel[w], linewidth=2)
+                        if mat_ci is not None:
+                            ax[i].fill_between(xk, mat_ci[0, :, w], mat_ci[1, :, w],
+                                               color=line.get_color(), alpha=0.15, linewidth=0)
+                    ax[i].grid()
+                    ax[i].set_xticks(np.arange(0, len(K_range), 3))
+                    ax[i].set_xticklabels(K_range[0:-1:3])
+                    ax[i].tick_params(axis='x', labelsize=14)
+                    ax[i].tick_params(axis='y', labelsize=14)
+                    ax[i].set_ylabel(r"$R^2$", fontweight="bold", fontsize=16)
+                    ax[i].set_xlabel("Month-scale (K)", fontweight="bold", fontsize=16)
+                    ax[i].set_title(name, fontweight="bold", fontsize=16)
+                    if i == 0:
+                        ax[i].legend(loc=3)
+                fig.suptitle(
+                    f"{self.basin_name} - Correlation Analysis: "
+                    f"{self.SIDI_name} vs. {streamflow.index_name}1",
+                    fontsize=16, fontweight="bold")
+                plt.tight_layout()
+                plt.show(block=False)
+
+        # Overall cluster table (one row per season x K cluster x R2 sub-cluster).
+        # Added last so the per-season plot loops above never iterate over it.
+        # Bootstrap only.
+        if n_boot and n_boot > 0 and any("R2_boot" in v for v in MatCorr.values()):
+            MatCorr["summary"] = bootstrap_summary_table(MatCorr, ci=ci)
+            _print_summary_table(MatCorr["summary"])
 
         return MatCorr
 

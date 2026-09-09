@@ -1566,3 +1566,495 @@ def _bootstrap_benchmark(self_obj, streamflow, self_indices, streamflow_indices,
     for name in season_months:
         boot_by_season[name], ci_by_season[name] = _reduce([r[name] for r in reps])
     return boot_by_season, ci_by_season, meta
+
+
+# ===================================================================
+#  SIDI calibration: R2-surface block bootstrap + scale clusters
+# ===================================================================
+# Ported from Drought-Scan. _bootstrap_r2 resamples the raw paired
+# (P, Q) overlap in whole-year blocks and rebuilds the entire
+# SPI/SQI/SIDI/R2(K, weight) surface per replica (reusing the generic
+# primitives above); _peak_summary turns the observed surface + its
+# bootstrap into per-scheme peaks and scale clusters; the two
+# bootstrap_summary_table / _print_summary_table render that as the
+# per-cluster table analyze_correlation[_seasonal] attach as 'summary'.
+# ===================================================================
+
+WEIGHT_LABELS = ("EW", "Lin. DW", "Log. DW", "Lin. IW", "Log. IW")
+
+# Canonical per-scheme colours (matplotlib tab10, in WEIGHT_LABELS order). Kept
+# here so every renderer - the library figures and the diagnostic site - tints a
+# cluster box with the SAME hue as the scheme that leads that cluster, instead of
+# a single fixed colour. Drawn very transparent, these read as pastels: EW ->
+# pale blue, Lin. DW -> straw, Log. DW -> pale green, Lin. IW -> pink, Log. IW ->
+# lavender.
+WEIGHT_COLORS = ("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd")
+
+
+def _peak_summary(M, r2_boot, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS, k_tol=0):
+    """One season's row of ``bootstrap_summary_table`` — see that function.
+
+    Per weighting scheme ``w`` (observed surface ``M`` (K, W), bootstrap
+    ``r2_boot`` (B, K, W)):
+
+      - ``peak_R2(w)``     = max over K of ``M[:, w]``
+      - ``argmax_K(w)``    = the K where that max sits (1-indexed)
+      - ``peak_CI(w)``     = the ``ci`` percentiles of ``max_K r2_boot[b, :, w]``
+      - ``K_CI(w)``        = the ``ci`` percentiles of the bootstrap ``argmax_K``
+        of that family — an integer interval (drawn as the horizontal error bar).
+
+    **Scale clusters** ``clusters``: families are grouped by the K they peak at,
+    NOT by R². Two families are linked iff each one's observed peak K falls
+    inside the OTHER's bootstrap K CI (symmetric mutual inclusion, on K); the
+    clusters are the connected components of that graph. So a family whose peak
+    K lies clearly outside the others' K CIs stays on its own — a response
+    mechanism in its own right — while a flat/unresolved season (every K CI
+    spans most of the axis) collapses to one cluster with a wide box. ``k_tol``
+    (default 0) pads every K CI by that many months before the test, for callers
+    who want to loosen the linkage.
+
+    Per cluster: ``K_cluster`` / ``R2_cluster`` = median over its families of
+    ``argmax_K`` / ``peak_R2`` (observed); the CIs are the ``ci`` percentiles of
+    the per-replica median of the same quantity over the cluster's families.
+    Clusters are returned sorted by ``K_cluster``, with no interpretive label —
+    the ``K_cluster_CI`` x ``R2_cluster_CI`` box is meant to speak for itself.
+    Each cluster also carries ``color`` — the hue (see ``WEIGHT_COLORS``) of its
+    leading scheme, i.e. the member with the highest observed peak R2 — so a
+    renderer can tint the box with that scheme's colour instead of a fixed one.
+    For a one-name handle on the cluster, ``ref_scheme`` / ``ref_K`` /
+    ``ref_K_CI`` / ``ref_R2`` / ``ref_R2_CI`` give a display reference: the
+    member whose observed peak K is closest to ``K_cluster`` (ties -> smaller
+    K), reported with THAT scheme's own peak K and R2. Purely cosmetic — the
+    SIDI uses each scheme's own K regardless.
+
+    **Level 2 - response sub-clusters** ``cluster["subclusters"]``: within a K
+    cluster that holds more than one family, the SAME mutual-inclusion rule is
+    re-applied on peak R2 (each family's observed peak R2 must sit inside the
+    other's bootstrap peak-R2 CI). So schemes that share a scale but reach
+    clearly different R2 split apart; schemes whose R2 CIs overlap stay merged.
+    Each entry is ``{"families", "R2", "R2_CI", "color"}``, sorted by decreasing
+    R2 (sub-cluster 1 = strongest). A single-family K cluster has one sub-cluster
+    equal to that family's own peak-R2 CI.
+    """
+    M = np.asarray(M, float)
+    boot = np.asarray(r2_boot, float)
+    n_w = M.shape[1] if M.ndim == 2 else len(weight_labels)
+    lo_p, hi_p = ci
+    empty = {"R2_peak": np.nan, "peak_scheme": None, "peak_CI": (np.nan, np.nan),
+             "w_best": None, "peak_by_family": {}, "clusters": []}
+    if boot.ndim != 3 or M.ndim != 2 or not np.isfinite(M).any():
+        return empty
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        # observed per-family peak R2 and the K it sits on (1-indexed)
+        fin_M = np.isfinite(M)
+        peak_R2 = np.nanmax(np.where(fin_M, M, -np.inf), axis=0)      # (W,)
+        peak_R2[~fin_M.any(axis=0)] = np.nan
+        argK = np.array([
+            (np.nanargmax(np.where(fin_M[:, w], M[:, w], -np.inf)) + 1
+             if fin_M[:, w].any() else np.nan)
+            for w in range(n_w)], float)
+
+        # bootstrap per-replica per-family peak R2 and its K
+        fin_b = np.isfinite(boot)
+        filled = np.where(fin_b, boot, -np.inf)
+        peak_boot = np.nanmax(np.where(fin_b, boot, np.nan), axis=1)  # (B, W)
+        B = boot.shape[0]
+        argK_boot = np.full((B, n_w), np.nan)
+        for w in range(n_w):
+            ok = fin_b[:, :, w].any(axis=1)
+            if ok.any():
+                argK_boot[ok, w] = np.nanargmax(filled[ok, :, w], axis=1) + 1
+
+    peak_CI = np.full((n_w, 2), np.nan)
+    for w in range(n_w):
+        col = peak_boot[np.isfinite(peak_boot[:, w]), w]
+        if col.size:
+            peak_CI[w] = np.percentile(col, [lo_p, hi_p])
+
+    if not np.isfinite(peak_R2).any():
+        return empty
+    w_best = int(np.nanargmax(peak_R2))
+
+    # per-family CI of the peak K: percentiles of the bootstrap argmax_K
+    K_CI = np.full((n_w, 2), np.nan)
+    for w in range(n_w):
+        col = argK_boot[np.isfinite(argK_boot[:, w]), w]
+        if col.size:
+            K_CI[w] = np.percentile(col, [lo_p, hi_p])
+
+    fam_ok = [w for w in range(n_w)
+              if np.isfinite(argK[w]) and np.isfinite(peak_R2[w])
+              and np.all(np.isfinite(K_CI[w]))]
+
+    # --- scale clusters: group families that peak at the SAME K ------------
+    # Two families share a cluster iff each one's observed peak K falls inside
+    # the OTHER's bootstrap K CI (symmetric mutual inclusion, on K - not R2).
+    # The clusters are the connected components of that graph. A family whose
+    # peak K sits clearly outside the others' K CIs stays on its own (a
+    # response mechanism in its own right); a flat/unresolved season, where
+    # every K CI spans most of the axis, gives one big cluster with a wide box.
+    # `k_tol` is a floor on that CI half-width, so two near-identical peaks with
+    # degenerate CIs still link.
+
+    def _linked(a, b):
+        (la, ha), (lb, hb) = K_CI[a], K_CI[b]
+        la, ha = la - k_tol, ha + k_tol
+        lb, hb = lb - k_tol, hb + k_tol
+        return (lb <= argK[a] <= hb) and (la <= argK[b] <= ha)
+
+    def _cluster_stats(members):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            mk = np.nanmedian(argK_boot[:, members], axis=1)
+            mr = np.nanmedian(peak_boot[:, members], axis=1)
+        mk, mr = mk[np.isfinite(mk)], mr[np.isfinite(mr)]
+        k_ci = ((int(np.floor(np.percentile(mk, lo_p))),
+                 int(np.ceil(np.percentile(mk, hi_p)))) if mk.size else (np.nan, np.nan))
+        r2_ci = (tuple(float(v) for v in np.percentile(mr, [lo_p, hi_p]))
+                 if mr.size else (np.nan, np.nan))
+        return k_ci, r2_ci
+
+    def _r2_ci(members):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            mr = np.nanmedian(peak_boot[:, members], axis=1)
+        mr = mr[np.isfinite(mr)]
+        return (tuple(float(v) for v in np.percentile(mr, [lo_p, hi_p]))
+                if mr.size else (np.nan, np.nan))
+
+    def _components(items, linked):
+        """Connected components of the graph on ``items`` with edge = ``linked``."""
+        out, remaining = [], set(items)
+        while remaining:
+            comp = {remaining.pop()}
+            frontier = list(comp)
+            while frontier:
+                a = frontier.pop()
+                for b in list(remaining):
+                    if linked(a, b):
+                        remaining.discard(b)
+                        comp.add(b)
+                        frontier.append(b)
+            out.append(sorted(comp))
+        return out
+
+    def _hue(members):
+        rep = members[int(np.argmax([peak_R2[w] for w in members]))]
+        return WEIGHT_COLORS[rep] if rep < len(WEIGHT_COLORS) else "#efe08c"
+
+    def _cluster_ref(members):
+        """Representative scheme for a K cluster, for display only: the member
+        whose observed peak K is closest to the cluster's MEDIAN peak K (ties ->
+        smaller K). No scheme is privileged - not even EW. The SIDI itself still
+        uses each scheme's own K; this is only a label."""
+        k_med = float(np.nanmedian([argK[w] for w in members]))
+        return min(members, key=lambda w: (abs(argK[w] - k_med), argK[w]))
+
+    def _r2_linked(a, b):
+        """Level 2: same mutual-inclusion rule, on peak R2 instead of peak K.
+        Two families in one K cluster stay together iff each one's observed peak
+        R2 falls inside the OTHER's bootstrap peak-R2 CI."""
+        (la, ha), (lb, hb) = peak_CI[a], peak_CI[b]
+        if not np.all(np.isfinite([la, ha, lb, hb])):
+            return False
+        return (lb <= peak_R2[a] <= hb) and (la <= peak_R2[b] <= ha)
+
+    def _subclusters(members):
+        """Split one K cluster into response (R2) sub-clusters. A single-family
+        K cluster yields one sub-cluster (its own peak-R2 CI). Sub-clusters are
+        sorted by decreasing R2, so sub-cluster 1 is always the strongest."""
+        comps = ([[m] for m in members] if len(members) == 1
+                 else _components(members, _r2_linked))
+        subs = []
+        for sub in comps:
+            subs.append({
+                "families": [weight_labels[w] for w in sub],
+                "R2": float(np.nanmedian([peak_R2[w] for w in sub])),
+                "R2_CI": _r2_ci(sub),
+                "color": _hue(sub),
+            })
+        subs.sort(key=lambda s: (-s["R2"] if np.isfinite(s["R2"]) else np.inf))
+        return subs
+
+    clusters = []
+    if fam_ok:
+        for members in _components(fam_ok, _linked):
+            k_ci, r2_ci = _cluster_stats(members)
+            rep = _cluster_ref(members)
+            clusters.append({
+                "families": [weight_labels[w] for w in members],
+                "K_cluster": float(np.nanmedian([argK[w] for w in members])),
+                "K_cluster_CI": k_ci,
+                "R2_cluster": float(np.nanmedian([peak_R2[w] for w in members])),
+                "R2_cluster_CI": r2_ci,
+                # display reference: the member whose peak K is nearest the
+                # cluster median (see _cluster_ref). Its OWN peak K / R2 (+ CIs),
+                # not the cluster medians.
+                "ref_scheme": weight_labels[rep],
+                "ref_K": int(argK[rep]),
+                "ref_K_CI": ((int(K_CI[rep, 0]), int(K_CI[rep, 1]))
+                             if np.all(np.isfinite(K_CI[rep])) else (np.nan, np.nan)),
+                "ref_R2": float(peak_R2[rep]),
+                "ref_R2_CI": (float(peak_CI[rep, 0]), float(peak_CI[rep, 1])),
+                # tint the box with the hue of the cluster's leading scheme (the
+                # member with the highest observed peak R2 - the curve that tops
+                # out highest in this K band)
+                "color": _hue(members),
+                # level-2 split: schemes that share this K but differ in R2
+                "subclusters": _subclusters(members),
+            })
+        clusters.sort(key=lambda c: c["K_cluster"])
+
+    peak_by_family = {
+        weight_labels[w]: {
+            "peak_R2": float(peak_R2[w]) if np.isfinite(peak_R2[w]) else np.nan,
+            "argmax_K": int(argK[w]) if np.isfinite(argK[w]) else None,
+            "peak_CI": (float(peak_CI[w, 0]), float(peak_CI[w, 1])),
+            "K_CI": ((int(K_CI[w, 0]), int(K_CI[w, 1]))
+                     if np.all(np.isfinite(K_CI[w])) else (np.nan, np.nan)),
+        } for w in range(n_w)}
+
+    return {
+        "R2_peak": float(peak_R2[w_best]),
+        "peak_scheme": weight_labels[w_best],
+        "peak_CI": (float(peak_CI[w_best, 0]), float(peak_CI[w_best, 1])),
+        "w_best": weight_labels[w_best],
+        "peak_by_family": peak_by_family,
+        "clusters": clusters,
+    }
+
+
+def bootstrap_summary_table(result, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS,
+                            as_frame=True):
+    """
+    One row per (season, K cluster, R² sub-cluster), from
+    ``analyze_correlation_seasonal(..., n_boot>0)`` (or a ``{"whole period":
+    {...}}`` wrapper for the non-seasonal case) — the paper table. Columns:
+
+    - ``season``
+    - ``cluster`` : ordinal (1, 2, ...) of the K cluster, by increasing ``K``.
+    - ``K`` [``K_CI``] : median of the K cluster's families' peak K, with its
+      bootstrap CI (integer interval). Repeated on each sub-cluster row.
+    - ``ref_scheme`` / ``ref_K`` / ``ref_R2`` : a one-name handle on the K
+      cluster — the member whose peak K is nearest the cluster median (ties ->
+      smaller K), with THAT scheme's own peak K and R². Cosmetic; the SIDI still
+      uses each scheme's own K. Repeated per row.
+    - ``sub-cluster`` : ordinal (1, 2, ...) of the R² sub-cluster within that K
+      cluster, by decreasing ``R2`` (so 1 is the strongest). A K cluster whose
+      families do not differ in R² has a single sub-cluster row.
+    - ``families`` : the weighting schemes in that R² sub-cluster.
+    - ``R2`` [``R2_CI``] : median of the sub-cluster's families' peak R², with its
+      bootstrap CI. Median, not max → no winner's curse.
+
+    ``as_frame=True`` returns a pandas DataFrame (falls back to a list of dicts).
+    """
+    def _fmt_ci(t, ints=False):
+        if not (np.isfinite(t[0]) and np.isfinite(t[1])):
+            return "-"
+        return f"[{int(t[0])}, {int(t[1])}]" if ints else f"[{t[0]:.3f}, {t[1]:.3f}]"
+
+    rows = []
+    for name, d in result.items():
+        if name == "summary" or not isinstance(d, dict) or "R2_matrix" not in d:
+            continue
+        boot = d.get("R2_boot")
+        if boot is None:
+            continue
+        s = d.get("summary") or _peak_summary(d["R2_matrix"], boot, ci, weight_labels)
+        for j, c in enumerate(s.get("clusters", []), start=1):
+            k_val = round(c["K_cluster"], 1) if np.isfinite(c["K_cluster"]) else np.nan
+            k_ci = _fmt_ci(c["K_cluster_CI"], ints=True)
+            subs = c.get("subclusters") or [{
+                "families": c["families"], "R2": c["R2_cluster"],
+                "R2_CI": c["R2_cluster_CI"]}]
+            ref_r2 = c.get("ref_R2", np.nan)
+            for si, sc in enumerate(subs, start=1):
+                rows.append({
+                    "season": name,
+                    "cluster": j,
+                    "K": k_val,
+                    "K_CI": k_ci,
+                    "ref_scheme": c.get("ref_scheme"),
+                    "ref_K": c.get("ref_K"),
+                    "ref_R2": round(ref_r2, 3) if np.isfinite(ref_r2) else np.nan,
+                    "sub-cluster": si,
+                    "families": ", ".join(sc["families"]),
+                    "R2": round(sc["R2"], 3) if np.isfinite(sc["R2"]) else np.nan,
+                    "R2_CI": _fmt_ci(sc["R2_CI"]),
+                })
+    if as_frame:
+        try:
+            import pandas as pd
+            return pd.DataFrame(rows) if rows else pd.DataFrame()
+        except Exception:
+            pass
+    return rows
+
+
+def _one_bootstrap_replica(P_yr, Q_yr, calcP, n_base_years, calcQ, n_base_years_Q,
+                           K, block_years, circular, seed, season_months=None):
+    """One year-aligned block-bootstrap replica of the R2(K, weight) surface.
+
+    `P_yr`, `Q_yr` are (n_years, 12): the overlap trimmed to whole years and
+    reshaped year-major, so a block is a set of rows. Returns (K, 5) when
+    `season_months` is None, else {name: (K, 5)}.
+    """
+    from drought_scan.core import BaseDroughtAnalysis   # lazy: avoid import cycle
+
+    rng = np.random.default_rng(seed)
+    n_years = P_yr.shape[0]
+    rows = _year_block_index(n_years, block_years, rng, circular)
+
+    P_b = P_yr[rows].reshape(-1)
+    Q_b = Q_yr[rows].reshape(-1)
+    T = P_b.size
+    months = (np.arange(T) % 12) + 1
+    years = _BOOT_BASE_YEAR + np.arange(T) // 12
+    m_cal_b = np.column_stack([months, years])
+
+    tb2P = _BOOT_BASE_YEAR + min(n_base_years, n_years) - 1
+    tb2Q = _BOOT_BASE_YEAR + min(n_base_years_Q, n_years) - 1
+    spi_P = _spi_set_from_series(P_b, m_cal_b, calcP, _BOOT_BASE_YEAR, tb2P, K)
+    sqi1 = _spi_set_from_series(Q_b, m_cal_b, calcQ, _BOOT_BASE_YEAR, tb2Q, 1)[0]
+
+    # NaN-mask the first (k-1) timesteps after every block join, per scale:
+    # SIDI(k, t) then survives only where scales 1..k are all clean at t.
+    L = block_years * 12
+    dist = _junction_distance(T, L)
+    for k in range(2, K + 1):
+        spi_P[k - 1, dist < (k - 1)] = np.nan
+
+    K_range = np.arange(1, K + 1)
+    if season_months is None:
+        return BaseDroughtAnalysis._r2_surface(spi_P, sqi1, K_range, min_valid=1)
+    out = {}
+    for name, mlist in season_months.items():
+        m = np.isin(months, mlist)
+        out[name] = BaseDroughtAnalysis._r2_surface(
+            spi_P[:, m], sqi1[m], K_range, min_valid=10)
+    return out
+
+
+def _bootstrap_r2(self_obj, streamflow, self_indices, streamflow_indices,
+                  n_boot, block_length, ci, circular, random_state, seasons=None):
+    """Run n_boot year-aligned block-bootstrap replicas of the full pipeline
+    and reduce to per-cell percentile bands.
+
+    Non-seasonal  -> (boot (B,K,5), ci (2,K,5), meta).
+    seasons given -> ({season: boot}, {season: ci}, meta).
+    """
+    from joblib import Parallel, delayed, cpu_count
+
+    m_cal_ov = self_obj.m_cal[self_indices]
+    P_ov = np.asarray(self_obj.ts, float)[self_indices]
+    Q_ov = np.asarray(streamflow.ts, float)[streamflow_indices]
+
+    # trim the overlap to whole years starting in January
+    jan = np.where(m_cal_ov[:, 0].astype(int) == 1)[0]
+    if jan.size == 0:
+        raise ValueError("block bootstrap needs at least one January in the overlap.")
+    j0 = int(jan[0])
+    n_years = (len(P_ov) - j0) // 12
+    if n_years < 4:
+        raise ValueError(f"block bootstrap needs >= 4 whole overlap years, got {n_years}.")
+    end = j0 + 12 * n_years
+    P_yr = P_ov[j0:end].reshape(n_years, 12)
+    Q_yr = Q_ov[j0:end].reshape(n_years, 12)
+    T = n_years * 12
+
+    L = int(block_length) if block_length else max(24, 2 * self_obj.K)
+    L = min(_round_to_year(L), 12 * n_years)
+    block_years = L // 12
+
+    n_base_years = self_obj.end_baseline_year - self_obj.start_baseline_year + 1
+    n_base_years_Q = streamflow.end_baseline_year - streamflow.start_baseline_year + 1
+
+    rng = np.random.default_rng(random_state)
+    seeds = rng.integers(0, 2 ** 32 - 1, size=int(n_boot))
+    season_months = dict(seasons) if seasons is not None else None
+
+    # Cap the pool well below n_jobs=-1: every loky worker re-imports the whole
+    # drought_scan.core stack (geopandas/xarray/netCDF4/matplotlib), ~0.3-0.5 GB
+    # resident each, so one-process-per-core saturates RAM before any replica
+    # runs. Half the cores, at most 4, is enough for a job this short-lived.
+    n_jobs = max(1, min(4, cpu_count() // 2))
+
+    print(f"  block bootstrap: B={n_boot}, L={L} months ({block_years}y) "
+          f"{'circular' if circular else 'moving'} blocks over {n_years} overlap years "
+          f"(rebuilds the full SPI pipeline {n_boot}x on {n_jobs} workers)...")
+
+    # Drop any open pyplot figures before forking: each worker would otherwise
+    # inherit a copy of the figure manager (mirrors compute_spatial_sidi /
+    # spatial_spi in core.py).
+    import matplotlib.pyplot as plt
+    plt.close("all")
+
+    # Context manager so the loky pool is torn down on exit instead of lingering
+    # for its default 5-minute idle timeout (which is what makes a second call
+    # spike memory again).
+    with Parallel(n_jobs=n_jobs) as parallel:
+        reps = parallel(
+            delayed(_one_bootstrap_replica)(
+                P_yr, Q_yr, self_obj.calculation_method, n_base_years,
+                streamflow.calculation_method, n_base_years_Q,
+                self_obj.K, block_years, circular, int(s), season_months)
+            for s in seeds
+        )
+
+    contam = _contamination_fraction(T, L, self_obj.K)
+    meta = {
+        "n_boot": int(n_boot), "block_length": int(L), "block_years": int(block_years),
+        "circular": bool(circular), "ci": tuple(ci),
+        "n_blocks": int(np.ceil(n_years / block_years)),
+        "overlap_years": int(n_years), "overlap_length": int(T),
+        "contaminated_fraction": contam,
+        "eff_n_per_scale": np.rint(T * (1.0 - contam)).astype(int),
+    }
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")          # All-NaN slices -> NaN CI, expected
+        if seasons is None:
+            boot = np.stack(reps)
+            return boot, np.nanpercentile(boot, list(ci), axis=0), meta
+        boot_by_season, ci_by_season = {}, {}
+        for name in seasons:
+            stack = np.stack([r[name] for r in reps])
+            boot_by_season[name] = stack
+            ci_by_season[name] = np.nanpercentile(stack, list(ci), axis=0)
+        return boot_by_season, ci_by_season, meta
+
+
+def _print_summary_table(summary):
+    """Pretty-print the cluster table (DataFrame or list of dicts)."""
+    print("\n  --- bootstrap clusters (one row per season x K cluster x R2 sub-cluster) ---")
+    rows = summary if not hasattr(summary, "to_string") else None
+    if rows is None:
+        print(summary.to_string())
+        rows = summary.to_dict("records")
+    else:
+        for row in rows:
+            print("   " + "  ".join(f"{k}={v}" for k, v in row.items()))
+    _print_cluster_refs(rows)
+
+
+def _print_cluster_refs(rows):
+    """One line per K cluster: its display reference scheme (EW if in the
+    cluster, else the member whose peak K is nearest the cluster median; ties
+    -> smaller K), with that scheme's own K and peak R2, and the cluster
+    median K in parentheses as a reminder of how the reference was picked."""
+    if not rows or "ref_scheme" not in rows[0]:
+        return
+    print("\n  cluster reference (member whose peak K is nearest the cluster median K):")
+    seen = set()
+    for r in rows:
+        key = (r.get("season"), r.get("cluster"))
+        if key in seen:
+            continue
+        seen.add(key)
+        ref_r2 = r.get("ref_R2")
+        r2s = f", R2={ref_r2:.3f}" if isinstance(ref_r2, (int, float)) and np.isfinite(ref_r2) else ""
+        print(f"    {str(r.get('season')):<10} cluster {r.get('cluster')}:  "
+              f"ref = {r.get('ref_scheme')} (K={r.get('ref_K')}{r2s})"
+              f"   (cluster median K = {r.get('K')})")

@@ -829,3 +829,247 @@ def test_resolve_per_weight_k_validation():
         BaseDroughtAnalysis._resolve_per_weight_K(99, n_scales=12)          # beyond scales
 
     assert list(BaseDroughtAnalysis._resolve_per_weight_K(4, n_scales=12)) == [4] * 5
+def _corr_pair(method=None, seed_a=2, seed_b=9):
+    """A driver/target pair wired so analyze_correlation is callable on the
+    bare synthetic DSO (Precipitation-only guard lifted)."""
+    from drought_scan.utils.drought_indices import f_spi
+    method = method or f_spi
+    driver = _build_synthetic_dso(method, seed=seed_a)
+    target = _build_synthetic_dso(method, seed=seed_b)
+    driver.__class__ = type("_Driver", (driver.__class__,), {})
+    driver._EXCLUDED_FROM_CORRELATION = ()
+    driver._EXCLUDED_FROM_SIDI_OPTIMIZATION = ()
+    return driver, target
+
+
+def test_analyze_correlation_bootstrap_is_opt_in():
+    """n_boot=0 (default) leaves the return value exactly as before; n_boot>0
+    adds MatCorr_boot / MatCorr_ci / boot_meta / summary and nothing else."""
+    driver, target = _corr_pair()
+
+    base = driver.analyze_correlation(target, plot=False)
+    assert not any(k in base for k in ("MatCorr_boot", "MatCorr_ci", "boot_meta", "summary"))
+
+    res = driver.analyze_correlation(target, plot=False, n_boot=12, random_state=0)
+    K = driver.K
+    assert res["MatCorr_boot"].shape == (12, K, 5)
+    assert res["MatCorr_ci"].shape == (2, K, 5)
+    # the point estimate is untouched and sits inside its own band (allowing the
+    # percentile band to be degenerate at tiny B)
+    lo, hi = res["MatCorr_ci"]
+    inside = (res["MatCorr"] >= lo - 1e-9) & (res["MatCorr"] <= hi + 1e-9)
+    assert np.mean(inside[np.isfinite(res["MatCorr"])]) > 0.5
+
+    bm = res["boot_meta"]
+    for key in ("block_length", "block_years", "n_blocks", "contaminated_fraction",
+                "eff_n_per_scale", "overlap_years"):
+        assert key in bm
+    assert bm["contaminated_fraction"][0] == 0.0            # scale 1 never crosses a join
+    assert np.all(np.diff(bm["contaminated_fraction"]) >= -1e-12)   # non-decreasing in K
+
+
+def test_analyze_correlation_seasonal_bootstrap():
+    """Each scored season gains R2_boot / R2_ci / summary; one replica set is
+    built on the continuous overlap and sliced per season."""
+    driver, target = _corr_pair()
+    S = driver.analyze_correlation_seasonal(target, agg="quarter", plot=False,
+                                            n_boot=12, random_state=1)
+    K = driver.K
+    seasons = [k for k in S if k != "summary"]
+    assert len(seasons) >= 1
+    for name in seasons:
+        d = S[name]
+        assert d["R2_boot"].shape == (12, K, 5)
+        assert d["R2_ci"].shape == (2, K, 5)
+        assert "summary" in d
+        assert d["boot_meta"]["n_boot"] == 12
+
+
+def test_set_optimal_SIDI_seasonal_ignores_the_top_level_summary_key():
+    """analyze_correlation_seasonal(n_boot>0) adds a top-level 'summary'
+    DataFrame next to the season dicts. set_optimal_SIDI_seasonal (via
+    recalculate_SIDI_seasonal_all_schemes) must skip it, not treat it as a
+    malformed season."""
+    driver, target = _corr_pair()
+    seasons = {"H1": [1, 2, 3, 4, 5, 6], "H2": [7, 8, 9, 10, 11, 12]}
+    S = driver.analyze_correlation_seasonal(target, seasons=seasons, plot=False,
+                                            n_boot=8, random_state=1)
+    assert "summary" in S                       # the offending key is present
+    driver.set_optimal_SIDI_seasonal(S, seasons=seasons, overwrite=True)
+    assert driver.SIDI.shape == (len(driver.m_cal), 5)
+
+
+def test_year_block_index_is_year_aligned():
+    """The bootstrap resamples whole overlap YEARS (rows), so f_spi/f_kde still
+    see a gap-free calendar. The index has one entry per year, all in range."""
+    from drought_scan.utils.statistics import _year_block_index
+
+    rng = np.random.default_rng(0)
+    for circular in (True, False):
+        idx = _year_block_index(30, block_years=4, rng=rng, circular=circular)
+        assert idx.shape == (30,)
+        assert idx.min() >= 0 and idx.max() < 30
+
+
+def test_contamination_fraction_grows_with_k():
+    """f(k) = share of timesteps whose k-month accumulation straddles a block
+    join. Zero at k=1, monotone up, and matching ceil(n_blocks)*(k-1)/T."""
+    from drought_scan.utils.statistics import _contamination_fraction
+
+    T, L, K = 12 * 30, 48, 24
+    cf = _contamination_fraction(T, L, K)
+    assert cf[0] == 0.0
+    assert np.all(np.diff(cf) >= 0)
+    n_blocks = int(np.ceil(T / L))
+    assert np.isclose(cf[-1], n_blocks * (K - 1) / T, atol=1e-6)
+
+
+def test_bootstrap_summary_table_is_a_per_cluster_table():
+    """analyze_correlation_seasonal(n_boot>0) attaches a per-season 'summary'
+    dict (with scale clusters) and an overall table, one row per (season,
+    cluster)."""
+    driver, target = _corr_pair()
+    S = driver.analyze_correlation_seasonal(target, agg="quarter", plot=False,
+                                            n_boot=16, random_state=2)
+    assert "summary" in S                                   # overall table
+    seasons = [k for k in S if k != "summary"]
+    for name in seasons:
+        s = S[name]["summary"]
+        assert set(s) >= {"w_best", "peak_by_family", "clusters"}
+        assert set(s["peak_by_family"]) == {"EW", "Lin. DW", "Log. DW",
+                                            "Lin. IW", "Log. IW"}
+        # every family lands in >= 1 cluster; clusters carry their pieces
+        covered = set()
+        for c in s["clusters"]:
+            assert set(c) == {"families", "K_cluster", "K_cluster_CI",
+                              "R2_cluster", "R2_cluster_CI", "color", "subclusters",
+                              "ref_scheme", "ref_K", "ref_K_CI", "ref_R2", "ref_R2_CI"}
+            assert isinstance(c["color"], str) and c["color"].startswith("#")
+            # cosmetic reference: the member whose peak K is nearest the cluster
+            # median (ties -> smaller K); no scheme is privileged
+            assert c["ref_scheme"] in c["families"]
+            klo, khi = c["K_cluster_CI"]
+            assert klo <= khi
+            covered |= set(c["families"])
+            # level 2: sub-clusters partition the K cluster's families, sorted by
+            # decreasing R2
+            sub_fams = []
+            for sc in c["subclusters"]:
+                assert set(sc) == {"families", "R2", "R2_CI", "color"}
+                sub_fams += sc["families"]
+            assert sorted(sub_fams) == sorted(c["families"])
+            r2s = [sc["R2"] for sc in c["subclusters"]]
+            assert r2s == sorted(r2s, reverse=True)
+        assert covered == set(s["peak_by_family"])
+        # per-family K CI is present too
+        for fam in s["peak_by_family"].values():
+            assert "K_CI" in fam
+
+    tab = S["summary"]
+    if hasattr(tab, "columns"):        # pandas available
+        assert list(tab.columns) == ["season", "cluster", "K", "K_CI",
+                                     "ref_scheme", "ref_K", "ref_R2",
+                                     "sub-cluster", "families", "R2", "R2_CI"]
+        assert set(tab["season"]) == set(seasons)
+
+
+def test_peak_summary_scale_clusters_group_by_k_not_r2():
+    """Families group by the K they peak at (mutual K-CI inclusion), not by R².
+    A scheme whose peak K sits clearly outside the others' K CIs is its own
+    cluster; the cluster's K / R2 are medians over its families."""
+    from drought_scan.utils.statistics import _peak_summary
+
+    rng = np.random.default_rng(0)
+    K, W, B = 30, 5, 600
+    k = np.arange(1, K + 1)[:, None]
+    surf = np.zeros((K, W))
+    # tight pair at K~5, a lone scheme at K~13, a pair at K~22
+    surf[:, 3] = 0.77 * np.exp(-((k[:, 0] - 5.0) ** 2) / 25.0)
+    surf[:, 4] = 0.76 * np.exp(-((k[:, 0] - 5.0) ** 2) / 25.0)
+    surf[:, 0] = 0.80 * np.exp(-((k[:, 0] - 13.0) ** 2) / 40.0)     # lone, mid-K
+    surf[:, 1] = 0.81 * np.exp(-((k[:, 0] - 22.0) ** 2) / 45.0)
+    surf[:, 2] = 0.82 * np.exp(-((k[:, 0] - 22.0) ** 2) / 45.0)     # global best R2
+
+    boot = surf[None] * rng.normal(1.0, 0.02, (B, 1, 1)) + rng.normal(0, 0.003, (B, K, W))
+    s = _peak_summary(surf, boot)                              # default k_tol=0
+
+    fams = [set(c["families"]) for c in s["clusters"]]
+    assert {"Lin. IW", "Log. IW"} in fams
+    assert {"EW"} in fams                                       # the mid-K scheme, alone
+    assert {"Lin. DW", "Log. DW"} in fams
+    assert [c["K_cluster"] for c in s["clusters"]] == sorted(
+        c["K_cluster"] for c in s["clusters"])                  # returned in K order
+    lone = next(c for c in s["clusters"] if c["families"] == ["EW"])
+    assert np.isclose(lone["K_cluster"], s["peak_by_family"]["EW"]["argmax_K"])
+
+
+def test_peak_summary_flat_season_collapses_to_one_wide_cluster():
+    """A near-flat surface has no real timescale: every family's peak K wanders
+    over the whole axis, K CIs overlap, and the scattered clusters merge into a
+    single cluster with a K CI that spans most of the range."""
+    from drought_scan.utils.statistics import _peak_summary
+
+    rng = np.random.default_rng(2)
+    K, W, B = 36, 5, 500
+    surf = np.full((K, W), 0.6) + rng.normal(0, 0.02, (K, W))
+    boot = surf[None] + rng.normal(0, 0.07, (B, K, W))
+    s = _peak_summary(surf, boot, k_tol=3)
+
+    assert len(s["clusters"]) == 1
+    c = s["clusters"][0]
+    assert set(c["families"]) == {"EW", "Lin. DW", "Log. DW", "Lin. IW", "Log. IW"}
+    klo, khi = c["K_cluster_CI"]
+    assert (khi - klo) >= K / 2
+
+
+def test_analyze_correlation_summary_has_cluster_columns():
+    driver, target = _corr_pair()
+    res = driver.analyze_correlation(target, plot=False, n_boot=16, random_state=3)
+    tab = res["summary"]
+    if hasattr(tab, "columns"):
+        assert {"cluster", "K_CI", "sub-cluster", "R2_CI"} <= set(tab.columns)
+        assert set(tab["season"]) == {"whole period"}
+
+
+def test_peak_summary_r2_subclusters_split_same_K_by_response():
+    """Level 2: two families that peak at the SAME K but reach clearly separated
+    R² split into two sub-clusters; two families at the same K with overlapping
+    R² CIs stay one sub-cluster; a lone family has a single sub-cluster."""
+    from drought_scan.utils.statistics import _peak_summary
+
+    rng = np.random.default_rng(0)
+    K, W, B = 30, 5, 800
+    k = np.arange(1, K + 1, dtype=float)
+
+    def bump(center, amp, width):
+        return amp * np.exp(-((k - center) ** 2) / width)
+
+    surf = np.zeros((K, W))
+    # K cluster A at K~6: two families, R² 0.75 vs 0.55 -> must split
+    surf[:, 3] = bump(6.0, 0.75, 25.0)
+    surf[:, 4] = bump(6.0, 0.55, 25.0)
+    # K cluster B at K~20: two families, R² ~equal -> stay merged
+    surf[:, 1] = bump(20.0, 0.700, 45.0)
+    surf[:, 2] = bump(20.0, 0.695, 45.0)
+    # lone family at K~13
+    surf[:, 0] = bump(13.0, 0.60, 40.0)
+
+    # tight replica-level noise: peak-R² CIs ~±0.02, far under the 0.20 gap in A
+    boot = surf[None] * rng.normal(1.0, 0.012, (B, 1, 1)) \
+        + rng.normal(0.0, 0.002, (B, K, W))
+    s = _peak_summary(surf, boot)
+
+    by_fam = {frozenset(c["families"]): c for c in s["clusters"]}
+    cA = by_fam[frozenset({"Lin. IW", "Log. IW"})]
+    assert len(cA["subclusters"]) == 2
+    assert cA["subclusters"][0]["R2"] > cA["subclusters"][1]["R2"]
+    assert [set(sc["families"]) for sc in cA["subclusters"]] == \
+        [{"Lin. IW"}, {"Log. IW"}]
+
+    cB = by_fam[frozenset({"Lin. DW", "Log. DW"})]
+    assert len(cB["subclusters"]) == 1
+    assert set(cB["subclusters"][0]["families"]) == {"Lin. DW", "Log. DW"}
+
+    cLone = by_fam[frozenset({"EW"})]
+    assert len(cLone["subclusters"]) == 1
+    assert cLone["subclusters"][0]["families"] == ["EW"]
