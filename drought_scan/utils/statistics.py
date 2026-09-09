@@ -1745,10 +1745,16 @@ def _peak_summary(M, r2_boot, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS, k_tol
         return WEIGHT_COLORS[rep] if rep < len(WEIGHT_COLORS) else "#efe08c"
 
     def _cluster_ref(members):
-        """Representative scheme for a K cluster, for display only: the member
-        whose observed peak K is closest to the cluster's MEDIAN peak K (ties ->
-        smaller K). No scheme is privileged - not even EW. The SIDI itself still
-        uses each scheme's own K; this is only a label."""
+        """Representative scheme for a K cluster, for display only. No scheme is
+        privileged - not even EW. The SIDI itself still uses each scheme's own K;
+        this is only a label.
+          - <= 2 members: the one with the SHORTER peak K (nearest-to-median is
+            a tie with only two, and the shorter memory is the conservative
+            reading - it already captures the shared signal).
+          - > 2 members: the member whose peak K is closest to the cluster's
+            MEDIAN peak K (ties -> shorter K)."""
+        if len(members) <= 2:
+            return min(members, key=lambda w: argK[w])
         k_med = float(np.nanmedian([argK[w] for w in members]))
         return min(members, key=lambda w: (abs(argK[w] - k_med), argK[w]))
 
@@ -1789,9 +1795,8 @@ def _peak_summary(M, r2_boot, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS, k_tol
                 "K_cluster_CI": k_ci,
                 "R2_cluster": float(np.nanmedian([peak_R2[w] for w in members])),
                 "R2_cluster_CI": r2_ci,
-                # display reference: the member whose peak K is nearest the
-                # cluster median (see _cluster_ref). Its OWN peak K / R2 (+ CIs),
-                # not the cluster medians.
+                # display reference (see _cluster_ref for the rule). Its OWN peak
+                # K / R2 (+ CIs), not the cluster medians.
                 "ref_scheme": weight_labels[rep],
                 "ref_K": int(argK[rep]),
                 "ref_K_CI": ((int(K_CI[rep, 0]), int(K_CI[rep, 1]))
@@ -1838,9 +1843,10 @@ def bootstrap_summary_table(result, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS,
     - ``K`` [``K_CI``] : median of the K cluster's families' peak K, with its
       bootstrap CI (integer interval). Repeated on each sub-cluster row.
     - ``ref_scheme`` / ``ref_K`` / ``ref_R2`` : a one-name handle on the K
-      cluster — the member whose peak K is nearest the cluster median (ties ->
-      smaller K), with THAT scheme's own peak K and R². Cosmetic; the SIDI still
-      uses each scheme's own K. Repeated per row.
+      cluster — for a 2-scheme cluster the member with the shorter peak K, for a
+      larger cluster the member whose peak K is nearest the cluster median (ties
+      -> shorter K), with THAT scheme's own peak K and R². Cosmetic; the SIDI
+      still uses each scheme's own K. Repeated per row.
     - ``sub-cluster`` : ordinal (1, 2, ...) of the R² sub-cluster within that K
       cluster, by decreasing ``R2`` (so 1 is the strongest). A K cluster whose
       families do not differ in R² has a single sub-cluster row.
@@ -2040,13 +2046,13 @@ def _print_summary_table(summary):
 
 
 def _print_cluster_refs(rows):
-    """One line per K cluster: its display reference scheme (EW if in the
-    cluster, else the member whose peak K is nearest the cluster median; ties
-    -> smaller K), with that scheme's own K and peak R2, and the cluster
-    median K in parentheses as a reminder of how the reference was picked."""
+    """One line per K cluster: its display reference scheme (2 schemes -> the
+    shorter peak K; more -> the member whose peak K is nearest the cluster
+    median, ties -> shorter K), with that scheme's own K and peak R2, and the
+    cluster median K in parentheses as a reminder of how it was picked."""
     if not rows or "ref_scheme" not in rows[0]:
         return
-    print("\n  cluster reference (member whose peak K is nearest the cluster median K):")
+    print("\n  cluster reference (2 schemes -> shorter K; more -> nearest the cluster median K):")
     seen = set()
     for r in rows:
         key = (r.get("season"), r.get("cluster"))
