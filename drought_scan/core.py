@@ -2260,6 +2260,63 @@ class BaseDroughtAnalysis:
 
         return R2, suggested_seasons
 
+    def spi_sqi_corr_curves(self, streamflow, ax=None):
+        """
+        Line-plot companion to ``spi_sqi_corr``: one curve per calendar month
+        of R²(SQI1, self.index_name at scale k), k = 1…K, instead of a single
+        contourf heatmap of the same R2(month, k) matrix.
+
+        Reuses ``spi_sqi_corr(streamflow, plot=False)`` for the computation
+        (same Pearson R², same p<0.05 significance gate — a non-significant
+        cell is 0), so the two are always in sync; this method only changes
+        how it is drawn: 12 curves of R² vs scale, easier to read than the
+        heatmap when the smooth progression across scales matters more than
+        the month-vs-scale surface at a glance.
+
+        Applicable to: Precipitation, Pet, Balance.
+
+        Parameters
+        ----------
+        streamflow : BaseDroughtAnalysis
+            Object carrying streamflow-based SPI-like indices
+            (``spi_like_set[0]`` = SQI1).
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw into. A new figure/axes is created if None.
+
+        Returns
+        -------
+        R2 : ndarray, shape (12, K)
+            Same as ``spi_sqi_corr``'s first return value (rows = calendar
+            months Jan=0…Dec=11, columns = scales k=1…K).
+        """
+        import calendar
+
+        R2, _ = self.spi_sqi_corr(streamflow, plot=False)
+        K_range = np.arange(1, self.K + 1)
+        months = list(calendar.month_abbr[1:])   # Jan..Dec
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(9, 5))
+        else:
+            fig = ax.figure
+
+        colors = plt.cm.hsv(np.linspace(0, 1, 12, endpoint=False))
+        for m in range(12):
+            ax.plot(K_range, R2[m, :], marker='o', ms=3, lw=1.5,
+                    color=colors[m], label=months[m])
+
+        ax.set_xticks(K_range)
+        ax.set_xticklabels([f"{self.index_name}{k}" for k in K_range], rotation=90)
+        ax.set_ylabel(r"$R^2$", fontweight="bold")
+        ax.set_title(f"{self.basin_name} — {self.index_name}$_k$ vs "
+                     f"{streamflow.index_name}$_1$  ($R^2$ by calendar month)",
+                     fontsize=12, fontweight='bold')
+        ax.grid(alpha=0.3)
+        ax.legend(ncol=3, fontsize=8)
+        fig.tight_layout()
+
+        return R2
+
     # =====================================================================
     # =====================================================================
     # BENCHMARKING D(SPI) | SIDI
