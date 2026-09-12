@@ -26,6 +26,7 @@ Used by: ``core.py``.
 import numpy as np
 from scipy.stats import gamma, pearson3, norm, gaussian_kde
 import warnings
+import matplotlib.pyplot as plt
 
 # Tail clip applied to cumulative probabilities before the normal-score transform.
 # Caps the index at about +/-4 sigma, so a value beyond anything the baseline
@@ -90,6 +91,76 @@ def generate_weights(k):
         linear_weights / np.sum(linear_weights),              # Linear
         geom_weights / np.sum(geom_weights),                  # Geometric
     ]).T
+
+
+def effective_month_weights(K=36, plot=True, ax=None):
+    """
+    Real per-calendar-month weight of D(SPI) for a fixed K, once SPI_1..SPI_K
+    are expanded back into their own raw K-month accumulation windows.
+
+    D(SPI)(t) = sum_k w_k * SPI_k(t), and SPI_k(t) is itself built from a
+    k-month window P(t), P(t-1), ..., P(t-k+1). So month-lag j (0 = current
+    month, j=1 = last month, ..., j=K-1 = the oldest one in the window)
+    enters SPI_k for every k >= j+1, weighted there by w_k. Summing over
+    those k gives the "real"/effective weight of lag j across the whole
+    D(SPI) computation:
+
+        W_eff(j) = sum_{k=j+1}^{K} w_k          j = 0, ..., K-1
+
+    i.e. the reverse cumulative sum of generate_weights(K). W_eff(0) =
+    sum_k w_k = 1 for every scheme (the current month always belongs to
+    every window, from SPI_1 to SPI_K); what differs between schemes is how
+    fast W_eff decays for j>0 - DW schemes (weight concentrated on short
+    scales) decay fast, IW schemes (weight concentrated on long scales) stay
+    high for most of the window and only fall off near j=K-1.
+
+    Note: W_eff can never INCREASE with lag, for any non-negative weight
+    vector - W_eff(j) - W_eff(j+1) = w_{j+1} >= 0 always, because a month
+    further back is only ever a subset of the scales that include a more
+    recent one. The flattest possible profile (W_eff(j)=1 for every j) is
+    the limiting case of putting all the weight on the single longest scale
+    (w_K=1); there is no way to get a genuinely increasing-with-lag kernel
+    out of a weighted sum of nested SPI_k windows - that needs a kernel
+    built directly on raw months instead (see benchmark_nash /
+    benchmark_ihacres / benchmark_convolution's h(j)).
+
+    Args:
+        K (int, optional): number of scales / months of memory. Default 36
+            (the library's usual scale for whole-basin figures).
+        plot (bool, optional): if True (default), draw W_eff(lag) for the 5
+            weighting schemes on `ax` (or a new figure/axes if `ax` is None).
+        ax (matplotlib.axes.Axes, optional): axes to draw into. Only used
+            when plot=True.
+
+    Returns:
+        ndarray, shape (K, 5): W_eff per lag (rows, 0 = current month) and
+        weighting scheme (columns, generate_weights/WEIGHT_LABELS order).
+    """
+    # Lazy import: statistics.py imports FROM this module at the top level,
+    # so importing it back here would be circular - see generate_weights'
+    # callers in statistics.py for the same pattern.
+    from drought_scan.utils.statistics import WEIGHT_LABELS, WEIGHT_COLORS
+
+    W = generate_weights(K)                     # (K, 5): w_k per scale k=1..K
+    W_eff = np.cumsum(W[::-1], axis=0)[::-1]     # (K, 5): reverse cumsum
+
+    if plot:
+        lag = np.arange(K)
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(7, 4.5))
+        else:
+            fig = ax.figure
+        for i, lab in enumerate(WEIGHT_LABELS):
+            ax.plot(lag, W_eff[:, i], marker='o', ms=4, lw=2,
+                    color=WEIGHT_COLORS[i], label=lab)
+        ax.set_xlabel('lag (months back from current)')
+        ax.set_ylabel('effective weight  W_eff(lag)')
+        ax.set_title(f'Real per-month weight in D(SPI), K={K}')
+        ax.grid(alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+
+    return W_eff
 
 
 # ===================================================================
