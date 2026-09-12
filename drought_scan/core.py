@@ -2285,13 +2285,15 @@ class BaseDroughtAnalysis:
 
         Returns
         -------
-        R2 : ndarray, shape (12, K)
-            Same as ``spi_sqi_corr``'s first return value (rows = calendar
-            months Jan=0…Dec=11, columns = scales k=1…K).
+        R2 : dict[int, ndarray]
+            Keyed by calendar month (1=Jan, ..., 12=Dec) - the m_cal month
+            convention used throughout the library. Each value is the R² vs
+            scale curve for that month, shape (K,), same numbers as row
+            ``m - 1`` of ``spi_sqi_corr``'s R2 matrix.
         """
         import calendar
 
-        R2, _ = self.spi_sqi_corr(streamflow, plot=False)
+        R2_mat, _ = self.spi_sqi_corr(streamflow, plot=False)
         K_range = np.arange(1, self.K + 1)
         months = list(calendar.month_abbr[1:])   # Jan..Dec
 
@@ -2302,7 +2304,7 @@ class BaseDroughtAnalysis:
 
         colors = plt.cm.hsv(np.linspace(0, 1, 12, endpoint=False))
         for m in range(12):
-            ax.plot(K_range, R2[m, :], marker='o', ms=3, lw=1.5,
+            ax.plot(K_range, R2_mat[m, :], marker='o', ms=3, lw=1.5,
                     color=colors[m], label=months[m])
 
         ax.set_xticks(K_range)
@@ -2315,7 +2317,9 @@ class BaseDroughtAnalysis:
         ax.legend(ncol=3, fontsize=8)
         fig.tight_layout()
 
-        return R2
+        # 1-indexed by calendar month (m_cal convention), not the 0-based
+        # row index of the R2 matrix.
+        return {m: R2_mat[m - 1, :] for m in range(1, 13)}
 
     # =====================================================================
     # =====================================================================
