@@ -1590,6 +1590,13 @@ WEIGHT_LABELS = ("EW", "Lin. DW", "Log. DW", "Lin. IW", "Log. IW")
 # lavender.
 WEIGHT_COLORS = ("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd")
 
+# Short lowercase handles, WEIGHT_LABELS order, for the cluster-reference print
+# only (_print_cluster_refs) - everywhere else (families column, legends,
+# plots) keeps the full WEIGHT_LABELS names. "Log. DW"/"Log. IW" are
+# geometric weighting under the hood (see generate_weights), hence
+# "geodw"/"geoiw" here rather than "logdw"/"logiw".
+_WEIGHT_ABBR = dict(zip(WEIGHT_LABELS, ("ew", "ldw", "geodw", "liw", "geoiw")))
+
 
 def _peak_summary(M, r2_boot, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS, k_tol=0):
     """One season's row of ``bootstrap_summary_table`` — see that function.
@@ -1841,18 +1848,23 @@ def bootstrap_summary_table(result, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS,
     - ``season``
     - ``cluster`` : ordinal (1, 2, ...) of the K cluster, by increasing ``K``.
     - ``K`` [``K_CI``] : median of the K cluster's families' peak K, with its
-      bootstrap CI (integer interval). Repeated on each sub-cluster row.
-    - ``ref_scheme`` / ``ref_K`` / ``ref_R2`` : a one-name handle on the K
-      cluster — for a 2-scheme cluster the member with the shorter peak K, for a
-      larger cluster the member whose peak K is nearest the cluster median (ties
-      -> shorter K), with THAT scheme's own peak K and R². Cosmetic; the SIDI
-      still uses each scheme's own K. Repeated per row.
+      bootstrap CI (integer interval) — the K-extent of the box drawn for this
+      cluster in the response-surface figure (Fig. 3). Repeated on each
+      sub-cluster row.
+    - ``ref_scheme`` [``ref_K`` / ``ref_K_CI``] [``ref_R2`` / ``ref_R2_CI``] :
+      a one-name handle on the K cluster — for a 2-scheme cluster the member
+      with the shorter peak K, for a larger cluster the member whose peak K is
+      nearest the cluster median (ties -> shorter K) — with THAT scheme's own
+      peak K and R², each with its own bootstrap CI (not the cluster/box
+      values above). Cosmetic; the SIDI still uses each scheme's own K.
+      Repeated per row.
     - ``sub-cluster`` : ordinal (1, 2, ...) of the R² sub-cluster within that K
       cluster, by decreasing ``R2`` (so 1 is the strongest). A K cluster whose
       families do not differ in R² has a single sub-cluster row.
     - ``families`` : the weighting schemes in that R² sub-cluster.
-    - ``R2`` [``R2_CI``] : median of the sub-cluster's families' peak R², with its
-      bootstrap CI. Median, not max → no winner's curse.
+    - ``R2`` [``R2_CI``] : median of the sub-cluster's families' peak R², with
+      its bootstrap CI — the R²-extent of that sub-cluster's box in Fig. 3.
+      Median, not max → no winner's curse.
 
     ``as_frame=True`` returns a pandas DataFrame (falls back to a list of dicts).
     """
@@ -1876,6 +1888,8 @@ def bootstrap_summary_table(result, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS,
                 "families": c["families"], "R2": c["R2_cluster"],
                 "R2_CI": c["R2_cluster_CI"]}]
             ref_r2 = c.get("ref_R2", np.nan)
+            ref_k_ci = _fmt_ci(c.get("ref_K_CI", (np.nan, np.nan)), ints=True)
+            ref_r2_ci = _fmt_ci(c.get("ref_R2_CI", (np.nan, np.nan)))
             for si, sc in enumerate(subs, start=1):
                 rows.append({
                     "season": name,
@@ -1884,7 +1898,9 @@ def bootstrap_summary_table(result, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS,
                     "K_CI": k_ci,
                     "ref_scheme": c.get("ref_scheme"),
                     "ref_K": c.get("ref_K"),
+                    "ref_K_CI": ref_k_ci,
                     "ref_R2": round(ref_r2, 3) if np.isfinite(ref_r2) else np.nan,
+                    "ref_R2_CI": ref_r2_ci,
                     "sub-cluster": si,
                     "families": ", ".join(sc["families"]),
                     "R2": round(sc["R2"], 3) if np.isfinite(sc["R2"]) else np.nan,
@@ -2048,8 +2064,11 @@ def _print_summary_table(summary):
 def _print_cluster_refs(rows):
     """One line per K cluster: its display reference scheme (2 schemes -> the
     shorter peak K; more -> the member whose peak K is nearest the cluster
-    median, ties -> shorter K), with that scheme's own K and peak R2, and the
-    cluster median K in parentheses as a reminder of how it was picked."""
+    median, ties -> shorter K), with that scheme's own K and peak R2 - each
+    with its own bootstrap CI - and the cluster median K in parentheses as a
+    reminder of how it was picked. Scheme names are abbreviated (ew, ldw,
+    geodw, liw, geoiw) for this recap only; the table itself (and everything
+    else) keeps the full WEIGHT_LABELS names."""
     if not rows or "ref_scheme" not in rows[0]:
         return
     print("\n  cluster reference (2 schemes -> shorter K; more -> nearest the cluster median K):")
@@ -2059,8 +2078,12 @@ def _print_cluster_refs(rows):
         if key in seen:
             continue
         seen.add(key)
+        name = _WEIGHT_ABBR.get(r.get("ref_scheme"), r.get("ref_scheme"))
         ref_r2 = r.get("ref_R2")
-        r2s = f", R2={ref_r2:.3f}" if isinstance(ref_r2, (int, float)) and np.isfinite(ref_r2) else ""
+        r2_txt = (f"{ref_r2:.3f}" if isinstance(ref_r2, (int, float)) and np.isfinite(ref_r2)
+                  else "-")
+        k_ci = r.get("ref_K_CI", "-")
+        r2_ci = r.get("ref_R2_CI", "-")
         print(f"    {str(r.get('season')):<10} cluster {r.get('cluster')}:  "
-              f"ref = {r.get('ref_scheme')} (K={r.get('ref_K')}{r2s})"
+              f"ref = {name}  K={r.get('ref_K')} {k_ci}  R2={r2_txt} {r2_ci}"
               f"   (cluster median K = {r.get('K')})")

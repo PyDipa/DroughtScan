@@ -1482,9 +1482,13 @@ class BaseDroughtAnalysis:
               1..N by increasing ``K``); level 2 re-applies the same rule on peak
               R² inside each K cluster (``sub-cluster`` 1..M by decreasing ``R2``),
               so schemes that share a scale but differ in response split apart.
-              Columns: ``season, cluster, K, K_CI, sub-cluster, families, R2,
-              R2_CI``. See ``utils.statistics.bootstrap_summary_table`` and
-              ``_peak_summary``.
+              Columns: ``season, cluster, K, K_CI, ref_scheme, ref_K, ref_K_CI,
+              ref_R2, ref_R2_CI, sub-cluster, families, R2, R2_CI`` — ``K``/
+              ``K_CI`` and ``R2``/``R2_CI`` are the box boundaries drawn for
+              that cluster/sub-cluster in the response-surface figure; the
+              ``ref_*`` columns are a display reference scheme for the cluster
+              (see ``_peak_summary``), with THAT scheme's own peak K/R² and
+              their bootstrap CIs. See ``utils.statistics.bootstrap_summary_table``.
         """
         self._check_correlation_eligible()
 

@@ -576,7 +576,231 @@ ds.spatial_sidi(seasonal_params=seasonal_corr, agg='quarter')
 
 See the [Spatial Guide](spatial_guide.md) §2.6 for both the committed and
 non-committed routes.
-### 9.1.2) Understanding SIDI optimization states
+
+### 9.1.2) Uncertainty on R²(w, K): the block bootstrap
+
+`analyze_correlation` / `analyze_correlation_seasonal` return one R²(w, K)
+surface. It came from one particular stretch of history; a slightly different but
+equally believable weather record would have moved the numbers, and maybe changed
+which K looks best. Pass `n_boot > 0` and the method rebuilds the whole
+calculation on many resampled histories, then reports how much the answer moves:
+
+```python
+A = ds.analyze_correlation(
+    streamflow,
+    n_boot=500,            # 0 (default) -> behaviour and return value unchanged
+    block_length=None,     # L in months; default max(24, 2*K) rounded to whole years
+    ci=(2.5, 97.5),        # band percentiles
+    circular=True,         # wrap blocks around the series end
+    random_state=0,
+)
+A["MatCorr"]        # (K, 5)      the point estimate, exactly as before
+A["MatCorr_ci"]     # (2, K, 5)   [lo, hi] percentile band
+A["MatCorr_boot"]   # (B, K, 5)   every replica's surface (for your own stats)
+A["boot_meta"]      # dict: block_length, n_blocks, contaminated_fraction (K,), ...
+A["summary"]        # cluster table: cluster / K / sub-cluster / R2 — see below
+```
+
+`analyze_correlation_seasonal(..., n_boot=500)` builds **one** replica set on the
+continuous overlap and slices it per season, so each season's dict gains
+`"R2_boot"`, `"R2_ci"` and `"summary"`, plus a top-level `result["summary"]`
+table with one row per season.
+
+---
+
+#### Why a *block* bootstrap and not the classic one
+
+The classic bootstrap resamples **one month at a time**, as if months were
+independent. They are not: rainfall and streamflow persist from one month to the
+next, and SPI/SQI are themselves moving averages that share input months between
+consecutive points by construction. Month-by-month resampling would break that
+link and make the data look richer in independent information than it is, giving
+an artificially narrow uncertainty. The fix is to resample **whole blocks of
+consecutive months**.
+
+#### Step 1 — Block length `L`
+
+`L` must be long enough to contain the system's memory:
+
+> `L` = the larger of 24 months (2 years) and 2 × the maximum `K` tested, then
+> rounded to the nearest whole number of years.
+
+Twice `K`, not `K`: every join between two blocks produces a small unusable zone
+`K-1` months wide (Step 5). With `L = K` almost the whole block would be that
+zone; with `L = 2K` the damaged part stays a limited fraction and the rest is
+clean.
+
+**Whole-year blocks** (multiples of 12 months): SPI and SQI are computed
+calendar-month by calendar-month (January's fit uses only past Januaries, etc.).
+A block that cut a year in half would distort the balance of the 12 months in the
+synthetic series. Whole-year blocks keep every replica on a valid calendar; the
+library lays the blocks end-to-end under a fresh contiguous calendar so that each
+synthetic month equals its real month.
+
+#### Step 2 — The pool of blocks
+
+From the real series (N years long) every run of `block_years` consecutive years
+is a candidate block: one starting at year 1, one at year 2, and so on — these
+overlap (the *moving block bootstrap*). With `circular=True` the series wraps
+after its last year, so years near the ends are not systematically under-sampled.
+
+#### Step 3 — Resample rainfall and streamflow **together**
+
+Blocks are drawn at random, with replacement, until the original length is
+covered. **The same span of years is always drawn for both series** — never
+independently — otherwise the rainfall→streamflow link the analysis exists to
+measure would be broken and the result would be meaningless.
+
+#### Step 4 — Rebuild everything from scratch
+
+Nothing is reused: on each synthetic series the whole chain is recomputed —
+SPI at every scale `K`, then SQI1, then the full R²(w, K) surface. Only this way
+does the estimated uncertainty reflect how the *entire procedure* would move.
+
+#### Step 5 — The seams, and how they are handled
+
+At every block join the synthetic series places side by side two moments that
+were never consecutive in reality (e.g. October of one year followed by March of
+another). Individual values are fine; the problem is the **K-month moving
+average** (SPI_K): near a seam it blends months that were not really adjacent,
+producing a physically meaningless accumulation.
+
+The fix: the months within `K-1` steps of a seam are **discarded (set to NaN)**
+before R² is computed for that scale. The larger `K`, the more months are dropped
+near each seam — unavoidable, since a longer window reaches further back.
+
+**Practical consequence:** as `K` grows, fewer valid points remain, so a wider
+band at high `K` does **not** necessarily mean "more physical uncertainty" — it
+can partly just mean "less data left, for a technical reason". The library prints
+a table (also in `boot_meta["contaminated_fraction"]` and
+`boot_meta["eff_n_per_scale"]`) of how much was dropped and how much survives at
+each `K`. **Read that table before interpreting the width of a band.**
+
+#### Step 6 — Repeat
+
+Steps 3–5 are repeated `n_boot` times. A few hundred to a couple of thousand is
+usual; the library's interactive default is 500. (The diagnostics site build
+leaves it off by default — it re-runs the full pipeline `B` times and is slow
+with `f_kde` at large `K`.)
+
+#### Step 7 — The confidence interval
+
+For each (w, K) cell, the `ci` percentiles (default 2.5 / 97.5) of the `n_boot`
+values are the 95% band: *"reran under a slightly different but statistically
+similar history, 95% of the time R² would land in here."*
+
+#### Step 8 — Seasons: one bootstrap, sliced afterward
+
+Do **not** bootstrap each season on its own months only: a long-`K` SPI computed
+in (say) January reaches back into the previous February–December, so cutting the
+season out *before* rebuilding SPI would lose that memory. The procedure is: one
+bootstrap on the whole continuous series (Steps 1–6), then — only at the end,
+after SPI/SQI1 are rebuilt — keep the months of the season of interest and
+compute R² on that subset.
+
+#### The `summary` table — clusters and sub-clusters
+
+`analyze_correlation_seasonal(..., n_boot>0)` builds a table with **one row per
+(season, K cluster, R² sub-cluster)** at `result["summary"]` (a pandas
+DataFrame); the raw per-season pieces are in `result[season]["summary"]`.
+`analyze_correlation` builds the same with `season = "whole period"`. It is also
+printed.
+
+For **each** of the 5 weighting schemes the bootstrap gives its **peak**: the
+highest R² it reaches over all K, the K where that happens, and a 95 % CI for
+**both** — the R² CI (percentiles of the per-replica peak R²) and the **K CI**
+(percentiles of the per-replica peak K, a whole-number range). Those are the
+horizontal + vertical arms of the **cross** in the peak figure.
+
+**Level 1 — clusters, by timescale.** Instead of grouping schemes by how well
+they score, group them by **the K they peak at**. Two schemes that peak at
+(nearly) the same K are describing the same *response mechanism* of the basin.
+
+- *Build:* two schemes are linked when **each one's peak K falls inside the
+  other's K CI** (symmetric, on K); the clusters are the connected groups. A
+  scheme whose peak K sits clearly outside the others' K CIs stays **on its own**.
+  A flat, unresolved season (every K CI is wide) links everything into one
+  cluster with a wide box.
+- *Per cluster:* `K` = the **median** over the cluster's schemes of their peak K;
+  `K_CI` = percentiles of the per-replica median. Median, not maximum → no
+  "winner's curse".
+
+**Level 2 — sub-clusters, by response.** Within a cluster that holds more than
+one scheme, ask whether those schemes reach the **same R²** or not. The **same
+rule** is re-applied, now on peak R²: two schemes stay together when each one's
+peak R² falls inside the other's **R² CI**; schemes that reach clearly separated
+R² split into their own sub-cluster. A one-scheme cluster has a single
+sub-cluster (that scheme's own R² CI).
+
+- *Per sub-cluster:* `R2` = the median peak R² over its schemes; `R2_CI` =
+  percentiles of the per-replica median. Sub-clusters are numbered by
+  **decreasing R²**, so `sub-cluster` 1 is always the strongest.
+
+**Cluster reference — a one-name handle.** Two or more schemes lumped into one
+K cluster describe the same mechanism, but `K`/`R2` above are cluster
+**medians**, not any one scheme's own numbers. For a quick label, each cluster
+also carries a *reference scheme*: for a **2-scheme** cluster, the member with
+the **shorter** peak K (the conservative read — the shorter memory already
+captures the shared signal); for a **3+-scheme** cluster, the member whose
+peak K is **closest to the cluster median** (ties → shorter K). No scheme is
+privileged, not even EW. It is reported with **that scheme's own** peak K and
+R², each with its own bootstrap CI (`ref_K_CI` / `ref_R2_CI`) — not the
+cluster's median values. Purely a label: the SIDI itself keeps using each
+scheme's own K regardless of which one is picked as reference.
+
+The printed recap (below the table) shows one line per cluster with this
+reference, scheme names abbreviated for that line only (`ew`, `ldw`, `geodw`,
+`liw`, `geoiw` — the table itself keeps the full `WEIGHT_LABELS` names), and
+the cluster's median K in parentheses as a reminder of how the reference was
+picked:
+
+```
+  cluster reference (2 schemes -> shorter K; more -> nearest the cluster median K):
+    DJF        cluster 1:  ref = liw  K=4 [3, 6]  R2=0.664 [0.602, 0.752]   (cluster median K = 4.0)
+```
+
+| column | plain meaning |
+|---|---|
+| `cluster` | K-cluster ordinal (1, 2, …), by increasing `K`. No interpretive label — the box is meant to speak for itself. |
+| `K` `[K_CI]` | the cluster's typical response time in months, with its whole-number CI — the box's K-extent in the peak/cluster figure. Repeated on each sub-cluster row. |
+| `ref_scheme` | a one-name handle for the cluster (see above). Repeated per row. |
+| `ref_K` `[ref_K_CI]` | that reference scheme's **own** peak K and its bootstrap CI (not the cluster median). Repeated per row. |
+| `ref_R2` `[ref_R2_CI]` | that reference scheme's **own** peak R² and its bootstrap CI. Repeated per row. |
+| `sub-cluster` | ordinal (1, 2, …) within the cluster, by decreasing `R2`. One row only when the cluster's schemes do not differ in R². |
+| `families` | the weighting schemes in that sub-cluster. |
+| `R2` `[R2_CI]` | how well that sub-cluster explains the season, typically, with its CI — the box's R²-extent for that sub-cluster in the peak/cluster figure. |
+
+Reading it: one cluster → a single response scale (a wide `K_CI` = the record
+cannot pin it down). Several clusters → distinct mechanisms at different K. Two
+or more sub-clusters inside one cluster → schemes that share a scale but not a
+strength; one sub-cluster → they agree.
+
+The per-season dict also has `peak_by_family` — `peak_R2`, `argmax_K`, `peak_CI`
+and `K_CI` for every scheme, if you want them directly.
+
+#### What the figures show (with `n_boot>0`)
+
+The peak/cluster figure — **the first figure** of `analyze_correlation` /
+`analyze_correlation_seasonal`, and the *only* R²(k) figure on the diagnostic
+site (global and seasonal calibration alike): the R²(k) curves, plus a dark grey
+**cross** at each scheme's peak (horizontal arm = the peak-K CI, vertical arm =
+the peak-R² CI), plus each **K cluster** as one or more very transparent
+**boxes**: all share the cluster's `K_CI` width and are stacked at the `R2_CI`
+height of each response **sub-cluster**, each tinted with that sub-cluster's
+leading-scheme hue and framed by light-grey dotted CI reference lines. A cluster
+that does not sub-split by R² shows a single box. The plain R²(k) curves — each
+with its per-cell percentile band — are still produced, demoted to the last
+figure.
+
+#### In one sentence
+
+Many plausible alternative histories are rebuilt by resampling whole consecutive
+chunks of rainfall-and-streamflow **together**, the entire method is recomputed
+on each, the points where resampling glued together moments that were never
+really adjacent are discarded, and what is reported is not just where the peak
+falls but how stable that choice is — an interval, not a bare point.
+
+### 9.1.3) Understanding SIDI optimization states
 
 After running `analyze_correlation` or `analyze_correlation_seasonal`, the SIDI
 can be optimized in two ways. Understanding the difference is important because
