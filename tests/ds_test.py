@@ -968,7 +968,8 @@ def test_bootstrap_summary_table_is_a_per_cluster_table():
     tab = S["summary"]
     if hasattr(tab, "columns"):        # pandas available
         assert list(tab.columns) == ["season", "cluster", "K", "K_CI",
-                                     "ref_scheme", "ref_K", "ref_R2",
+                                     "ref_scheme", "ref_K", "ref_K_CI",
+                                     "ref_R2", "ref_R2_CI",
                                      "sub-cluster", "families", "R2", "R2_CI"]
         assert set(tab["season"]) == set(seasons)
 
