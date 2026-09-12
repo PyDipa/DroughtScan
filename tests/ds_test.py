@@ -936,8 +936,8 @@ def test_bootstrap_summary_table_is_a_per_cluster_table():
     for name in seasons:
         s = S[name]["summary"]
         assert set(s) >= {"w_best", "peak_by_family", "clusters"}
-        assert set(s["peak_by_family"]) == {"EW", "Lin. DW", "Log. DW",
-                                            "Lin. IW", "Log. IW"}
+        assert set(s["peak_by_family"]) == {"ew", "lindw", "geodw",
+                                            "liniw", "geoiw"}
         # every family lands in >= 1 cluster; clusters carry their pieces
         covered = set()
         for c in s["clusters"]:
@@ -995,13 +995,13 @@ def test_peak_summary_scale_clusters_group_by_k_not_r2():
     s = _peak_summary(surf, boot)                              # default k_tol=0
 
     fams = [set(c["families"]) for c in s["clusters"]]
-    assert {"Lin. IW", "Log. IW"} in fams
-    assert {"EW"} in fams                                       # the mid-K scheme, alone
-    assert {"Lin. DW", "Log. DW"} in fams
+    assert {"liniw", "geoiw"} in fams
+    assert {"ew"} in fams                                       # the mid-K scheme, alone
+    assert {"lindw", "geodw"} in fams
     assert [c["K_cluster"] for c in s["clusters"]] == sorted(
         c["K_cluster"] for c in s["clusters"])                  # returned in K order
-    lone = next(c for c in s["clusters"] if c["families"] == ["EW"])
-    assert np.isclose(lone["K_cluster"], s["peak_by_family"]["EW"]["argmax_K"])
+    lone = next(c for c in s["clusters"] if c["families"] == ["ew"])
+    assert np.isclose(lone["K_cluster"], s["peak_by_family"]["ew"]["argmax_K"])
 
 
 def test_peak_summary_flat_season_collapses_to_one_wide_cluster():
@@ -1018,7 +1018,7 @@ def test_peak_summary_flat_season_collapses_to_one_wide_cluster():
 
     assert len(s["clusters"]) == 1
     c = s["clusters"][0]
-    assert set(c["families"]) == {"EW", "Lin. DW", "Log. DW", "Lin. IW", "Log. IW"}
+    assert set(c["families"]) == {"ew", "lindw", "geodw", "liniw", "geoiw"}
     klo, khi = c["K_cluster_CI"]
     assert (khi - klo) >= K / 2
 
@@ -1061,16 +1061,16 @@ def test_peak_summary_r2_subclusters_split_same_K_by_response():
     s = _peak_summary(surf, boot)
 
     by_fam = {frozenset(c["families"]): c for c in s["clusters"]}
-    cA = by_fam[frozenset({"Lin. IW", "Log. IW"})]
+    cA = by_fam[frozenset({"liniw", "geoiw"})]
     assert len(cA["subclusters"]) == 2
     assert cA["subclusters"][0]["R2"] > cA["subclusters"][1]["R2"]
     assert [set(sc["families"]) for sc in cA["subclusters"]] == \
-        [{"Lin. IW"}, {"Log. IW"}]
+        [{"liniw"}, {"geoiw"}]
 
-    cB = by_fam[frozenset({"Lin. DW", "Log. DW"})]
+    cB = by_fam[frozenset({"lindw", "geodw"})]
     assert len(cB["subclusters"]) == 1
-    assert set(cB["subclusters"][0]["families"]) == {"Lin. DW", "Log. DW"}
+    assert set(cB["subclusters"][0]["families"]) == {"lindw", "geodw"}
 
-    cLone = by_fam[frozenset({"EW"})]
+    cLone = by_fam[frozenset({"ew"})]
     assert len(cLone["subclusters"]) == 1
-    assert cLone["subclusters"][0]["families"] == ["EW"]
+    assert cLone["subclusters"][0]["families"] == ["ew"]

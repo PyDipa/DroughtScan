@@ -1580,22 +1580,24 @@ def _bootstrap_benchmark(self_obj, streamflow, self_indices, streamflow_indices,
 # per-cluster table analyze_correlation[_seasonal] attach as 'summary'.
 # ===================================================================
 
-WEIGHT_LABELS = ("EW", "Lin. DW", "Log. DW", "Lin. IW", "Log. IW")
+# The single source of truth for weighting-scheme names, in generate_weights
+# column order (0 uniform, 1 inverted linear, 2 inverted geometric, 3 linear,
+# 4 geometric). Short and lowercase on purpose: these feed plot titles,
+# legends, the families/ref_scheme columns of bootstrap_summary_table, and the
+# cluster-reference print - one name everywhere, instead of the three
+# different spellings ("EW"/"Lin. DW"/"Log. DW", "Geom. DW", "lgdw", ...) that
+# had drifted across core.py/the old WEIGHT_LABELS before this was unified
+# (2026-09). "geodw"/"geoiw" and not "logdw"/"logiw": the weights are built
+# with np.geomspace (generate_weights) - geometric, nothing logarithmic.
+WEIGHT_LABELS = ("ew", "lindw", "geodw", "liniw", "geoiw")
 
 # Canonical per-scheme colours (matplotlib tab10, in WEIGHT_LABELS order). Kept
 # here so every renderer - the library figures and the diagnostic site - tints a
 # cluster box with the SAME hue as the scheme that leads that cluster, instead of
-# a single fixed colour. Drawn very transparent, these read as pastels: EW ->
-# pale blue, Lin. DW -> straw, Log. DW -> pale green, Lin. IW -> pink, Log. IW ->
+# a single fixed colour. Drawn very transparent, these read as pastels: ew ->
+# pale blue, lindw -> straw, geodw -> pale green, liniw -> pink, geoiw ->
 # lavender.
 WEIGHT_COLORS = ("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd")
-
-# Short lowercase handles, WEIGHT_LABELS order, for the cluster-reference print
-# only (_print_cluster_refs) - everywhere else (families column, legends,
-# plots) keeps the full WEIGHT_LABELS names. "Log. DW"/"Log. IW" are
-# geometric weighting under the hood (see generate_weights), hence
-# "geodw"/"geoiw" here rather than "logdw"/"logiw".
-_WEIGHT_ABBR = dict(zip(WEIGHT_LABELS, ("ew", "ldw", "geodw", "liw", "geoiw")))
 
 
 def _peak_summary(M, r2_boot, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS, k_tol=0):
@@ -2066,9 +2068,7 @@ def _print_cluster_refs(rows):
     shorter peak K; more -> the member whose peak K is nearest the cluster
     median, ties -> shorter K), with that scheme's own K and peak R2 - each
     with its own bootstrap CI - and the cluster median K in parentheses as a
-    reminder of how it was picked. Scheme names are abbreviated (ew, ldw,
-    geodw, liw, geoiw) for this recap only; the table itself (and everything
-    else) keeps the full WEIGHT_LABELS names."""
+    reminder of how it was picked."""
     if not rows or "ref_scheme" not in rows[0]:
         return
     print("\n  cluster reference (2 schemes -> shorter K; more -> nearest the cluster median K):")
@@ -2078,7 +2078,7 @@ def _print_cluster_refs(rows):
         if key in seen:
             continue
         seen.add(key)
-        name = _WEIGHT_ABBR.get(r.get("ref_scheme"), r.get("ref_scheme"))
+        name = r.get("ref_scheme")
         ref_r2 = r.get("ref_R2")
         r2_txt = (f"{ref_r2:.3f}" if isinstance(ref_r2, (int, float)) and np.isfinite(ref_r2)
                   else "-")

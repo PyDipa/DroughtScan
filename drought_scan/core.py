@@ -82,6 +82,7 @@ from drought_scan.utils.statistics import (
     _bootstrap_r2,
     _print_contamination_table,
     _print_summary_table,
+    WEIGHT_LABELS,
     # _rolling_trend_analysis,
 )
 
@@ -1492,9 +1493,10 @@ class BaseDroughtAnalysis:
         """
         self._check_correlation_eligible()
 
-        wlabel = ['equal weights (ew)', 'linearly decreasing weights (ldw)',
-                  'geometrically decreasing weights (gdw)', 'linearly increasing weights (liw)',
-                  'geometrically increasing weights (giw)']
+        wlabel = [f"{desc} ({code})" for desc, code in zip(
+            ("equal weights", "linearly decreasing weights",
+             "geometrically decreasing weights", "linearly increasing weights",
+             "geometrically increasing weights"), WEIGHT_LABELS)]
 
         if not isinstance(streamflow, BaseDroughtAnalysis):
             raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
@@ -1711,7 +1713,7 @@ class BaseDroughtAnalysis:
         """
         self._check_correlation_eligible()
 
-        wlabel = ['EW', 'Lin. DW', 'Log. DW', 'Lin. IW', 'Log. IW']
+        wlabel = list(WEIGHT_LABELS)
 
         if seasons is not None:
             agg = 'custom'
@@ -1981,7 +1983,7 @@ class BaseDroughtAnalysis:
             raise ValueError("agg='monthly' non supportato in versione rolling "
                              "(usa analyze_correlation_seasonal per il bar chart mensile).")
 
-        wlabel = ['EW', 'Lin. DW', 'Log. DW', 'Lin. IW', 'Log. IW']
+        wlabel = list(WEIGHT_LABELS)
 
         # Colore base per schema = stesso color cycle di default usato da
         # analyze_correlation_seasonal (garantisce coerenza cromatica col plot originale,
@@ -5406,9 +5408,9 @@ class Precipitation(BaseDroughtAnalysis):
 
         Returns:
             dict[str, pandas.DataFrame]: keyed by scheme label, in this fixed order -
-            ``"EW"``, ``"Lin. DW"``, ``"Log. DW"``, ``"Lin. IW"``, ``"Log. IW"``
-            (``generate_weights``'s column order). Each DataFrame has the same columns
-            as ``ds_balance``'s.
+            ``"ew"``, ``"lindw"``, ``"geodw"``, ``"liniw"``, ``"geoiw"``
+            (``generate_weights``'s column order, see ``WEIGHT_LABELS``). Each
+            DataFrame has the same columns as ``ds_balance``'s.
 
         Raises:
             ValueError: if neither ``seasonal_corr`` nor a committed seasonal
@@ -5417,9 +5419,9 @@ class Precipitation(BaseDroughtAnalysis):
         Example:
             >>> corr = prec.analyze_correlation_seasonal(flow, seasons=seasons, plot=False)
             >>> balances = prec.ds_balance_all_schemes(flow, corr, seasons)
-            >>> balances["Log. DW"].loc['2022', ['anomaly', 'rain_share', 'divergence']]
+            >>> balances["geodw"].loc['2022', ['anomaly', 'rain_share', 'divergence']]
         """
-        wlabel = ['EW', 'Lin. DW', 'Log. DW', 'Lin. IW', 'Log. IW']
+        wlabel = list(WEIGHT_LABELS)
         K_range = np.arange(1, self.spi_like_set.shape[0] + 1)
 
         if seasonal_corr is not None:
