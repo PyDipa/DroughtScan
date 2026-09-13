@@ -151,7 +151,7 @@ def effective_month_weights(K=36, plot=True, ax=None):
         else:
             fig = ax.figure
         for i, lab in enumerate(WEIGHT_LABELS):
-            ax.plot(lag, W_eff[:, i], marker='o', ms=4, lw=2,
+            ax.plot(lag, W_eff[:, i],  lw=2,
                     color=WEIGHT_COLORS[i], label=lab)
         ax.set_xlabel('lag (months back from current)')
         ax.set_ylabel('effective weight  W_eff(lag)')
