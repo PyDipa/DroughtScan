@@ -153,14 +153,66 @@ def effective_month_weights(K=36, plot=True, ax=None):
         for i, lab in enumerate(WEIGHT_LABELS):
             ax.plot(lag, W_eff[:, i],  lw=2,
                     color=WEIGHT_COLORS[i], label=lab)
-        ax.set_xlabel('lag (months back from current)')
-        ax.set_ylabel('effective weight  W_eff(lag)')
-        ax.set_title(f'Real per-month weight in D(SPI), K={K}')
+        ax.set_xlabel('lag (months)', fontsize=12)
+        ax.set_ylabel('effective weight', fontsize=12)
+        idname = rf"$\mathrm{{D}}_{{\mathrm{{(SPI)}}}}$"
+        ax.set_title(f'whole single-month weight in {idname}, K={K}', fontsize=14)
         ax.grid(alpha=0.3)
-        ax.legend()
+        ax.tick_params(labelsize=12)
+        ax.legend(fontsize=12)
         fig.tight_layout()
 
     return W_eff
+
+
+def plot_weight_families(K=36, plot=True, ax=None):
+    """
+    Plot the 5 weighting families themselves: w_k vs scale k, exactly as
+    returned by generate_weights(K).
+
+    Companion to effective_month_weights: that one shows the REAL weight a
+    raw calendar month ends up carrying once SPI_1..SPI_K are expanded back
+    into their own accumulation windows (the reverse cumulative sum of this
+    one); this one shows the weight generate_weights assigns to each SCALE k
+    directly, before any such expansion - the five curves that go into the
+    D(SPI) weighted sum sum_k w_k * SPI_k(t).
+
+    Args:
+        K (int, optional): number of scales. Default 36 (the library's usual
+            scale for whole-basin figures).
+        plot (bool, optional): if True (default), draw w_k vs k for the 5
+            weighting schemes on `ax` (or a new figure/axes if `ax` is None).
+        ax (matplotlib.axes.Axes, optional): axes to draw into. Only used
+            when plot=True.
+
+    Returns:
+        ndarray, shape (K, 5): same as generate_weights(K) - w_k per scale
+        (rows, k=1..K) and weighting scheme (columns, WEIGHT_LABELS order).
+    """
+    # Lazy import: statistics.py imports FROM this module at the top level,
+    # so importing it back here would be circular - same pattern as
+    # effective_month_weights above.
+    from drought_scan.utils.statistics import WEIGHT_LABELS, WEIGHT_COLORS
+
+    W = generate_weights(K)
+
+    if plot:
+        k_range = np.arange(1, K + 1)
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(7, 4.5))
+        else:
+            fig = ax.figure
+        for i, lab in enumerate(WEIGHT_LABELS):
+            ax.plot(k_range, W[:, i], lw=2, color=WEIGHT_COLORS[i], label=lab)
+        ax.set_xlabel('scale k', fontsize=12)
+        ax.set_ylabel(r'weight $w_k$', fontsize=12)
+        ax.set_title(f'The 5 weighting families, K={K}', fontsize=14)
+        ax.grid(alpha=0.3)
+        ax.tick_params(labelsize=12)
+        ax.legend(fontsize=12)
+        fig.tight_layout()
+
+    return W
 
 
 # ===================================================================
