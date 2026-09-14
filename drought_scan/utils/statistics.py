@@ -1370,23 +1370,28 @@ def _print_contamination_table(meta, K_range):
 
 class _BenchmarkReplica:
     """The synthetic contiguous series for one resample, handed to the
-    per-benchmark fit dispatch. Junction-aware: ``spi_P`` is already
-    NaN-masked at every block join per scale; ``junction_dist`` lets the
-    lag-convolution benchmarks mask their own windows."""
-    __slots__ = ("P", "Q", "spi_P", "sqi1", "months", "junction_dist", "K")
+    per-benchmark fit dispatch. Junction-aware: ``spi_P``/``spi1_P`` are
+    already NaN-masked at every block join per scale; ``junction_dist`` lets
+    the lag-convolution benchmarks mask their own windows."""
+    __slots__ = ("P", "Q", "spi_P", "spi1_P", "sqi1", "months", "junction_dist", "K")
 
-    def __init__(self, P, Q, spi_P, sqi1, months, junction_dist, K):
+    def __init__(self, P, Q, spi_P, spi1_P, sqi1, months, junction_dist, K):
         self.P, self.Q = P, Q
-        self.spi_P, self.sqi1 = spi_P, sqi1
+        self.spi_P, self.spi1_P = spi_P, spi1_P
+        self.sqi1 = sqi1
         self.months = months
         self.junction_dist = junction_dist
         self.K = K
 
 
-def _benchmark_fit(kind, rep, season_mask, bench_K, l_step):
+def _benchmark_fit(kind, rep, season_mask, bench_K, l_step,
+                   driver_var='P', target_var='SQI'):
     """Re-run one benchmark's fit on a bootstrap replica; return only scalars.
 
     kind : 'conv_P' | 'conv_SPI' | 'dspi_free' | 'nash' | 'ihacres'
+    driver_var / target_var : only read for kind='nash' - 'P'/'SPI' picks
+    rep.P vs rep.spi1_P as the driver, 'Q'/'SQI' picks rep.Q vs rep.sqi1 as
+    the target, matching whatever the point estimate itself was fit on.
     """
     from drought_scan.core import BaseDroughtAnalysis as _B
 
@@ -1397,7 +1402,9 @@ def _benchmark_fit(kind, rep, season_mask, bench_K, l_step):
         return np.nan if v is None else float(v)
 
     if kind == "nash":
-        r = _B._nash_fit(rep.P, rep.sqi1, bench_K, season_mask=season_mask,
+        drv = rep.P if driver_var == "P" else rep.spi1_P
+        tgt = rep.Q if target_var == "Q" else rep.sqi1
+        r = _B._nash_fit(drv, tgt, bench_K, season_mask=season_mask,
                          junction_dist=jd, l_step=l_step, verbose=False)
         return {"optimal_n": _num(r["optimal_n"]), "optimal_k": _num(r["optimal_k"]),
                 "optimal_K": _num(r["optimal_K"]), "R2": _num(r["R2"]),
@@ -1437,7 +1444,7 @@ def _benchmark_fit(kind, rep, season_mask, bench_K, l_step):
 
 def _one_benchmark_replica(P_yr, Q_yr, calcP, n_base_years, calcQ, n_base_years_Q,
                            spi_K, block_years, circular, seed, kind, bench_K, l_step,
-                           season_months=None):
+                           season_months=None, driver_var='P', target_var='SQI'):
     """One paired year-aligned block-bootstrap replica for a benchmark: build
     the synthetic (P, Q) series + its junction-masked SPI/SQI set, then call
     ``_benchmark_fit``. Returns its scalar dict (non-seasonal) or
@@ -1470,19 +1477,31 @@ def _one_benchmark_replica(P_yr, Q_yr, calcP, n_base_years, calcQ, n_base_years_
             spi_P[k - 1, dist < (k - 1)] = np.nan
     else:
         spi_P = None
+
+    # Nash's optional SPI1 driver only needs SCALE 1 - as cheap as sqi1 below,
+    # nowhere near the cost of the full spi_K set skipped above.
+    spi1_P = None
+    if kind == "nash" and driver_var == "SPI":
+        spi1_P = _spi_set_from_series(P_b, m_cal_b, calcP, _BOOT_BASE_YEAR, tb2P, 1)[0]
+
     sqi1 = _spi_set_from_series(Q_b, m_cal_b, calcQ, _BOOT_BASE_YEAR, tb2Q, 1)[0]
 
-    rep = _BenchmarkReplica(P_b, Q_b, spi_P, sqi1, months, dist, spi_K)
+    rep = _BenchmarkReplica(P_b, Q_b, spi_P, spi1_P, sqi1, months, dist, spi_K)
     if season_months is None:
-        return _benchmark_fit(kind, rep, None, bench_K, l_step)
-    return {name: _benchmark_fit(kind, rep, np.isin(months, mlist), bench_K, l_step)
+        return _benchmark_fit(kind, rep, None, bench_K, l_step,
+                              driver_var=driver_var, target_var=target_var)
+    return {name: _benchmark_fit(kind, rep, np.isin(months, mlist), bench_K, l_step,
+                                 driver_var=driver_var, target_var=target_var)
             for name, mlist in season_months.items()}
 
 
 def _bootstrap_benchmark(self_obj, streamflow, self_indices, streamflow_indices,
                          kind, bench_K, n_boot, block_length, ci, circular,
-                         random_state, seasons=None, l_step=1):
+                         random_state, seasons=None, l_step=1,
+                         driver_var='P', target_var='SQI'):
     """Paired year-aligned block-bootstrap CI for one parametric benchmark.
+    ``driver_var``/``target_var`` are only read for ``kind='nash'`` (see
+    ``_benchmark_fit``); every other kind ignores them.
 
     Returns
     -------
@@ -1520,8 +1539,12 @@ def _bootstrap_benchmark(self_obj, streamflow, self_indices, streamflow_indices,
 
     n_jobs = max(1, min(4, cpu_count() // 2))
     step_note = f", L-search stride {l_step}" if l_step > 1 and kind in ("nash", "ihacres") else ""
-    spi_note = ("rebuilds the full SPI set" if kind in ("conv_SPI", "dspi_free")
-                else "SQI1 only, raw-P driven")
+    if kind in ("conv_SPI", "dspi_free"):
+        spi_note = "rebuilds the full SPI set"
+    elif kind == "nash" and driver_var == "SPI":
+        spi_note = "SPI1 driver (scale 1 only)"
+    else:
+        spi_note = "SQI1 only, raw-P driven"
     print(f"  benchmark block bootstrap [{kind}]: B={n_boot}, L={L} months "
           f"({block_years}y) {'circular' if circular else 'moving'} blocks over "
           f"{n_years} overlap years{step_note} ({spi_note}; refits {n_boot}x on "
@@ -1536,7 +1559,7 @@ def _bootstrap_benchmark(self_obj, streamflow, self_indices, streamflow_indices,
                 P_yr, Q_yr, self_obj.calculation_method, n_base_years,
                 streamflow.calculation_method, n_base_years_Q,
                 self_obj.K, block_years, circular, int(s), kind, bench_K, l_step,
-                season_months)
+                season_months, driver_var, target_var)
             for s in seeds
         )
 

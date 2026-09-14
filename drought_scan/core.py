@@ -3337,7 +3337,8 @@ class BaseDroughtAnalysis:
 
     def _attach_benchmark_ci(self, kind, streamflow, self_indices, streamflow_indices,
                              bench_K, result, agg, seasons_dict, *, n_boot,
-                             block_length, ci, circular, random_state, l_step=1):
+                             block_length, ci, circular, random_state, l_step=1,
+                             driver_var='P', target_var='SQI'):
         """Run the paired year-aligned block-bootstrap for one benchmark and
         attach ``'ci'`` / ``'boot'`` / ``'boot_meta'`` in place.
 
@@ -3347,7 +3348,10 @@ class BaseDroughtAnalysis:
         mapping (each season entry gets its own CI). Only scalar quantities get
         an interval — never the kernel ordinates or the OLS rescaling betas.
         ``l_step`` thins the kernel-length search inside 'nash'/'ihacres'
-        replicas (speed-up; ignored by the OLS benchmarks)."""
+        replicas (speed-up; ignored by the OLS benchmarks). ``driver_var`` /
+        ``target_var`` : only read for ``kind='nash'`` — must match what the
+        point estimate itself was fit on ('P'/'SPI' driver, 'Q'/'SQI' target),
+        so the bootstrap replicas re-fit the same model."""
         from drought_scan.utils.statistics import (
             _bootstrap_benchmark, _print_contamination_table)
 
@@ -3355,7 +3359,8 @@ class BaseDroughtAnalysis:
         boot, boot_ci, meta = _bootstrap_benchmark(
             self, streamflow, self_indices, streamflow_indices,
             kind, bench_K, n_boot, block_length, ci, circular, random_state,
-            seasons=season_months, l_step=l_step)
+            seasons=season_months, l_step=l_step,
+            driver_var=driver_var, target_var=target_var)
         _print_contamination_table(meta, np.arange(1, self.K + 1))
 
         if agg is None:
@@ -3377,12 +3382,14 @@ class BaseDroughtAnalysis:
     def benchmark_nash(self, streamflow, K=None, plot=True,
                        agg=None, seasons=None, n_boot=0, block_length=None,
                        ci=(2.5, 97.5), circular=True, random_state=None,
-                       boot_l_step=3):
+                       boot_l_step=3, driver_var='SPI', target_var='SQI'):
         """
-        This method predicts the standardized streamflow anomaly SQI_1(t) from raw precipitation P(t-j)
-        via a parametric kernel. Standardization of the target makes R² directly comparable to D(SPI).
-        The kernel shape retains its physical interpretation;
-        amplitude is absorbed by the OLS intercept and slope during fitting.
+        This method predicts the streamflow target from the precipitation driver
+        via a parametric kernel. By default BOTH sides are standardized (SPI1
+        driver, SQI1 target), so R² is directly comparable to D(SPI); pass
+        ``driver_var='P'`` / ``target_var='Q'`` to run the classical Nash (1957)
+        IUH on the raw physical series instead (see ``driver_var``/``target_var``
+        below for what each combination means and its trade-offs).
 
         Nash IUH benchmark: parametric convolution with a Gamma kernel.
 
@@ -3394,13 +3401,13 @@ class BaseDroughtAnalysis:
         n — bell-shaped (small n = fast and asymmetric response; large n = slow and symmetric response)
         k — time scale in months (larger k = longer memory)
 
-        Streamflow is modelled as:
+        Target is modelled as:
 
-            SQI1(t) = intercept + Σ_{j=0}^{L-1} h(j; n, k) · P(t-j)
+            target(t) = intercept + Σ_{j=0}^{L-1} h(j; n, k) · driver(t-j)
 
         where h is the discrete Nash IUH (Gamma pdf), and the two shape
         parameters (n, k) plus the kernel length L are jointly optimised
-        to maximise R² against observed monthly streamflow.
+        to maximise R² against the chosen target.
 
 
 
@@ -3410,13 +3417,14 @@ class BaseDroughtAnalysis:
         is run from multiple starting points to find the global optimum
         in (n, k). The best (K, n, k) triplet is retained.
 
-        This is the standard implementation of the Nash (1957) IUH for
-        monthly data: only P (raw precipitation) and Q are required.
+        This is the Nash (1957) IUH for monthly data, generalised to run on
+        either the raw physical series or their standardized SPI-like
+        counterparts (see ``driver_var``/``target_var``).
 
         Parameters
         ----------
         streamflow : BaseDroughtAnalysis
-            Streamflow object with .ts and .m_cal attributes.
+            Streamflow object with .ts, .spi_like_set and .m_cal attributes.
         K : int, optional
             Maximum kernel length (months) to test. Defaults to self.K.
         plot : bool, default True
@@ -3425,6 +3433,23 @@ class BaseDroughtAnalysis:
             Seasonal aggregation scheme (same API as benchmark_convolution).
         seasons : dict, optional
             Custom season dict (sets agg='custom').
+        driver_var : {'SPI', 'P'}, default 'SPI'
+            'SPI' (default): drive on ``self.spi_like_set[0]`` (SPI1) - the
+            Gamma kernel is fit to standardized anomalies, consistent with
+            D(SPI)/Benchmark B. 'P': drive on raw ``self.ts`` instead - the
+            classical Nash IUH on physical rainfall; the kernel shape then
+            keeps its literal "unit hydrograph" reading, at the cost of no
+            longer being on the same footing as D(SPI)'s R².
+        target_var : {'SQI', 'Q'}, default 'SQI'
+            'SQI' (default): predict ``streamflow.spi_like_set[0]`` (SQI1),
+            so R² is directly comparable to D(SPI)'s. 'Q': predict raw
+            ``streamflow.ts`` instead - closer to the textbook Nash IUH, but
+            R² is then on the raw-flow scale, not comparable to D(SPI)'s.
+            Note SPI/SQI standardization is fit per calendar month and, unless
+            ``calculation_method=f_zscore``, is non-linear (a CDF->Gaussian
+            quantile map) - the OLS intercept/slope in this fit only absorbs
+            a single GLOBAL affine rescaling, so switching target_var can
+            shift the recovered (n, τ) themselves, not just their amplitude.
         n_boot : int, default 0
             If > 0, attach a block-bootstrap CI (same paired year-aligned
             moving-block resampling of the raw (P, Q) overlap as
@@ -3468,6 +3493,13 @@ class BaseDroughtAnalysis:
 
         self._check_correlation_eligible()
 
+        if driver_var not in ('P', 'SPI'):
+            raise ValueError("driver_var must be 'P' (raw precipitation) or "
+                             "'SPI' (SPI1); got %r." % (driver_var,))
+        if target_var not in ('Q', 'SQI'):
+            raise ValueError("target_var must be 'Q' (raw streamflow) or "
+                             "'SQI' (SQI1); got %r." % (target_var,))
+
         if K is None:
             K = self.K
         if seasons is not None:
@@ -3478,8 +3510,9 @@ class BaseDroughtAnalysis:
         if len(self_idx) == 0:
             raise ValueError("No overlapping data found.")
 
-        driver = self.ts[self_idx]
-        target = streamflow.spi_like_set[0, sf_idx]
+        driver = self.ts[self_idx] if driver_var == 'P' else self.spi_like_set[0, self_idx]
+        target = streamflow.ts[sf_idx] if target_var == 'Q' else streamflow.spi_like_set[0, sf_idx]
+        target_label = f"{streamflow.index_name}1" if target_var == 'SQI' else 'Q'
         m_cal_overlap = np.array([self.m_cal[i] for i in self_idx])
         months_overlap = np.array([m[0] for m in m_cal_overlap], dtype=int)
 
@@ -3501,7 +3534,7 @@ class BaseDroughtAnalysis:
                     'nash', streamflow, self_idx, sf_idx, K, result, None, None,
                     n_boot=n_boot, block_length=block_length, ci=ci,
                     circular=circular, random_state=random_state,
-                    l_step=boot_l_step)
+                    l_step=boot_l_step, driver_var=driver_var, target_var=target_var)
 
             if plot:
                 K = result['optimal_K']
@@ -3532,8 +3565,8 @@ class BaseDroughtAnalysis:
                     [target[vm].min(), target[vm].max()],
                     [target[vm].min(), target[vm].max()],
                     '--', color='grey')
-                axes[1].set_xlabel('SQI1 simulated')
-                axes[1].set_ylabel('SQI1 observed')
+                axes[1].set_xlabel(f'{target_label} simulated')
+                axes[1].set_ylabel(f'{target_label} observed')
                 axes[1].set_title('Nash IUH — best fit')
                 axes[1].legend()
                 axes[1].grid(alpha=0.3)
@@ -3565,7 +3598,8 @@ class BaseDroughtAnalysis:
             self._attach_benchmark_ci(
                 'nash', streamflow, self_idx, sf_idx, K, results, agg, seasons_dict,
                 n_boot=n_boot, block_length=block_length, ci=ci,
-                circular=circular, random_state=random_state, l_step=boot_l_step)
+                circular=circular, random_state=random_state, l_step=boot_l_step,
+                driver_var=driver_var, target_var=target_var)
 
         if plot and results:
             n_seasons = len(results)
@@ -3605,8 +3639,8 @@ class BaseDroughtAnalysis:
                     [target[idx][vm].min(), target[idx][vm].max()],
                     [target[idx][vm].min(), target[idx][vm].max()],
                     '--', color='grey')
-                axes[i,1].set_xlabel('SQI1 simulated')
-                axes[i,1].set_ylabel('SQI1 observed')
+                axes[i,1].set_xlabel(f'{target_label} simulated')
+                axes[i,1].set_ylabel(f'{target_label} observed')
                 axes[i, 1].set_title(f'Nash IUH | {season} — best fit')
                 axes[i, 1].legend()
                 axes[i, 1].grid(alpha=0.3)
