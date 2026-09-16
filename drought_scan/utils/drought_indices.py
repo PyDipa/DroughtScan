@@ -153,7 +153,7 @@ def effective_month_weights(K=36, plot=True, ax=None):
         for i, lab in enumerate(WEIGHT_LABELS):
             ax.plot(lag, W_eff[:, i],  lw=2,
                     color=WEIGHT_COLORS[i], label=lab)
-        ax.set_xlabel('lag (months)', fontsize=12)
+        ax.set_xlabel('elapsed months', fontsize=12)
         ax.set_ylabel('effective weight', fontsize=12)
         idname = rf"$\mathrm{{D}}_{{\mathrm{{(SPI)}}}}$"
         ax.set_title(f'whole single-month weight in {idname}, K={K}', fontsize=14)
@@ -204,7 +204,7 @@ def plot_weight_families(K=36, plot=True, ax=None):
             fig = ax.figure
         for i, lab in enumerate(WEIGHT_LABELS):
             ax.plot(k_range, W[:, i], lw=2, color=WEIGHT_COLORS[i], label=lab)
-        ax.set_xlabel('scale k', fontsize=12)
+        ax.set_xlabel('SPI scale (k)', fontsize=12)
         ax.set_ylabel(r'weight $w_k$', fontsize=12)
         ax.set_title(f'The 5 weighting families, K={K}', fontsize=14)
         ax.grid(alpha=0.3)

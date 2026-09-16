@@ -1930,13 +1930,7 @@ class BaseDroughtAnalysis:
 
         return MatCorr
 
-    # Da aggiungere alla stessa classe di analyze_correlation_seasonal.
-    # Richiede in aggiunta: from matplotlib.lines import Line2D
 
-    # Da aggiungere alla stessa classe di analyze_correlation_seasonal.
-    # Richiede in aggiunta:
-    #   from matplotlib.lines import Line2D
-    #   import matplotlib.colors as mcolors
 
     def analyze_correlation_seasonal_rolling(self, streamflow, agg='quarter', seasons=None,
                                              window_length=30, step=10, min_coverage=20,
