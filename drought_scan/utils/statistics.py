@@ -1132,7 +1132,7 @@ def _rolling_phase_test(DSO, window=60, alpha=0.05, min_valid=None):
             'p_value' : float (two-sided p-value, NaN where undefined)
     """
     from scipy.stats import ttest_1samp
-    spi1 = self.spi_like_set[0]
+    spi1 = DSO.spi_like_set[0]
     n = len(spi1)
     if min_valid is None:
         min_valid = window // 2
