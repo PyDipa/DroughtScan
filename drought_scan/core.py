@@ -4079,29 +4079,105 @@ class BaseDroughtAnalysis:
 
         return deficit
 
-    def find_trends(self, var=None, window=None):
+    def find_trends(self, windows=None, neutral_band=0.5, window=None, var=None):
         """
-        Analyze trends in a variable using a rolling window and linear regression.
+        The numbers behind `plot_trends()`: the water deficit/surplus over one or
+        more moving windows, in native units, obtained from the reverse SPI.
 
-        Args:
-            var (ndarray, optional): Variable to analyze. Defaults to self.CDN.
-            window (int, optional): Rolling window size in months. Defaults to 60.
+        For each window W this is exactly what `plot_cdn_trends` draws as bars: the
+        SPI-like index at accumulation scale W, mapped back to native cumulative
+        units through the fitted distribution (`deficit_from_spi`, i.e. the exact
+        `spi_to_native` inverse) relative to the SPI=0 reference, then blanked
+        wherever |SPI_W| < `neutral_band` so that only anomalies outside the
+        near-neutral band carry a magnitude. Same convention `plot_spatial`
+        applies to its maps via its own `neutral_band`.
 
-        Returns:
-            dict: Results of the rolling trend analysis, containing:
-                - 'trend': Array with -1 (negative trend), 0 (no trend), 1 (positive trend).
-                - 'slope': Array with slope coefficients.
-                - 'p_value': Array with p-values.
-                - 'delta': Array with the cumulative change (slope * window size).
+        Why the name outlived its original statistic
+        --------------------------------------------
+        This method used to run a rolling OLS regression over `self.CDN` and report
+        slopes, p-values and a significance flag. That was wrong twice over. The CDN
+        is a cumulative sum - a near-random-walk on which regression p-values are
+        spurious by construction, which `utils.statistics._rolling_phase_test` states
+        in its own docstring while testing the SPI-1 LEVEL instead. And
+        `plot_cdn_trends` had already stopped using the result: its call is commented
+        out there and the bars are gated on |SPI_W| >= 0.5, so the figure and the
+        method had silently drifted apart, the old behaviour surviving only in
+        `plot_cdn_trends_old`.
+
+        The method now returns what the figure actually draws, and the figure calls
+        it, so there is one implementation rather than two. For a genuine
+        significance test of a sustained wet/dry phase, use
+        `utils.statistics._rolling_phase_test`, which tests the mean of SPI-1
+        (approximately serially independent) over a window against zero.
+
+        Parameters
+        ----------
+        windows : int or sequence of int, optional
+            Accumulation scale(s) in months, each equal to its own moving-window
+            length. Defaults to `self.K`. Scales beyond `self.K` are fitted on the
+            fly by `_compute_spi`.
+        neutral_band : float, default 0.5
+            Half-width, in SPI units, of the near-neutral band zeroed out of
+            `anomaly_masked`. Pass 0 to keep every value.
+        window : int, optional
+            Deprecated alias for a single `windows` value.
+        var : ignored
+            Deprecated. The old signature accepted an arbitrary external series;
+            the reverse SPI is defined only against THIS object's fitted
+            distributions, so there is nothing meaningful to compute for a
+            foreign array. Passing it raises.
+
+        Returns
+        -------
+        dict
+            ``{W: {"spi", "anomaly", "anomaly_masked", "unit"}}``, one entry per
+            requested window, every array aligned with `self.ts`. `anomaly` is the
+            full reverse-SPI series; `anomaly_masked` is the same with the neutral
+            band zeroed - the bars. Units are millimetres for Precipitation and
+            cubic metres (total volume) for Streamflow.
         """
-        from drought_scan.utils.statistics import _rolling_trend_analysis
 
-        # Default to a window size of 60 if none is provided
-        if window is None:
-            window = 60
-        if var is None:
-            var = self.CDN
-        results = _rolling_trend_analysis(var=var, window=window, significance=0.05)
+        if var is not None:
+            raise TypeError(
+                "find_trends(var=...) is no longer supported: the reverse SPI is "
+                "defined against this object's own fitted distributions, so an "
+                "external series has no deficit to report. Build a DroughtScan "
+                "object around that series instead, or use "
+                "utils.statistics._rolling_phase_test for a level test."
+            )
+        if window is not None:
+            import warnings
+            warnings.warn(
+                "find_trends(window=...) is deprecated; use windows=... .",
+                DeprecationWarning, stacklevel=2
+            )
+            if windows is None:
+                windows = window
+
+        if windows is None:
+            windows = self.K
+        ws = [int(w) for w in np.atleast_1d(windows).ravel()]
+        if any(w < 1 for w in ws):
+            raise ValueError("windows must be positive month-scales.")
+
+        # unit = "m3" if isinstance(self, Streamflow) else "mm"
+        unit = 'mm-eq' if isinstance(self, Streamflow) else "mm"
+        results = {}
+        for w in ws:
+            if w <= self.K:
+                spi_w = self.spi_like_set[w - 1, :]
+            else:
+                spi_w, _ = self._compute_spi(month_scale=w)
+            anomaly = self.deficit_from_spi(window=w, spi=spi_w)
+            if isinstance(self, Streamflow):
+                anomaly = anomaly / (self.area_kmq * 1e6) * 1000
+
+            masked = anomaly.copy()
+            if neutral_band:
+                with np.errstate(invalid="ignore"):
+                    masked[(spi_w > -neutral_band) & (spi_w < neutral_band)] = 0
+            results[w] = {"spi": spi_w, "anomaly": anomaly,
+                          "anomaly_masked": masked, "unit": unit}
         return results
 
     def volume_anomaly_rolling(self, window):

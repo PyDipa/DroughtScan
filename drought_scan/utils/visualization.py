@@ -689,7 +689,8 @@ def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
 
     anni = np.unique(DSO.m_cal[:, 1]).astype(int)
     if unit is None:
-        unit = "m³" if isinstance(DSO, Streamflow) else "mm"
+        # "m³"
+        unit = "mm-eq" if isinstance(DSO, Streamflow) else "mm"
 
 
 
@@ -702,12 +703,15 @@ def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
         else:
             spi_w, _ = DSO._compute_spi(month_scale=window)
 
+
         # Deficit/surplus
         anomaly = DSO.deficit_from_spi(window=window, spi=spi_w)
+        if isinstance(DSO, Streamflow):
+            anomaly = anomaly / (DSO.area_kmq * 1e6) * 1000
 
         val = anomaly.copy()
         val[(spi_w>-0.5) & (spi_w<0.5) ] = 0
-        # val[R['trend'] == 0] = 0  # azzera dove non c'è trend significativo
+
 
         # --- CDN, asse sinistro ---
         line1, = ax[i].plot(DSO.CDN, '-k', label='CDN')
@@ -739,7 +743,9 @@ def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
             ax2.set_ylim(yticks[0], yticks[-1])
 
         lines = [line1, line2[0]]
-        labels = ['CDN', f'water anomaly over {window} months (sig. trend only)']
+        labels = ['CDN',
+                  f'water anomaly over {window} months '
+                  f'(|{DSO.index_name}{window}| \u2265 {NEUTRAL_BAND})']
 
         if show_spi:
             ax3 = ax[i].twinx()
