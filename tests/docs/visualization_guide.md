@@ -138,38 +138,31 @@ Detect long-term positive/negative cycles with a rolling window (default=60 mont
 
 ```python
 window = 36
-R = ds.find_trends(window=window)
+R = ds.find_trends(windows=window)[window]
 
-# Arrays returned:
-# 'trend': -1 (negative), 0 (none), 1 (positive)
-# 'slope': slope coefficient
-# 'p_value': statistical significance
-# 'delta': cumulative change of the CDN over the window (standardized units)
+# Arrays returned, all aligned with ds.ts:
+# 'spi'            : SPI-like index at accumulation scale `window`
+# 'anomaly'        : deficit (<0) / surplus (>0) in native units (mm, or m³ for Streamflow)
+# 'anomaly_masked' : the same, zeroed inside the near-neutral band |SPI| < 0.5
+# 'unit'           : 'mm' or 'm3'
 
-# Example: trend status in Nov 2017
+# Example: state at Nov 2017
 date_idx = np.where((ds.m_cal[:,0]==11) & (ds.m_cal[:,1]==2017))[0][0]
-print(f"Trend at Nov 2017 (W={window}m): "
-      f"direction={R['trend'][date_idx]}, p-value={R['p_value'][date_idx]:.3f}")
+print(f"Nov 2017, last {window} months: SPI{window}={R['spi'][date_idx]:.2f}, "
+      f"anomaly={R['anomaly'][date_idx]:.0f} {R['unit']}")
 
-# To convert the trend into physical units (mm or m^3), see
-# `deficit_from_spi` in the subsection below.
+# Already in physical units: `find_trends` calls `deficit_from_spi` internally,
+# which inverts the fitted distribution exactly (`spi_to_native`).
 
 ```
 
-**Using external variables**
+**External variables are no longer accepted**
 
-By default, `find_trends` operates on CDN, but it can also be applied to any external time series aligned with the same calendar:
-
-```python
-import numpy as np
-n = 600
-rng = np.random.default_rng(0)
-
-t = np.arange(n)
-my_timeseries = 0.5*np.sin(2*np.pi*t/50) + 0.3*np.sin(2*np.pi*t/200) + rng.normal(0, 0.2, n)
-
-R = ds.find_trends(var=my_timeseries, window=48)
-```
+`find_trends(var=...)` used to run its regression on any array. The reverse SPI is
+defined only against *this* object's fitted distributions, so a foreign series has
+no deficit to report and the argument now raises `TypeError`. Build a DroughtScan
+object around that series instead, or use `utils.statistics._rolling_phase_test`
+for a level test on an arbitrary SPI-1-like series.
 
 ### Plot trends
 
@@ -199,9 +192,10 @@ ds.plot_trends(windows=[36], ax=axs[0])
 ds.plot_trends(windows=[60], ax=axs[1])
 ```
 
-> **Note**: `plot_trends` always visualizes the CDN trend; it does not accept a
-> custom variable. Use `find_trends(var=...)` to compute trends on external
-> series.
+> **Note**: `plot_trends` draws the CDN plus the deficit/surplus bars for the
+> requested windows; it does not accept a custom variable. `find_trends(windows=...)`
+> returns the same numbers programmatically — the figure calls it, so the two
+> cannot disagree.
 
 ### Cumulative deficit/surplus in physical units
 

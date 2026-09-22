@@ -298,18 +298,28 @@ anomaly over time, so it is a natural starting point to identify
 
 ### Detecting trends
 
-`find_trends(window=W)` applies a rolling linear regression to the CDN over a
-moving window of `W` months and flags **monotonic, statistically significant**
-trends (p < 0.05). Returns four arrays:
+`find_trends(windows=W)` returns the water deficit/surplus accumulated over a
+moving window of `W` months, in native units, obtained from the **reverse SPI**:
+the SPI-like index at accumulation scale `W`, mapped back through the fitted
+distribution (`spi_to_native`) relative to the SPI = 0 reference. These are
+exactly the bars `plot_trends()` draws.
 
 ```python
-window = 36
-R = ds.find_trends(window=window)
-# R['trend']  : -1 negative, 0 none, 1 positive
-# R['slope']  : slope coefficient of the regression
-# R['p_value']: p-value of the trend test
-# R['delta']  : cumulative CDN change over the window (slope × W), in standardized units
+R = ds.find_trends(windows=[12, 36])
+# R[36]['spi']            : SPI-like index at scale 36
+# R[36]['anomaly']        : deficit (<0) / surplus (>0), mm for Precipitation,
+#                           m³ of total volume for Streamflow
+# R[36]['anomaly_masked'] : the same, zeroed where |SPI36| < 0.5 (the near-neutral
+#                           band), i.e. what gets plotted
+# R[36]['unit']           : 'mm' or 'm3'
 ```
+
+> Until 2026-09 this method ran a rolling OLS regression on the CDN and reported
+> slopes and p-values. The CDN is a cumulative sum, so those p-values were
+> spurious by construction, and `plot_trends()` had already stopped using them.
+> For a genuine test of a sustained wet/dry phase, use
+> `utils.statistics._rolling_phase_test`, which tests the **mean of SPI-1**
+> (approximately serially independent) over a window against zero.
 
 Larger `W` filters short-term oscillations and emphasizes structural cycles.
 For typical basin-scale analyses, **W = 36–60 months** captures multi-annual

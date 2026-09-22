@@ -72,6 +72,8 @@ from drought_scan.utils.visualization import (
     plot_overview,
     plot_severe_events,
     spi_cmap,
+    _plot3_peak_clusters,
+    _plot_benchmark_ci_box,
 )
 
 # --- statistics -------------------------------------------------------------
@@ -85,95 +87,6 @@ from drought_scan.utils.statistics import (
     WEIGHT_LABELS,
     # _rolling_trend_analysis,
 )
-
-
-def _plot3_peak_clusters(ax, MatCorr, K_range, summary, title="", legend=True):
-    """The peak/cluster figure of analyze_correlation[_seasonal]: the per-scheme R²(K) curves, a
-    dark CROSS at every scheme's peak (x = peak K with its bootstrap CI, y = peak
-    R² with its CI), and the clusters. Each K cluster is drawn as one or more
-    very transparent boxes that share its K extent (``K_cluster_CI`` wide) and
-    are stacked at the ``R2_CI`` height of each response sub-cluster, tinted with
-    that sub-cluster's leading-scheme hue. A cluster that does not sub-split by
-    R² shows a single box, as before."""
-    from matplotlib.patches import Rectangle
-    from matplotlib.colors import to_rgba
-
-    pbf = summary.get("peak_by_family", {})
-    xk = np.arange(1, len(K_range) + 1)
-    for wi, name in enumerate(pbf):
-        ax.plot(xk, MatCorr[:, wi], linewidth=1.6, label=name)
-        d = pbf[name]
-        pr, kk = d.get("peak_R2"), d.get("argmax_K")
-        if kk and pr is not None and np.isfinite(pr):
-            clo, chi = d["peak_CI"]
-            klo, khi = d.get("K_CI", (np.nan, np.nan))
-            yerr = [[max(0.0, pr - clo)], [max(0.0, chi - pr)]]
-            xerr = ([[max(0.0, kk - klo)], [max(0.0, khi - kk)]]
-                    if np.all(np.isfinite([klo, khi])) else None)
-            ax.errorbar(kk, pr, yerr=yerr, xerr=xerr, fmt='o', ms=5, color='0.3',
-                        ecolor='0.3', elinewidth=1.1, capsize=3, zorder=5)
-
-    for c in summary.get("clusters", []):
-        klo, khi = c["K_cluster_CI"]
-        if not np.all(np.isfinite([klo, khi])):
-            continue
-        subs = c.get("subclusters") or [{"R2_CI": c["R2_cluster_CI"],
-                                         "color": c.get("color", "#efe08c")}]
-        subs = [su for su in subs if np.all(np.isfinite(su["R2_CI"]))]
-        if not subs:
-            continue
-        rtop = max(su["R2_CI"][1] for su in subs)
-        # shared vertical dotted segments: the K-CI edges of the whole cluster.
-        for xv in (klo, khi):
-            ax.plot([xv, xv], [0, rtop], color="0.8", ls=":", lw=0.8, zorder=0.5)
-        # one tinted box per response sub-cluster, all sharing the K extent; a
-        # thin coloured edge separates stacked sub-boxes.
-        for su in subs:
-            rlo, rhi = su["R2_CI"]
-            col = su.get("color", c.get("color", "#efe08c"))
-            ax.add_patch(Rectangle(
-                (klo, rlo), max(khi - klo, 0.4), max(rhi - rlo, 1e-3),
-                facecolor=to_rgba(col, 0.15), edgecolor=to_rgba(col, 0.55),
-                linewidth=0.8, zorder=0))
-            # dotted segments to the R² axis: the two edges that define this box.
-            for yv in (rlo, rhi):
-                ax.plot([1, khi], [yv, yv], color="0.8", ls=":", lw=0.8, zorder=0.5)
-
-    ax.set_xlim(1, len(K_range))
-    ax.set_ylim(0, 1)
-    ax.set_xlabel("Month-scale (K)", fontweight="bold", fontsize=11)
-    ax.set_ylabel(r"$R^2$", fontweight="bold", fontsize=11)
-    ax.grid(alpha=0.3)
-    if legend:
-        ax.legend(fontsize=9, loc="lower right")
-    if title:
-        ax.set_title(title, fontsize=11, fontweight="bold")
-
-
-def _plot_benchmark_ci_box(ax, ci, k_hat, r2_hat, color="#c1121f"):
-    """Overlay the block-bootstrap CI of ``(optimal_K, R²)`` on a benchmark's
-    R²_adj(K) panel: a translucent rectangle spanning the K-CI on x (lag months)
-    and the R²-CI on y, plus an errorbar cross at the point estimate. ``ci`` is
-    a benchmark result's ``'ci'`` dict; a no-op when it lacks finite
-    ``optimal_K`` / ``R2_adj_opt`` intervals."""
-    from matplotlib.patches import Rectangle
-    from matplotlib.colors import to_rgba
-
-    klo, khi = ci.get("optimal_K", (np.nan, np.nan))
-    rlo, rhi = ci.get("R2_adj_opt", (np.nan, np.nan))
-    if np.all(np.isfinite([klo, khi, rlo, rhi])):
-        ax.add_patch(Rectangle(
-            (klo, rlo), max(khi - klo, 0.4), max(rhi - rlo, 1e-3),
-            facecolor=to_rgba(color, 0.12), edgecolor=to_rgba(color, 0.55),
-            linewidth=0.8, zorder=0, label="bootstrap 95% CI"))
-        for xv in (klo, khi):
-            ax.plot([xv, xv], [0, rhi], color="0.8", ls=":", lw=0.8, zorder=0.5)
-    xerr = ([[max(0.0, k_hat - klo)], [max(0.0, khi - k_hat)]]
-            if np.all(np.isfinite([klo, khi])) else None)
-    yerr = ([[max(0.0, r2_hat - rlo)], [max(0.0, rhi - r2_hat)]]
-            if np.all(np.isfinite([rlo, rhi])) else None)
-    ax.errorbar(k_hat, r2_hat, xerr=xerr, yerr=yerr, fmt='o', ms=5, color=color,
-                ecolor=color, elinewidth=1.1, capsize=3, zorder=5)
 
 
 class BaseDroughtAnalysis:
