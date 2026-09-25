@@ -608,13 +608,14 @@ A["MatCorr"]        # (K, 5)      the point estimate, exactly as before
 A["MatCorr_ci"]     # (2, K, 5)   [lo, hi] percentile band
 A["MatCorr_boot"]   # (B, K, 5)   every replica's surface (for your own stats)
 A["boot_meta"]      # dict: block_length, n_blocks, contaminated_fraction (K,), ...
-A["summary"]        # cluster table: cluster / K / sub-cluster / R2 — see below
+A["summary"]        # per-scheme table: peak K / peak R2 (+ CIs) — see below
 ```
 
 `analyze_correlation_seasonal(..., n_boot=500)` builds **one** replica set on the
 continuous overlap and slices it per season, so each season's dict gains
-`"R2_boot"`, `"R2_ci"` and `"summary"`, plus a top-level `result["summary"]`
-table with one row per season.
+`"R2_boot"`, `"R2_ci"` and `"summary"` (the raw per-scheme bootstrap result for
+that season), plus a top-level `result["summary"]` table with one row per
+(season, weighting scheme).
 
 ---
 
@@ -708,11 +709,11 @@ bootstrap on the whole continuous series (Steps 1–6), then — only at the end
 after SPI/SQI1 are rebuilt — keep the months of the season of interest and
 compute R² on that subset.
 
-#### The `summary` table — clusters and sub-clusters
+#### The `summary` table — one row per weighting scheme
 
 `analyze_correlation_seasonal(..., n_boot>0)` builds a table with **one row per
-(season, K cluster, R² sub-cluster)** at `result["summary"]` (a pandas
-DataFrame); the raw per-season pieces are in `result[season]["summary"]`.
+(season, weighting scheme)** at `result["summary"]` (a pandas DataFrame); the
+raw per-season bootstrap result is in `result[season]["summary"]`.
 `analyze_correlation` builds the same with `season = "whole period"`. It is also
 printed.
 
@@ -722,85 +723,57 @@ highest R² it reaches over all K, the K where that happens, and a 95 % CI for
 (percentiles of the per-replica peak K, a whole-number range). Those are the
 horizontal + vertical arms of the **cross** in the peak figure.
 
-**Level 1 — clusters, by timescale.** Instead of grouping schemes by how well
-they score, group them by **the K they peak at**. Two schemes that peak at
-(nearly) the same K are describing the same *response mechanism* of the basin.
+**Which schemes are not distinguishable.** Two schemes are statistically
+indistinguishable when **each one's observed peak K falls inside the other's
+bootstrap K CI** (symmetric, on K) **and** the same holds for their peak R² CIs
+— i.e. neither the timescale nor the strength of the response separates them.
+A scheme whose peak K or peak R² sits clearly outside another's CI stays on its
+own. This is exactly the rule that decides which schemes share the same marker
+symbol at their peak in the response-surface figure (Fig. 3, see below); the
+table's `not_distinguishable_from` column names them directly.
 
-- *Build:* two schemes are linked when **each one's peak K falls inside the
-  other's K CI** (symmetric, on K); the clusters are the connected groups. A
-  scheme whose peak K sits clearly outside the others' K CIs stays **on its own**.
-  A flat, unresolved season (every K CI is wide) links everything into one
-  cluster with a wide box.
-- *Per cluster:* `K` = the **median** over the cluster's schemes of their peak K;
-  `K_CI` = percentiles of the per-replica median. Median, not maximum → no
-  "winner's curse".
-
-**Level 2 — sub-clusters, by response.** Within a cluster that holds more than
-one scheme, ask whether those schemes reach the **same R²** or not. The **same
-rule** is re-applied, now on peak R²: two schemes stay together when each one's
-peak R² falls inside the other's **R² CI**; schemes that reach clearly separated
-R² split into their own sub-cluster. A one-scheme cluster has a single
-sub-cluster (that scheme's own R² CI).
-
-- *Per sub-cluster:* `R2` = the median peak R² over its schemes; `R2_CI` =
-  percentiles of the per-replica median. Sub-clusters are numbered by
-  **decreasing R²**, so `sub-cluster` 1 is always the strongest.
-
-**Cluster reference — a one-name handle.** Two or more schemes lumped into one
-K cluster describe the same mechanism, but `K`/`R2` above are cluster
-**medians**, not any one scheme's own numbers. For a quick label, each cluster
-also carries a *reference scheme*: for a **2-scheme** cluster, the member with
-the **shorter** peak K (the conservative read — the shorter memory already
-captures the shared signal); for a **3+-scheme** cluster, the member whose
-peak K is **closest to the cluster median** (ties → shorter K). No scheme is
-privileged, not even EW. It is reported with **that scheme's own** peak K and
-R², each with its own bootstrap CI (`ref_K_CI` / `ref_R2_CI`) — not the
-cluster's median values. Purely a label: the SIDI itself keeps using each
-scheme's own K regardless of which one is picked as reference.
-
-The printed recap (below the table) shows one line per cluster with this
-reference, scheme names abbreviated for that line only (`ew`, `ldw`, `geodw`,
-`liw`, `geoiw` — the table itself keeps the full `WEIGHT_LABELS` names), and
-the cluster's median K in parentheses as a reminder of how the reference was
-picked:
+It is also printed, one block per season:
 
 ```
-  cluster reference (2 schemes -> shorter K; more -> nearest the cluster median K):
-    DJF        cluster 1:  ref = liw  K=4 [3, 6]  R2=0.664 [0.602, 0.752]   (cluster median K = 4.0)
+  --- bootstrap peak summary (per weighting scheme) — DJF ---
+   ew       peak K=6    [4, 12]      peak R2=0.678  [0.617, 0.796]
+   lindw    peak K=9    [6, 12]      peak R2=0.687  [0.625, 0.806]
+   geodw    peak K=12   [8, 12]      peak R2=0.689  [0.626, 0.808]
+   liniw    peak K=4    [3, 11]      peak R2=0.664  [0.589, 0.773]
+   geoiw    peak K=4    [3, 10]      peak R2=0.662  [0.587, 0.773]
+  Note: not distinguishable (overlapping bootstrap CI, same marker in Fig. 3):
+    - ew, liniw, geoiw
+    - lindw, geodw
 ```
 
 | column | plain meaning |
 |---|---|
-| `cluster` | K-cluster ordinal (1, 2, …), by increasing `K`. No interpretive label — the box is meant to speak for itself. |
-| `K` `[K_CI]` | the cluster's typical response time in months, with its whole-number CI — the box's K-extent in the peak/cluster figure. Repeated on each sub-cluster row. |
-| `ref_scheme` | a one-name handle for the cluster (see above). Repeated per row. |
-| `ref_K` `[ref_K_CI]` | that reference scheme's **own** peak K and its bootstrap CI (not the cluster median). Repeated per row. |
-| `ref_R2` `[ref_R2_CI]` | that reference scheme's **own** peak R² and its bootstrap CI. Repeated per row. |
-| `sub-cluster` | ordinal (1, 2, …) within the cluster, by decreasing `R2`. One row only when the cluster's schemes do not differ in R². |
-| `families` | the weighting schemes in that sub-cluster. |
-| `R2` `[R2_CI]` | how well that sub-cluster explains the season, typically, with its CI — the box's R²-extent for that sub-cluster in the peak/cluster figure. |
+| `season` | season name, or `"whole period"` for `analyze_correlation`. |
+| `family` | the weighting scheme (`ew`, `lindw`, `geodw`, `liniw`, `geoiw` — `WEIGHT_LABELS`). |
+| `peak_K` `[peak_K_CI]` | the K where this scheme's R²(K) peaks, with its bootstrap CI. |
+| `peak_R2` `[peak_R2_CI]` | that peak R², with its bootstrap CI. |
+| `not_distinguishable_from` | the other schemes sharing this one's marker in Fig. 3 (see above), or `"-"` when this scheme's peak stands on its own. |
 
-Reading it: one cluster → a single response scale (a wide `K_CI` = the record
-cannot pin it down). Several clusters → distinct mechanisms at different K. Two
-or more sub-clusters inside one cluster → schemes that share a scale but not a
-strength; one sub-cluster → they agree.
+Reading it: a scheme with `"-"` in `not_distinguishable_from` marks its own
+response mechanism, at its own timescale and strength. Several schemes sharing
+a value there are not separable given the record length — pick any one of them,
+or keep the simplest (`ew`), rather than reading real meaning into which one
+happens to have the highest point estimate.
 
 The per-season dict also has `peak_by_family` — `peak_R2`, `argmax_K`, `peak_CI`
 and `K_CI` for every scheme, if you want them directly.
 
 #### What the figures show (with `n_boot>0`)
 
-The peak/cluster figure — **the first figure** of `analyze_correlation` /
+The peak figure — **the first figure** of `analyze_correlation` /
 `analyze_correlation_seasonal`, and the *only* R²(k) figure on the diagnostic
-site (global and seasonal calibration alike): the R²(k) curves, plus a dark grey
+site (global and seasonal calibration alike): the R²(k) curves, plus a
 **cross** at each scheme's peak (horizontal arm = the peak-K CI, vertical arm =
-the peak-R² CI), plus each **K cluster** as one or more very transparent
-**boxes**: all share the cluster's `K_CI` width and are stacked at the `R2_CI`
-height of each response **sub-cluster**, each tinted with that sub-cluster's
-leading-scheme hue and framed by light-grey dotted CI reference lines. A cluster
-that does not sub-split by R² shows a single box. The plain R²(k) curves — each
-with its per-cell percentile band — are still produced, demoted to the last
-figure.
+the peak-R² CI), drawn with a **marker symbol** — schemes that are not
+distinguishable (see above) share the same symbol, so the plot reads at a
+glance which schemes describe one response mechanism and which stand apart. The
+plain R²(k) curves — each with its per-cell percentile band — are still
+produced, demoted to the last figure.
 
 #### In one sentence
 

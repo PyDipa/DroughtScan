@@ -924,10 +924,10 @@ def test_contamination_fraction_grows_with_k():
     assert np.isclose(cf[-1], n_blocks * (K - 1) / T, atol=1e-6)
 
 
-def test_bootstrap_summary_table_is_a_per_cluster_table():
+def test_bootstrap_summary_table_is_a_per_family_table():
     """analyze_correlation_seasonal(n_boot>0) attaches a per-season 'summary'
-    dict (with scale clusters) and an overall table, one row per (season,
-    cluster)."""
+    dict (the raw _peak_summary, with its scale clusters — used by Fig. 3) and
+    an overall table, one row per (season, weighting scheme)."""
     driver, target = _corr_pair()
     S = driver.analyze_correlation_seasonal(target, agg="quarter", plot=False,
                                             n_boot=16, random_state=2)
@@ -967,11 +967,11 @@ def test_bootstrap_summary_table_is_a_per_cluster_table():
 
     tab = S["summary"]
     if hasattr(tab, "columns"):        # pandas available
-        assert list(tab.columns) == ["season", "cluster", "K", "K_CI",
-                                     "ref_scheme", "ref_K", "ref_K_CI",
-                                     "ref_R2", "ref_R2_CI",
-                                     "sub-cluster", "families", "R2", "R2_CI"]
+        assert list(tab.columns) == ["season", "family", "peak_K", "peak_K_CI",
+                                     "peak_R2", "peak_R2_CI",
+                                     "not_distinguishable_from"]
         assert set(tab["season"]) == set(seasons)
+        assert set(tab["family"]) == {"ew", "lindw", "geodw", "liniw", "geoiw"}
 
 
 def test_peak_summary_scale_clusters_group_by_k_not_r2():
@@ -1023,13 +1023,15 @@ def test_peak_summary_flat_season_collapses_to_one_wide_cluster():
     assert (khi - klo) >= K / 2
 
 
-def test_analyze_correlation_summary_has_cluster_columns():
+def test_analyze_correlation_summary_is_a_per_family_table():
     driver, target = _corr_pair()
     res = driver.analyze_correlation(target, plot=False, n_boot=16, random_state=3)
     tab = res["summary"]
     if hasattr(tab, "columns"):
-        assert {"cluster", "K_CI", "sub-cluster", "R2_CI"} <= set(tab.columns)
+        assert {"family", "peak_K", "peak_K_CI", "peak_R2", "peak_R2_CI",
+                "not_distinguishable_from"} <= set(tab.columns)
         assert set(tab["season"]) == {"whole period"}
+        assert set(tab["family"]) == {"ew", "lindw", "geodw", "liniw", "geoiw"}
 
 
 def test_peak_summary_r2_subclusters_split_same_K_by_response():

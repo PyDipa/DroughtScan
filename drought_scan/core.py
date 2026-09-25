@@ -83,7 +83,7 @@ from drought_scan.utils.statistics import (
     _peak_summary,
     _bootstrap_r2,
     _print_contamination_table,
-    _print_summary_table,
+    _print_peak_summary,
     WEIGHT_LABELS,
     # _rolling_trend_analysis,
 )
@@ -1391,18 +1391,14 @@ class BaseDroughtAnalysis:
               k-month accumulation crosses a block join and is NaN-masked, and the
               N that survives. This grows with K: the band at large K rests on
               fewer effective points and should be read with that in mind.
-            - "summary" (DataFrame): one row per **(K cluster, R² sub-cluster)** —
-              level 1 groups weighting schemes by the K they peak at (``cluster``
-              1..N by increasing ``K``); level 2 re-applies the same rule on peak
-              R² inside each K cluster (``sub-cluster`` 1..M by decreasing ``R2``),
-              so schemes that share a scale but differ in response split apart.
-              Columns: ``season, cluster, K, K_CI, ref_scheme, ref_K, ref_K_CI,
-              ref_R2, ref_R2_CI, sub-cluster, families, R2, R2_CI`` — ``K``/
-              ``K_CI`` and ``R2``/``R2_CI`` are the box boundaries drawn for
-              that cluster/sub-cluster in the response-surface figure; the
-              ``ref_*`` columns are a display reference scheme for the cluster
-              (see ``_peak_summary``), with THAT scheme's own peak K/R² and
-              their bootstrap CIs. See ``utils.statistics.bootstrap_summary_table``.
+            - "summary" (DataFrame): one row per weighting scheme — its peak K
+              and peak R², each with its bootstrap CI, plus
+              ``not_distinguishable_from`` naming the other schemes whose peak
+              K and peak R² CIs mutually overlap with this one's (the same
+              schemes drawn with a shared marker in the response-surface
+              figure, Fig. 3). Columns: ``season, family, peak_K, peak_K_CI,
+              peak_R2, peak_R2_CI, not_distinguishable_from``. See
+              ``utils.statistics.bootstrap_summary_table``.
         """
         self._check_correlation_eligible()
 
@@ -1528,11 +1524,11 @@ class BaseDroughtAnalysis:
 
             plt.plot(np.arange(-3, 4), np.arange(-3, 4), '--', color='grey')
             plt.grid()
-            plt.ylabel(f"{streamflow.index_name}1 ", fontweight="bold", fontsize=12)
-            plt.xlabel(f"{self.SIDI_name}", fontweight="bold", fontsize=12)
+            plt.ylabel(f"{streamflow.index_name}1 ", fontsize=14)
+            plt.xlabel(f"{self.SIDI_name}", fontsize=14)
             plt.title(f"{self.SIDI_name} vs.  {streamflow.index_name}1 . K={best_k} - "
                       f"weighting function n. {best_weight}; $R^2$ = {max_corr:.2f}",
-                      fontsize=14, fontweight="bold")
+                      fontsize=16)
             plt.legend(fontsize=12)
             plt.tight_layout()
             plt.show(block=False)
@@ -1549,10 +1545,10 @@ class BaseDroughtAnalysis:
             plt.grid()
             plt.legend(loc=3)
             plt.xticks(np.arange(len(K_range)), K_range)
-            plt.ylabel(r"$R^2$", fontweight="bold", fontsize=12)
-            plt.xlabel("Month-scale (K)", fontweight="bold", fontsize=12)
+            plt.ylabel(r"$R^2$", fontsize=14)
+            plt.xlabel("Month-scale (K)", fontsize=14)
             plt.title(f"Correlation Analysis: {self.SIDI_name}  vs.  {streamflow.index_name}1",
-                      fontsize=14, fontweight="bold")
+                      fontsize=16)
             plt.tight_layout()
             plt.show(block=False)
 
@@ -1584,7 +1580,7 @@ class BaseDroughtAnalysis:
             result["summary"] = bootstrap_summary_table(
                 {"whole period": {"R2_matrix": MatCorr, "R2_boot": MatCorr_boot,
                                   "summary": summary_raw}}, ci=ci)
-            _print_summary_table(result["summary"])
+            _print_peak_summary(summary_raw)
         return result
 
     def analyze_correlation_seasonal(self, streamflow, agg='quarter', plot=True, seasons=None,
@@ -1598,11 +1594,14 @@ class BaseDroughtAnalysis:
         ``analyze_correlation``. With ``n_boot > 0`` a single set of block-bootstrap
         replicas of the full pipeline is built on the continuous overlap and then
         sliced by season, so each season's dict gains ``"R2_boot"`` (n_boot, K, 5),
-        ``"R2_ci"`` (2, K, 5), ``"boot_meta"`` and ``"summary"``; the returned dict
-        also gains a top-level ``"summary"`` — the cluster table, one row per
-        (season, K cluster, R² sub-cluster): level 1 groups schemes by peak K,
-        level 2 re-splits each K cluster by peak R² (see
-        ``utils.statistics.bootstrap_summary_table``).
+        ``"R2_ci"`` (2, K, 5), ``"boot_meta"`` and ``"summary"`` (the raw
+        ``_peak_summary`` dict for that season); the returned dict also gains a
+        top-level ``"summary"`` — one row per (season, weighting scheme): its
+        peak K and peak R², each with its bootstrap CI, plus
+        ``not_distinguishable_from`` naming the other schemes whose peak K and
+        peak R² CIs mutually overlap with this one's (the same schemes drawn
+        with a shared marker in the response-surface figure, Fig. 3). See
+        ``utils.statistics.bootstrap_summary_table``.
         ``n_boot=0`` leaves the return value unchanged.
 
         Applicable to: Precipitation, Pet, Balance.
@@ -1751,7 +1750,7 @@ class BaseDroughtAnalysis:
                             f"{self.basin_name} — {self.SIDI_name} vs. "
                             f"{streamflow.index_name}1 — per-scheme peak (cross = 95% CI) "
                             f"and scale clusters",
-                            fontsize=12, fontweight="bold")
+                            fontsize=14)
                         f1.tight_layout()
                         plt.show(block=False)
 
@@ -1790,15 +1789,15 @@ class BaseDroughtAnalysis:
                     ax[i].tick_params(axis='x', labelsize=14)
                     ax[i].tick_params(axis='y', labelsize=14)
                     ax[i].grid()
-                    ax[i].set_title(season, fontweight="bold", fontsize=16)
-                    ax[i].set_ylabel(f"{streamflow.index_name}1", fontweight="bold", fontsize=16)
-                    ax[i].set_xlabel(f"{self.SIDI_name}", fontweight="bold", fontsize=16)
+                    ax[i].set_title(season, fontsize=18)
+                    ax[i].set_ylabel(f"{streamflow.index_name}1", fontsize=18)
+                    ax[i].set_xlabel(f"{self.SIDI_name}", fontsize=18)
                     ax[i].legend(fontsize=12)
 
                 fig.suptitle(
                     f"{self.basin_name} - {self.SIDI_name} vs. {streamflow.index_name}1 "
                     f"— Best seasonal configurations",
-                    fontsize=14, fontweight="bold")
+                    fontsize=16)
                 if i < ncols * nrows - 1:
                     fig.delaxes(ax[-1])
                 plt.tight_layout()
@@ -1822,15 +1821,15 @@ class BaseDroughtAnalysis:
                     ax[i].set_xticklabels(K_range[0:-1:3])
                     ax[i].tick_params(axis='x', labelsize=14)
                     ax[i].tick_params(axis='y', labelsize=14)
-                    ax[i].set_ylabel(r"$R^2$", fontweight="bold", fontsize=16)
-                    ax[i].set_xlabel("Month-scale (K)", fontweight="bold", fontsize=16)
-                    ax[i].set_title(name, fontweight="bold", fontsize=16)
+                    ax[i].set_ylabel(r"$R^2$", fontsize=18)
+                    ax[i].set_xlabel("Month-scale (K)", fontsize=18)
+                    ax[i].set_title(name, fontsize=18)
                     if i == 0:
                         ax[i].legend(loc=3)
                 fig.suptitle(
                     f"{self.basin_name} - Correlation Analysis: "
                     f"{self.SIDI_name} vs. {streamflow.index_name}1",
-                    fontsize=16, fontweight="bold")
+                    fontsize=18)
                 plt.tight_layout()
                 plt.show(block=False)
 
@@ -1839,7 +1838,9 @@ class BaseDroughtAnalysis:
         # Bootstrap only.
         if n_boot and n_boot > 0 and any("R2_boot" in v for v in MatCorr.values()):
             MatCorr["summary"] = bootstrap_summary_table(MatCorr, ci=ci)
-            _print_summary_table(MatCorr["summary"])
+            for name, vals in MatCorr.items():
+                if isinstance(vals, dict) and vals.get("summary") is not None:
+                    _print_peak_summary(vals["summary"], label=str(name))
 
         return MatCorr
 

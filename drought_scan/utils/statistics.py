@@ -1599,17 +1599,17 @@ def _bootstrap_benchmark(self_obj, streamflow, self_indices, streamflow_indices,
 # SPI/SQI/SIDI/R2(K, weight) surface per replica (reusing the generic
 # primitives above); _peak_summary turns the observed surface + its
 # bootstrap into per-scheme peaks and scale clusters; the two
-# bootstrap_summary_table / _print_summary_table render that as the
-# per-cluster table analyze_correlation[_seasonal] attach as 'summary'.
+# bootstrap_summary_table / _print_peak_summary render that as the
+# per-scheme table analyze_correlation[_seasonal] attach as 'summary'.
 # ===================================================================
 
 # The single source of truth for weighting-scheme names, in generate_weights
 # column order (0 uniform, 1 inverted linear, 2 inverted geometric, 3 linear,
 # 4 geometric). Short and lowercase on purpose: these feed plot titles,
-# legends, the families/ref_scheme columns of bootstrap_summary_table, and the
-# cluster-reference print - one name everywhere, instead of the three
-# different spellings ("EW"/"Lin. DW"/"Log. DW", "Geom. DW", "lgdw", ...) that
-# had drifted across core.py/the old WEIGHT_LABELS before this was unified
+# legends, the `family` column of bootstrap_summary_table, and the per-scheme
+# bootstrap peak print - one name everywhere, instead of the three different
+# spellings ("EW"/"Lin. DW"/"Log. DW", "Geom. DW", "lgdw", ...) that had
+# drifted across core.py/the old WEIGHT_LABELS before this was unified
 # (2026-09). "geodw"/"geoiw" and not "logdw"/"logiw": the weights are built
 # with np.geomspace (generate_weights) - geometric, nothing logarithmic.
 WEIGHT_LABELS = ("ew", "lindw", "geodw", "liniw", "geoiw")
@@ -1866,30 +1866,21 @@ def _peak_summary(M, r2_boot, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS, k_tol
 def bootstrap_summary_table(result, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS,
                             as_frame=True):
     """
-    One row per (season, K cluster, R² sub-cluster), from
+    One row per (season, weighting scheme), from
     ``analyze_correlation_seasonal(..., n_boot>0)`` (or a ``{"whole period":
-    {...}}`` wrapper for the non-seasonal case) — the paper table. Columns:
+    {...}}`` wrapper for the non-seasonal case) — the same numbers as
+    ``_print_peak_summary``, in table form. Columns:
 
     - ``season``
-    - ``cluster`` : ordinal (1, 2, ...) of the K cluster, by increasing ``K``.
-    - ``K`` [``K_CI``] : median of the K cluster's families' peak K, with its
-      bootstrap CI (integer interval) — the K-extent of the box drawn for this
-      cluster in the response-surface figure (Fig. 3). Repeated on each
-      sub-cluster row.
-    - ``ref_scheme`` [``ref_K`` / ``ref_K_CI``] [``ref_R2`` / ``ref_R2_CI``] :
-      a one-name handle on the K cluster — for a 2-scheme cluster the member
-      with the shorter peak K, for a larger cluster the member whose peak K is
-      nearest the cluster median (ties -> shorter K) — with THAT scheme's own
-      peak K and R², each with its own bootstrap CI (not the cluster/box
-      values above). Cosmetic; the SIDI still uses each scheme's own K.
-      Repeated per row.
-    - ``sub-cluster`` : ordinal (1, 2, ...) of the R² sub-cluster within that K
-      cluster, by decreasing ``R2`` (so 1 is the strongest). A K cluster whose
-      families do not differ in R² has a single sub-cluster row.
-    - ``families`` : the weighting schemes in that R² sub-cluster.
-    - ``R2`` [``R2_CI``] : median of the sub-cluster's families' peak R², with
-      its bootstrap CI — the R²-extent of that sub-cluster's box in Fig. 3.
-      Median, not max → no winner's curse.
+    - ``family`` : the weighting scheme (``WEIGHT_LABELS``).
+    - ``peak_K`` [``peak_K_CI``] : the K where this scheme's R²(K) peaks, with
+      its bootstrap CI.
+    - ``peak_R2`` [``peak_R2_CI``] : that peak R², with its bootstrap CI.
+    - ``not_distinguishable_from`` : the OTHER weighting schemes whose peak K
+      and peak R² bootstrap CIs both mutually contain this scheme's observed
+      peak (same rule, same groups as the shared marker in the response-
+      surface figure, Fig. 3 — see ``_peak_summary``), or ``"-"`` when this
+      scheme's peak stands on its own.
 
     ``as_frame=True`` returns a pandas DataFrame (falls back to a list of dicts).
     """
@@ -1906,31 +1897,29 @@ def bootstrap_summary_table(result, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS,
         if boot is None:
             continue
         s = d.get("summary") or _peak_summary(d["R2_matrix"], boot, ci, weight_labels)
-        for j, c in enumerate(s.get("clusters", []), start=1):
-            k_val = round(c["K_cluster"], 1) if np.isfinite(c["K_cluster"]) else np.nan
-            k_ci = _fmt_ci(c["K_cluster_CI"], ints=True)
-            subs = c.get("subclusters") or [{
-                "families": c["families"], "R2": c["R2_cluster"],
-                "R2_CI": c["R2_cluster_CI"]}]
-            ref_r2 = c.get("ref_R2", np.nan)
-            ref_k_ci = _fmt_ci(c.get("ref_K_CI", (np.nan, np.nan)), ints=True)
-            ref_r2_ci = _fmt_ci(c.get("ref_R2_CI", (np.nan, np.nan)))
-            for si, sc in enumerate(subs, start=1):
-                rows.append({
-                    "season": name,
-                    "cluster": j,
-                    "K": k_val,
-                    "K_CI": k_ci,
-                    "ref_scheme": c.get("ref_scheme"),
-                    "ref_K": c.get("ref_K"),
-                    "ref_K_CI": ref_k_ci,
-                    "ref_R2": round(ref_r2, 3) if np.isfinite(ref_r2) else np.nan,
-                    "ref_R2_CI": ref_r2_ci,
-                    "sub-cluster": si,
-                    "families": ", ".join(sc["families"]),
-                    "R2": round(sc["R2"], 3) if np.isfinite(sc["R2"]) else np.nan,
-                    "R2_CI": _fmt_ci(sc["R2_CI"]),
-                })
+        pbf = s.get("peak_by_family", {})
+
+        siblings = {}
+        for c in s.get("clusters", []):
+            for su in c.get("subclusters", []):
+                fams = su.get("families", [])
+                for f in fams:
+                    siblings[f] = [x for x in fams if x != f]
+
+        for fam in weight_labels:
+            fd = pbf.get(fam)
+            if fd is None:
+                continue
+            k, r2 = fd.get("argmax_K"), fd.get("peak_R2")
+            rows.append({
+                "season": name,
+                "family": fam,
+                "peak_K": k,
+                "peak_K_CI": _fmt_ci(fd.get("K_CI", (np.nan, np.nan)), ints=True),
+                "peak_R2": round(r2, 3) if r2 is not None and np.isfinite(r2) else np.nan,
+                "peak_R2_CI": _fmt_ci(fd.get("peak_CI", (np.nan, np.nan))),
+                "not_distinguishable_from": ", ".join(siblings.get(fam, [])) or "-",
+            })
     if as_frame:
         try:
             import pandas as pd
@@ -2073,40 +2062,39 @@ def _bootstrap_r2(self_obj, streamflow, self_indices, streamflow_indices,
         return boot_by_season, ci_by_season, meta
 
 
-def _print_summary_table(summary):
-    """Pretty-print the cluster table (DataFrame or list of dicts)."""
-    print("\n  --- bootstrap clusters (one row per season x K cluster x R2 sub-cluster) ---")
-    rows = summary if not hasattr(summary, "to_string") else None
-    if rows is None:
-        print(summary.to_string())
-        rows = summary.to_dict("records")
-    else:
-        for row in rows:
-            print("   " + "  ".join(f"{k}={v}" for k, v in row.items()))
-    _print_cluster_refs(rows)
-
-
-def _print_cluster_refs(rows):
-    """One line per K cluster: its display reference scheme (2 schemes -> the
-    shorter peak K; more -> the member whose peak K is nearest the cluster
-    median, ties -> shorter K), with that scheme's own K and peak R2 - each
-    with its own bootstrap CI - and the cluster median K in parentheses as a
-    reminder of how it was picked."""
-    if not rows or "ref_scheme" not in rows[0]:
+def _print_peak_summary(summary, weight_labels=WEIGHT_LABELS, label=None):
+    """Print the bootstrap peak result for one season (or the whole period):
+    peak K and peak R2, each with its bootstrap CI, one row per weighting
+    scheme (``summary["peak_by_family"]``, from ``_peak_summary``) — then a
+    note naming the weighting schemes that are NOT statistically
+    distinguishable, i.e. the ones sharing a response sub-cluster
+    (``summary["clusters"][*]["subclusters"]``) and therefore drawn with the
+    SAME marker in Fig. 3 (see ``_plot3_peak_clusters``)."""
+    pbf = (summary or {}).get("peak_by_family") or {}
+    if not pbf:
         return
-    print("\n  cluster reference (2 schemes -> shorter K; more -> nearest the cluster median K):")
-    seen = set()
-    for r in rows:
-        key = (r.get("season"), r.get("cluster"))
-        if key in seen:
+    header = "  --- bootstrap peak summary (per weighting scheme)"
+    header += f" — {label} ---" if label else " ---"
+    print(f"\n{header}")
+    for name in weight_labels:
+        d = pbf.get(name)
+        if d is None:
             continue
-        seen.add(key)
-        name = r.get("ref_scheme")
-        ref_r2 = r.get("ref_R2")
-        r2_txt = (f"{ref_r2:.3f}" if isinstance(ref_r2, (int, float)) and np.isfinite(ref_r2)
-                  else "-")
-        k_ci = r.get("ref_K_CI", "-")
-        r2_ci = r.get("ref_R2_CI", "-")
-        print(f"    {str(r.get('season')):<10} cluster {r.get('cluster')}:  "
-              f"ref = {name}  K={r.get('ref_K')} {k_ci}  R2={r2_txt} {r2_ci}"
-              f"   (cluster median K = {r.get('K')})")
+        k, r2 = d.get("argmax_K"), d.get("peak_R2")
+        k_ci, r2_ci = d.get("K_CI", (np.nan, np.nan)), d.get("peak_CI", (np.nan, np.nan))
+        k_txt = str(k) if k is not None else "-"
+        r2_txt = f"{r2:.3f}" if r2 is not None and np.isfinite(r2) else "-"
+        k_ci_txt = (f"[{int(k_ci[0])}, {int(k_ci[1])}]"
+                    if np.all(np.isfinite(k_ci)) else "-")
+        r2_ci_txt = (f"[{r2_ci[0]:.3f}, {r2_ci[1]:.3f}]"
+                     if np.all(np.isfinite(r2_ci)) else "-")
+        print(f"   {name:<8s} peak K={k_txt:<4s} {k_ci_txt:<12s} "
+              f"peak R2={r2_txt:<6s} {r2_ci_txt}")
+
+    groups = [su["families"] for c in summary.get("clusters", [])
+              for su in c.get("subclusters", []) if len(su.get("families", [])) > 1]
+    if groups:
+        print("  Note: not distinguishable (overlapping bootstrap CI, same "
+              "marker in Fig. 3):")
+        for fams in groups:
+            print(f"    - {', '.join(fams)}")

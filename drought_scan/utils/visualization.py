@@ -980,20 +980,37 @@ def plot__covariates(DSO, streamflow, weight_index, year_ext=None, split_plot=Fa
 # ==============================================================================
 
 def _plot3_peak_clusters(ax, MatCorr, K_range, summary, title="", legend=True):
-    """The peak/cluster figure of analyze_correlation[_seasonal]: the per-scheme R²(K) curves, a
-    dark CROSS at every scheme's peak (x = peak K with its bootstrap CI, y = peak
-    R² with its CI), and the clusters. Each K cluster is drawn as one or more
-    very transparent boxes that share its K extent (``K_cluster_CI`` wide) and
-    are stacked at the ``R2_CI`` height of each response sub-cluster, tinted with
-    that sub-cluster's leading-scheme hue. A cluster that does not sub-split by
-    R² shows a single box, as before."""
-    from matplotlib.patches import Rectangle
-    from matplotlib.colors import to_rgba
+    """The peak/cluster figure of analyze_correlation[_seasonal]: the per-scheme R²(K) curves
+    (dotted, to keep them out of the way of the crosses) and, at each scheme's
+    peak, a CROSS (x = peak K with its bootstrap CI, y = peak R² with its CI)
+    in a slightly darker shade of that scheme's own curve colour. Every cross
+    gets a centre marker; which symbol is incidental - the CI mutual-inclusion
+    rule (``_peak_summary``: same K cluster, then same R² sub-cluster) decides
+    only whether two schemes end up sharing one (same response group) or each
+    keep their own (independent group of one)."""
+    # One marker symbol per response sub-cluster - sized 1 or more - cycled so
+    # distinct groups are told apart without redrawing the boxes this figure
+    # used to carry. Every family belongs to exactly one sub-cluster, so this
+    # covers every scheme, not just the ones sharing a group.
+    _GROUP_MARKERS = ("o", "s", "^", "D", "v", "P", "X", "*")
+    group_marker = {}
+    gi = 0
+    for c in summary.get("clusters", []):
+        for su in c.get("subclusters", []):
+            sym = _GROUP_MARKERS[gi % len(_GROUP_MARKERS)]
+            gi += 1
+            for f in su.get("families", []):
+                group_marker[f] = sym
+
+    def _darken(color, factor=1):
+        r, g, b = to_rgb(color)
+        return (r * factor, g * factor, b * factor)
 
     pbf = summary.get("peak_by_family", {})
     xk = np.arange(1, len(K_range) + 1)
     for wi, name in enumerate(pbf):
-        ax.plot(xk, MatCorr[:, wi], linewidth=1.6, label=name)
+        line, = ax.plot(xk, MatCorr[:, wi], linewidth=1.6, linestyle="--", label=name)
+        color = line.get_color()
         d = pbf[name]
         pr, kk = d.get("peak_R2"), d.get("argmax_K")
         if kk and pr is not None and np.isfinite(pr):
@@ -1002,44 +1019,21 @@ def _plot3_peak_clusters(ax, MatCorr, K_range, summary, title="", legend=True):
             yerr = [[max(0.0, pr - clo)], [max(0.0, chi - pr)]]
             xerr = ([[max(0.0, kk - klo)], [max(0.0, khi - kk)]]
                     if np.all(np.isfinite([klo, khi])) else None)
-            ax.errorbar(kk, pr, yerr=yerr, xerr=xerr, fmt='o', ms=5, color='0.3',
-                        ecolor='0.3', elinewidth=1.1, capsize=3, zorder=5)
-
-    for c in summary.get("clusters", []):
-        klo, khi = c["K_cluster_CI"]
-        if not np.all(np.isfinite([klo, khi])):
-            continue
-        subs = c.get("subclusters") or [{"R2_CI": c["R2_cluster_CI"],
-                                         "color": c.get("color", "#efe08c")}]
-        subs = [su for su in subs if np.all(np.isfinite(su["R2_CI"]))]
-        if not subs:
-            continue
-        rtop = max(su["R2_CI"][1] for su in subs)
-        # shared vertical dotted segments: the K-CI edges of the whole cluster.
-        for xv in (klo, khi):
-            ax.plot([xv, xv], [0, rtop], color="0.8", ls=":", lw=0.8, zorder=0.5)
-        # one tinted box per response sub-cluster, all sharing the K extent; a
-        # thin coloured edge separates stacked sub-boxes.
-        for su in subs:
-            rlo, rhi = su["R2_CI"]
-            col = su.get("color", c.get("color", "#efe08c"))
-            ax.add_patch(Rectangle(
-                (klo, rlo), max(khi - klo, 0.4), max(rhi - rlo, 1e-3),
-                facecolor=to_rgba(col, 0.15), edgecolor=to_rgba(col, 0.55),
-                linewidth=0.8, zorder=0))
-            # dotted segments to the R² axis: the two edges that define this box.
-            for yv in (rlo, rhi):
-                ax.plot([1, khi], [yv, yv], color="0.8", ls=":", lw=0.8, zorder=0.5)
+            marker = group_marker.get(name, "o")
+            ecolor = _darken(color)
+            ax.errorbar(kk, pr, yerr=yerr, xerr=xerr, fmt=marker, ms=7,
+                        markerfacecolor=ecolor, markeredgecolor="black", markeredgewidth=2,
+                        ecolor=ecolor, elinewidth=4, capsize=3, zorder=5)
 
     ax.set_xlim(1, len(K_range))
     ax.set_ylim(0, 1)
-    ax.set_xlabel("Month-scale (K)", fontweight="bold", fontsize=11)
-    ax.set_ylabel(r"$R^2$", fontweight="bold", fontsize=11)
+    ax.set_xlabel("Month-scale (K)", fontsize=13)
+    ax.set_ylabel(r"$R^2$", fontsize=13)
     ax.grid(alpha=0.3)
     if legend:
         ax.legend(fontsize=9, loc="lower right")
     if title:
-        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.set_title(title, fontsize=13)
 
 
 def _plot_benchmark_ci_box(ax, ci, k_hat, r2_hat, color="#c1121f"):
@@ -1067,3 +1061,4 @@ def _plot_benchmark_ci_box(ax, ci, k_hat, r2_hat, color="#c1121f"):
             if np.all(np.isfinite([rlo, rhi])) else None)
     ax.errorbar(k_hat, r2_hat, xerr=xerr, yerr=yerr, fmt='o', ms=5, color=color,
                 ecolor=color, elinewidth=1.1, capsize=3, zorder=5)
+
