@@ -1076,3 +1076,39 @@ def test_peak_summary_r2_subclusters_split_same_K_by_response():
     cLone = by_fam[frozenset({"ew"})]
     assert len(cLone["subclusters"]) == 1
     assert cLone["subclusters"][0]["families"] == ["ew"]
+
+
+def test_economical_scheme_picks_smallest_K_among_globally_R2_tied():
+    """_economical_scheme uses rule 2 (peak-R2 CI mutual inclusion) GLOBALLY,
+    not nested inside a rule-1 K cluster: two schemes peaking at clearly
+    different K (so NOT in the same _peak_summary K cluster) but with
+    overlapping R2 CIs must still tie on R2, and the cheaper (smaller K) one
+    must be picked over the one with the higher point estimate. A scheme with
+    a clearly separated (lower) R2 must be excluded from the tie."""
+    from drought_scan.utils.statistics import _peak_summary, _economical_scheme
+
+    rng = np.random.default_rng(1)
+    K, W, B = 30, 5, 800
+    k = np.arange(1, K + 1, dtype=float)
+
+    def bump(center, amp, width):
+        return amp * np.exp(-((k - center) ** 2) / width)
+
+    surf = np.zeros((K, W))
+    surf[:, 0] = bump(5.0, 0.69, 20.0)     # ew: smaller K, R2 tied with geodw's
+    surf[:, 2] = bump(20.0, 0.70, 20.0)    # geodw: larger K, top point-estimate R2
+    surf[:, 3] = bump(5.0, 0.40, 20.0)     # liniw: clearly worse R2, must be excluded
+    surf[:, 1] = surf[:, 4] = bump(5.0, 0.10, 20.0)  # lindw/geoiw: far off, filler
+
+    boot = surf[None] * rng.normal(1.0, 0.012, (B, 1, 1)) \
+        + rng.normal(0.0, 0.002, (B, K, W))
+    s = _peak_summary(surf, boot)
+
+    # sanity: ew and geodw do NOT share a K cluster (rule 1 keeps them apart)
+    k_clusters = [set(c["families"]) for c in s["clusters"]]
+    assert not any({"ew", "geodw"} <= fams for fams in k_clusters)
+
+    cheapest, group = _economical_scheme(s["peak_by_family"])
+    assert cheapest == "ew"
+    assert set(group) == {"ew", "geodw"}
+    assert "liniw" not in group

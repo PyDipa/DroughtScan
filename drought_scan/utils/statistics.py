@@ -2062,6 +2062,48 @@ def _bootstrap_r2(self_obj, streamflow, self_indices, streamflow_indices,
         return boot_by_season, ci_by_season, meta
 
 
+def _economical_scheme(pbf, weight_labels=WEIGHT_LABELS):
+    """The cheapest weighting scheme that still reaches the top peak R2.
+
+    Rule 2 only (peak-R2 CI mutual inclusion), applied GLOBALLY across every
+    scheme — not nested inside a rule-1 K cluster like ``_peak_summary``'s own
+    sub-clusters. Two schemes are R2-indistinguishable when each one's
+    observed peak R2 falls inside the other's bootstrap peak-R2 CI. Starting
+    from the scheme with the highest peak R2, every other scheme reachable
+    through that pairwise rule (connected component) is R2-indistinguishable
+    from the best — even when their K clearly differs (rule 1 would have kept
+    them apart, e.g. in different K clusters). Among that group, the scheme
+    with the SMALLEST peak K is the most economical way to reach the top R2 —
+    the shortest memory that is not statistically worse than the best.
+
+    Returns ``(cheapest, group)`` — ``cheapest`` the scheme name, ``group``
+    the sorted list of R2-indistinguishable schemes (``[cheapest]`` alone
+    when nothing ties it) — or ``None`` if no scheme has a finite peak."""
+    fam_ok = [f for f in weight_labels
+              if f in pbf and pbf[f].get("argmax_K") is not None
+              and np.isfinite(pbf[f].get("peak_R2", np.nan))
+              and np.all(np.isfinite(pbf[f].get("peak_CI", (np.nan, np.nan))))]
+    if not fam_ok:
+        return None
+
+    def _r2_linked(a, b):
+        pa, pb = pbf[a]["peak_R2"], pbf[b]["peak_R2"]
+        (la, ha), (lb, hb) = pbf[a]["peak_CI"], pbf[b]["peak_CI"]
+        return (lb <= pa <= hb) and (la <= pb <= ha)
+
+    best = max(fam_ok, key=lambda f: pbf[f]["peak_R2"])
+    group, frontier = {best}, [best]
+    while frontier:
+        a = frontier.pop()
+        for b in fam_ok:
+            if b not in group and _r2_linked(a, b):
+                group.add(b)
+                frontier.append(b)
+
+    cheapest = min(group, key=lambda f: pbf[f]["argmax_K"])
+    return cheapest, sorted(group)
+
+
 def _print_peak_summary(summary, weight_labels=WEIGHT_LABELS, label=None):
     """Print the bootstrap peak result for one season (or the whole period):
     peak K and peak R2, each with its bootstrap CI, one row per weighting
@@ -2069,7 +2111,9 @@ def _print_peak_summary(summary, weight_labels=WEIGHT_LABELS, label=None):
     note naming the weighting schemes that are NOT statistically
     distinguishable, i.e. the ones sharing a response sub-cluster
     (``summary["clusters"][*]["subclusters"]``) and therefore drawn with the
-    SAME marker in Fig. 3 (see ``_plot3_peak_clusters``)."""
+    SAME marker in Fig. 3 (see ``_plot3_peak_clusters``) — and finally the
+    most economical scheme that still reaches the top R2 (see
+    ``_economical_scheme``)."""
     pbf = (summary or {}).get("peak_by_family") or {}
     if not pbf:
         return
@@ -2098,3 +2142,19 @@ def _print_peak_summary(summary, weight_labels=WEIGHT_LABELS, label=None):
               "marker in Fig. 3):")
         for fams in groups:
             print(f"    - {', '.join(fams)}")
+
+    econ = _economical_scheme(pbf, weight_labels)
+    if econ is not None:
+        cheapest, group = econ
+        d = pbf[cheapest]
+        k_ci, r2_ci = d.get("K_CI", (np.nan, np.nan)), d.get("peak_CI", (np.nan, np.nan))
+        k_ci_txt = (f"[{int(k_ci[0])}, {int(k_ci[1])}]"
+                    if np.all(np.isfinite(k_ci)) else "-")
+        r2_ci_txt = (f"[{r2_ci[0]:.3f}, {r2_ci[1]:.3f}]"
+                     if np.all(np.isfinite(r2_ci)) else "-")
+        others = [f for f in group if f != cheapest]
+        tie_txt = (f" (statistically tied on R2 with: {', '.join(others)})"
+                   if others else "")
+        print(f"  Most economical top-R2 scheme: {cheapest} "
+              f"(K={d['argmax_K']} {k_ci_txt}, R2={d['peak_R2']:.3f} {r2_ci_txt})"
+              f"{tie_txt}")

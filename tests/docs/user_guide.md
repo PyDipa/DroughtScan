@@ -744,6 +744,7 @@ It is also printed, one block per season:
   Note: not distinguishable (overlapping bootstrap CI, same marker in Fig. 3):
     - ew, liniw, geoiw
     - lindw, geodw
+  Most economical top-R2 scheme: geoiw (K=4 [3, 10], R2=0.662 [0.587, 0.773]) (statistically tied on R2 with: ew, geodw, lindw, liniw)
 ```
 
 | column | plain meaning |
@@ -759,6 +760,22 @@ response mechanism, at its own timescale and strength. Several schemes sharing
 a value there are not separable given the record length — pick any one of them,
 or keep the simplest (`ew`), rather than reading real meaning into which one
 happens to have the highest point estimate.
+
+**The "most economical" scheme — R² only, across the whole record.** The
+`not_distinguishable_from` groups above are nested: two schemes only land in
+the same group when they **also** share a K cluster (rule 1) — so `lindw` and
+`geodw` in the DJF example are each on their own there, even though their R²
+is statistically the same as everyone else's. The last printed line answers a
+different, simpler question, using **R² alone** (rule 2), applied globally
+across all five schemes regardless of K: starting from the scheme with the
+single highest peak R², every other scheme whose peak R² is statistically tied
+with it (mutual CI inclusion, chained transitively) joins the same group —
+even schemes at a clearly different K, which rule 1 would have kept apart.
+Within that group, the scheme with the **smallest peak K** is printed as the
+"most economical": the shortest, cheapest memory that is not measurably worse
+than the best. In the example, `geoiw` (K=4) is printed even though `geodw`
+(K=12) has the nominally higher point estimate — their R² CIs overlap, so the
+shorter-memory scheme is the more defensible pick.
 
 The per-season dict also has `peak_by_family` — `peak_R2`, `argmax_K`, `peak_CI`
 and `K_CI` for every scheme, if you want them directly.
