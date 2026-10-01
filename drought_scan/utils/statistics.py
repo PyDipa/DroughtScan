@@ -1889,6 +1889,8 @@ def bootstrap_summary_table(result, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS,
             return "-"
         return f"[{int(t[0])}, {int(t[1])}]" if ints else f"[{t[0]:.3f}, {t[1]:.3f}]"
 
+    from drought_scan.utils.drought_indices import effective_weights_at_optimum
+
     rows = []
     for name, d in result.items():
         if name == "summary" or not isinstance(d, dict) or "R2_matrix" not in d:
@@ -1906,11 +1908,15 @@ def bootstrap_summary_table(result, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS,
                 for f in fams:
                     siblings[f] = [x for x in fams if x != f]
 
+        bkpw = d.get("best_k_per_weight")
+        ew_data = effective_weights_at_optimum(bkpw, plot=False) if bkpw is not None else {}
+
         for fam in weight_labels:
             fd = pbf.get(fam)
             if fd is None:
                 continue
             k, r2 = fd.get("argmax_K"), fd.get("peak_R2")
+            mean_age = ew_data[fam]["mean_age"] if fam in ew_data else np.nan
             rows.append({
                 "season": name,
                 "family": fam,
@@ -1918,6 +1924,7 @@ def bootstrap_summary_table(result, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS,
                 "peak_K_CI": _fmt_ci(fd.get("K_CI", (np.nan, np.nan)), ints=True),
                 "peak_R2": round(r2, 3) if r2 is not None and np.isfinite(r2) else np.nan,
                 "peak_R2_CI": _fmt_ci(fd.get("peak_CI", (np.nan, np.nan))),
+                "mean_age": round(mean_age, 1) if np.isfinite(mean_age) else np.nan,
                 "not_distinguishable_from": ", ".join(siblings.get(fam, [])) or "-",
             })
     if as_frame:
