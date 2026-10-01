@@ -1785,36 +1785,6 @@ class BaseDroughtAnalysis:
                 plt.tight_layout()
                 plt.show(block=False)
 
-                # --- R²(k) curves per season with WEIGHT_COLORS and CI bands.
-                fig, ax = plt.subplots(figsize=figsize1, nrows=nrows, ncols=ncols)
-                ax = ax.ravel()
-                for i, name in enumerate(MatCorr.keys()):
-                    mat = MatCorr[name]['R2_matrix']
-                    mat_ci = MatCorr[name].get('R2_ci')
-                    xk = np.arange(mat.shape[0])
-                    for w in range(mat.shape[1]):
-                        color = WEIGHT_COLORS[w]
-                        ax[i].plot(xk, mat[:, w], label=wlabel[w], linewidth=2, color=color)
-                        if mat_ci is not None:
-                            ax[i].fill_between(xk, mat_ci[0, :, w], mat_ci[1, :, w],
-                                               color=color, alpha=0.15, linewidth=0)
-                    ax[i].grid()
-                    ax[i].set_xticks(np.arange(0, len(K_range), 3))
-                    ax[i].set_xticklabels(K_range[0:-1:3])
-                    ax[i].tick_params(axis='x', labelsize=14)
-                    ax[i].tick_params(axis='y', labelsize=14)
-                    ax[i].set_ylabel(r"$R^2$", fontsize=18)
-                    ax[i].set_xlabel("Month-scale (K)", fontsize=18)
-                    ax[i].set_title(name, fontsize=18)
-                    if i == 0:
-                        ax[i].legend(loc=3)
-                fig.suptitle(
-                    f"{self.basin_name} - Correlation Analysis: "
-                    f"{self.SIDI_name} vs. {streamflow.index_name}1",
-                    fontsize=18)
-                plt.tight_layout()
-                plt.show(block=False)
-
                 # --- Effective weights figure: one panel per season ---------------
                 seas_valid = list(MatCorr.keys())
                 n_s = len(seas_valid)
