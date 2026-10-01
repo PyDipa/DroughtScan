@@ -85,6 +85,7 @@ from drought_scan.utils.statistics import (
     _print_contamination_table,
     _print_peak_summary,
     WEIGHT_LABELS,
+    WEIGHT_COLORS,
     # _rolling_trend_analysis,
 )
 
@@ -1465,20 +1466,6 @@ class BaseDroughtAnalysis:
             # reference from self.SIDI.
             SIDI = self.recalculate_SIDI(K=int(K_range[best_k]))[self_indices, best_weight]
 
-            # --- Plot 1: each scheme = a CROSS at its peak (x = peak K CI,
-            #     y = peak R² CI); each K cluster as one or more very transparent
-            #     boxes sharing its K extent, stacked at the R2_CI of each
-            #     response sub-cluster and tinted with that sub-cluster's hue,
-            #     framed by light-grey dotted CI reference lines. Bootstrap only.
-            if summary_raw is not None:
-                _plot3_peak_clusters(
-                    plt.figure(figsize=(10, 6)).gca(), MatCorr, K_range, summary_raw,
-                    title=f"{self.basin_name} — {self.SIDI_name} vs. "
-                          f"{streamflow.index_name}1 — per-scheme peak (cross = 95% CI) "
-                          f"and scale clusters")
-                plt.tight_layout()
-                plt.show(block=False)
-
             # basic scan plot
             self.plot_scan(optimal_k=K_range[best_k], weight_index=best_weight)
 
@@ -1533,15 +1520,16 @@ class BaseDroughtAnalysis:
             plt.tight_layout()
             plt.show(block=False)
 
-            # --- Last figure: the plain R²(k) curves, with the per-cell
-            #     percentile CI band under each curve.
+            # --- R²(k) curves: one line per weighting scheme with WEIGHT_COLORS,
+            #     CI band underneath when bootstrap was run.
             plt.figure(figsize=(10, 5))
             xk = np.arange(len(K_range))
             for w in range(len(W.T)):
-                line, = plt.plot(xk, MatCorr[:, w], label=wlabel[w], linewidth=2)
+                color = WEIGHT_COLORS[w]
+                plt.plot(xk, MatCorr[:, w], label=wlabel[w], linewidth=2, color=color)
                 if MatCorr_ci is not None:
                     plt.fill_between(xk, MatCorr_ci[0, :, w], MatCorr_ci[1, :, w],
-                                    color=line.get_color(), alpha=0.15, linewidth=0)
+                                    color=color, alpha=0.15, linewidth=0)
             plt.grid()
             plt.legend(loc=3)
             plt.xticks(np.arange(len(K_range)), K_range)
@@ -1729,32 +1717,7 @@ class BaseDroughtAnalysis:
             plt.show(block=False)
         else:
             if plot:
-                # --- Plot 1: per-scheme R²(K) with a CROSS at each peak (x = peak
-                #     K CI, y = peak R² CI) and each K cluster as very transparent
-                #     boxes sharing its K extent, stacked at the R2_CI of each
-                #     response sub-cluster and tinted with that sub-cluster's hue.
-                #     Only when the bootstrap ran.
-                if n_boot and n_boot > 0:
-                    seas3 = [nm for nm in MatCorr if MatCorr[nm].get("summary") is not None]
-                    if seas3:
-                        f1, ax1 = plt.subplots(figsize=figsize1, nrows=nrows,
-                                               ncols=ncols, squeeze=False)
-                        ax1 = ax1.ravel()
-                        for i, name in enumerate(seas3):
-                            _plot3_peak_clusters(ax1[i], MatCorr[name]["R2_matrix"],
-                                                 K_range, MatCorr[name]["summary"],
-                                                 title=name, legend=(i == 0))
-                        for j in range(len(seas3), len(ax1)):
-                            f1.delaxes(ax1[j])
-                        f1.suptitle(
-                            f"{self.basin_name} — {self.SIDI_name} vs. "
-                            f"{streamflow.index_name}1 — per-scheme peak (cross = 95% CI) "
-                            f"and scale clusters",
-                            fontsize=14)
-                        f1.tight_layout()
-                        plt.show(block=False)
-
-                # --- Plot 2: Scatter plots ---
+                # --- Plot 1: Scatter plots ---
                 if len(seasons) > 5:
                     if cmc is not None:
                         c = plt.get_cmap(cmc.romaO, len(seasons))
@@ -1803,8 +1766,7 @@ class BaseDroughtAnalysis:
                 plt.tight_layout()
                 plt.show(block=False)
 
-                # --- Last figure: the plain R²(k) curves per season, with the
-                #     per-cell percentile CI band under each curve.
+                # --- R²(k) curves per season with WEIGHT_COLORS and CI bands.
                 fig, ax = plt.subplots(figsize=figsize1, nrows=nrows, ncols=ncols)
                 ax = ax.ravel()
                 for i, name in enumerate(MatCorr.keys()):
@@ -1812,10 +1774,11 @@ class BaseDroughtAnalysis:
                     mat_ci = MatCorr[name].get('R2_ci')
                     xk = np.arange(mat.shape[0])
                     for w in range(mat.shape[1]):
-                        line, = ax[i].plot(xk, mat[:, w], label=wlabel[w], linewidth=2)
+                        color = WEIGHT_COLORS[w]
+                        ax[i].plot(xk, mat[:, w], label=wlabel[w], linewidth=2, color=color)
                         if mat_ci is not None:
                             ax[i].fill_between(xk, mat_ci[0, :, w], mat_ci[1, :, w],
-                                               color=line.get_color(), alpha=0.15, linewidth=0)
+                                               color=color, alpha=0.15, linewidth=0)
                     ax[i].grid()
                     ax[i].set_xticks(np.arange(0, len(K_range), 3))
                     ax[i].set_xticklabels(K_range[0:-1:3])
