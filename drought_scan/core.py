@@ -40,6 +40,7 @@ from scipy import stats
 # --- drought_indices --------------------------------------------------------
 from drought_scan.utils.drought_indices import (
     baseline_indices,
+    effective_weights_at_optimum,
     f_kde,
     f_spei,
     f_spi,
@@ -1547,9 +1548,20 @@ class BaseDroughtAnalysis:
         best_k_per_weight = K_range[np.nanargmax(MatCorr, axis=0)]
         max_corr_per_weight = np.nanmax(MatCorr, axis=0)
 
+        ew_data = effective_weights_at_optimum(best_k_per_weight, plot=False)
         print("Best K per weighting scheme:")
         for w, (kw, rw) in enumerate(zip(best_k_per_weight, max_corr_per_weight)):
-            print(f"   {wlabel[w]:<40s} K={kw:<3d} R2={rw:.3f}")
+            age = ew_data[wlabel[w]]["mean_age"]
+            print(f"   {wlabel[w]:<40s} K={kw:<3d} R2={rw:.3f}  mean_age={age:.1f}m")
+
+        if plot:
+            fig_ew, ax_ew = plt.subplots(figsize=(7, 4.5))
+            effective_weights_at_optimum(
+                best_k_per_weight, plot=True, ax=ax_ew,
+                title=f"Effective weights at optimum K — "
+                      f"{self.SIDI_name} vs. {streamflow.index_name}1")
+            plt.tight_layout()
+            plt.show(block=False)
 
         result = {"best_k": K_range[best_k], "col_best_weight": best_weight,
                   "max_correlation": max_corr, 'spi_corr': R2_spi,
@@ -1683,6 +1695,13 @@ class BaseDroughtAnalysis:
                 "R2_matrix": M,
                 "sample number": np.count_nonzero(idx),
             }
+            ew_s = effective_weights_at_optimum(best_k_per_weight, plot=False)
+            print(f"   Best K per scheme (mean_age = barycenter of effective weight):")
+            for wi, lab in enumerate(wlabel):
+                rw = float(np.nanmax(M[:, wi]))
+                age = ew_s[lab]["mean_age"]
+                print(f"      {lab:<40s} K={int(best_k_per_weight[wi]):<3d} "
+                      f"R2={rw:.3f}  mean_age={age:.1f}m")
 
         # --- optional block-bootstrap confidence band (one replica set,
         #     built on the continuous overlap, then sliced per season) ---------
@@ -1793,6 +1812,23 @@ class BaseDroughtAnalysis:
                     f"{self.basin_name} - Correlation Analysis: "
                     f"{self.SIDI_name} vs. {streamflow.index_name}1",
                     fontsize=18)
+                plt.tight_layout()
+                plt.show(block=False)
+
+                # --- Effective weights figure: one panel per season ---------------
+                seas_valid = list(MatCorr.keys())
+                n_s = len(seas_valid)
+                fig_ew, axs_ew = plt.subplots(1, n_s, figsize=(5 * n_s, 4.5),
+                                              sharey=True)
+                for ax_ew, s in zip(np.atleast_1d(axs_ew), seas_valid):
+                    effective_weights_at_optimum(
+                        MatCorr[s]["best_k_per_weight"], plot=True, ax=ax_ew,
+                        title=s,
+                        n_lags=int(max(MatCorr[s]["best_k_per_weight"])) + 2)
+                fig_ew.suptitle(
+                    f"{self.basin_name} — Effective weights at optimum K "
+                    f"({self.SIDI_name} vs. {streamflow.index_name}1)",
+                    fontsize=14)
                 plt.tight_layout()
                 plt.show(block=False)
 
