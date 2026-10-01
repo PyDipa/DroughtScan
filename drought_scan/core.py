@@ -1815,16 +1815,20 @@ class BaseDroughtAnalysis:
                     f1.tight_layout()
                     plt.show(block=False)
 
-                # --- Effective weights figure: one panel per season ---------------
+                # --- Effective weights figure: same nrows/ncols as scatter --------
                 seas_valid = list(MatCorr.keys())
                 n_s = len(seas_valid)
-                fig_ew, axs_ew = plt.subplots(1, n_s, figsize=(5 * n_s, 4.5),
-                                              sharey=True)
-                for ax_ew, s in zip(np.atleast_1d(axs_ew), seas_valid):
+                fig_ew, axs_ew = plt.subplots(nrows=nrows, ncols=ncols,
+                                              figsize=figsize2, sharey=True,
+                                              squeeze=False)
+                axs_ew_flat = axs_ew.ravel()
+                for idx_s, s in enumerate(seas_valid):
                     effective_weights_at_optimum(
-                        MatCorr[s]["best_k_per_weight"], plot=True, ax=ax_ew,
-                        title=s,
+                        MatCorr[s]["best_k_per_weight"], plot=True,
+                        ax=axs_ew_flat[idx_s], title=s,
                         n_lags=int(max(MatCorr[s]["best_k_per_weight"])) + 2)
+                for j in range(n_s, nrows * ncols):
+                    fig_ew.delaxes(axs_ew_flat[j])
                 fig_ew.suptitle(
                     f"{self.basin_name} — Effective weights at optimum K "
                     f"({self.SIDI_name} vs. {streamflow.index_name}1)",
