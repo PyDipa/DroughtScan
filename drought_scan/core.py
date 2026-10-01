@@ -1541,6 +1541,15 @@ class BaseDroughtAnalysis:
             plt.tight_layout()
             plt.show(block=False)
 
+            if summary_raw is not None:
+                _plot3_peak_clusters(
+                    plt.figure(figsize=(10, 6)).gca(), MatCorr, K_range, summary_raw,
+                    title=f"{self.basin_name} — {self.SIDI_name} vs. "
+                          f"{streamflow.index_name}1 — per-scheme peak (cross = 95% CI) "
+                          f"and scale clusters")
+                plt.tight_layout()
+                plt.show(block=False)
+
         # Each weighting scheme peaks at its own K: MatCorr already scores every
         # (K, weight) pair, so the per-scheme optimum is just the argmax of each
         # column. Reported alongside the global best so that set_optimal_SIDI can
@@ -1784,6 +1793,27 @@ class BaseDroughtAnalysis:
                     fig.delaxes(ax[-1])
                 plt.tight_layout()
                 plt.show(block=False)
+
+                # --- Peak-cluster figure with cross CI: bootstrap only -----------
+                seas3 = [s for s in MatCorr if isinstance(MatCorr[s], dict)
+                         and MatCorr[s].get("summary") is not None]
+                if seas3:
+                    f1, ax1 = plt.subplots(nrows=nrows, ncols=ncols,
+                                           figsize=figsize1, squeeze=False)
+                    ax1 = ax1.ravel()
+                    for i, name in enumerate(seas3):
+                        _plot3_peak_clusters(ax1[i], MatCorr[name]["R2_matrix"],
+                                             K_range, MatCorr[name]["summary"],
+                                             title=name, legend=(i == 0))
+                    for j in range(len(seas3), len(ax1)):
+                        f1.delaxes(ax1[j])
+                    f1.suptitle(
+                        f"{self.basin_name} — {self.SIDI_name} vs. "
+                        f"{streamflow.index_name}1 — per-scheme peak (cross = 95% CI) "
+                        f"and scale clusters",
+                        fontsize=14)
+                    f1.tight_layout()
+                    plt.show(block=False)
 
                 # --- Effective weights figure: one panel per season ---------------
                 seas_valid = list(MatCorr.keys())

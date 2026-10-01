@@ -1009,8 +1009,8 @@ def _plot3_peak_clusters(ax, MatCorr, K_range, summary, title="", legend=True):
     pbf = summary.get("peak_by_family", {})
     xk = np.arange(1, len(K_range) + 1)
     for wi, name in enumerate(pbf):
-        line, = ax.plot(xk, MatCorr[:, wi], linewidth=1.6, linestyle="--", label=name)
-        color = line.get_color()
+        color = WEIGHT_COLORS[wi % len(WEIGHT_COLORS)]
+        ax.plot(xk, MatCorr[:, wi], linewidth=1.6, linestyle="--", label=name, color=color)
         d = pbf[name]
         pr, kk = d.get("peak_R2"), d.get("argmax_K")
         if kk and pr is not None and np.isfinite(pr):
