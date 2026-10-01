@@ -1831,7 +1831,7 @@ def _peak_summary(M, r2_boot, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS, k_tol
                 # K / R2 (+ CIs), not the cluster medians.
                 "ref_scheme": weight_labels[rep],
                 "ref_K": int(argK[rep]),
-                "ref_K_CI": ((int(K_CI[rep, 0]), int(K_CI[rep, 1]))
+                "ref_K_CI": ((int(np.floor(K_CI[rep, 0])), int(np.ceil(K_CI[rep, 1])))
                              if np.all(np.isfinite(K_CI[rep])) else (np.nan, np.nan)),
                 "ref_R2": float(peak_R2[rep]),
                 "ref_R2_CI": (float(peak_CI[rep, 0]), float(peak_CI[rep, 1])),
@@ -1849,7 +1849,7 @@ def _peak_summary(M, r2_boot, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS, k_tol
             "peak_R2": float(peak_R2[w]) if np.isfinite(peak_R2[w]) else np.nan,
             "argmax_K": int(argK[w]) if np.isfinite(argK[w]) else None,
             "peak_CI": (float(peak_CI[w, 0]), float(peak_CI[w, 1])),
-            "K_CI": ((int(K_CI[w, 0]), int(K_CI[w, 1]))
+            "K_CI": ((int(np.floor(K_CI[w, 0])), int(np.ceil(K_CI[w, 1])))
                      if np.all(np.isfinite(K_CI[w])) else (np.nan, np.nan)),
         } for w in range(n_w)}
 
@@ -2128,7 +2128,7 @@ def _print_peak_summary(summary, weight_labels=WEIGHT_LABELS, label=None):
         k_ci, r2_ci = d.get("K_CI", (np.nan, np.nan)), d.get("peak_CI", (np.nan, np.nan))
         k_txt = str(k) if k is not None else "-"
         r2_txt = f"{r2:.3f}" if r2 is not None and np.isfinite(r2) else "-"
-        k_ci_txt = (f"[{int(k_ci[0])}, {int(k_ci[1])}]"
+        k_ci_txt = (f"[{int(np.floor(k_ci[0]))}, {int(np.ceil(k_ci[1]))}]"
                     if np.all(np.isfinite(k_ci)) else "-")
         r2_ci_txt = (f"[{r2_ci[0]:.3f}, {r2_ci[1]:.3f}]"
                      if np.all(np.isfinite(r2_ci)) else "-")
@@ -2148,7 +2148,7 @@ def _print_peak_summary(summary, weight_labels=WEIGHT_LABELS, label=None):
         cheapest, group = econ
         d = pbf[cheapest]
         k_ci, r2_ci = d.get("K_CI", (np.nan, np.nan)), d.get("peak_CI", (np.nan, np.nan))
-        k_ci_txt = (f"[{int(k_ci[0])}, {int(k_ci[1])}]"
+        k_ci_txt = (f"[{int(np.floor(k_ci[0]))}, {int(np.ceil(k_ci[1]))}]"
                     if np.all(np.isfinite(k_ci)) else "-")
         r2_ci_txt = (f"[{r2_ci[0]:.3f}, {r2_ci[1]:.3f}]"
                      if np.all(np.isfinite(r2_ci)) else "-")

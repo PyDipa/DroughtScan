@@ -2822,17 +2822,8 @@ class BaseDroughtAnalysis:
         mask = np.isfinite(target) & np.isfinite(y_hat)
         if mask.sum() < 5:
             return np.nan
-        # fit a moel where X is the weighted sum of last precipitation + intercept
-        X = np.column_stack([y_hat[mask], np.ones(mask.sum())])
-        y = target[mask]
-        beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-        # y - (X @ beta) == observed-simulated == residuals!
-        # (X * beta).sum(axis=1) == X @ beta  # True
-        sim = X @ beta
-        ss_res = np.sum((y - sim) ** 2) # sum of squares
-        ss_tot = np.sum((y - y.mean()) ** 2)
-        rsquare = float(1 - ss_res / ss_tot) if ss_tot > 0 else np.nan
-        return rsquare
+        r = np.corrcoef(y_hat[mask], target[mask])[0, 1]
+        return float(r ** 2)
 
     @staticmethod
     def _nash_kernel(n: float, k: float, K: int) -> np.ndarray:
@@ -2854,8 +2845,11 @@ class BaseDroughtAnalysis:
         t = np.arange(1, K + 1, dtype=float)
         h = gamma_dist.pdf(t, a=n, scale=k)
         s = h.sum()
-        # /s serves to nornalize thw weights!
-        return h / s if s > 0 else np.ones(K) / K
+        if np.isfinite(s) and s > 0:
+            return h / s
+        # τ→0 limit: all mass on the current month (lag 0), not uniform
+        h = np.zeros(K); h[0] = 1.0
+        return h
 
     # =====================================================================
     # ▸ Benchmark numeric cores (lifted out of the public methods)
