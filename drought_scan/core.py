@@ -2869,7 +2869,7 @@ class BaseDroughtAnalysis:
     def _nash_kernel(n: float, k: float, K: int) -> np.ndarray:
         """
         Discrete Nash IUH kernel (Gamma pdf sampled at lags 1..K).
-        The result is a weightingh scheme woth bell-shape
+        The result is a weighting scheme with bell shape.
 
         Parameters
         ----------
@@ -2880,6 +2880,15 @@ class BaseDroughtAnalysis:
         Returns
         -------
         h : ndarray, shape (K,), sums to 1
+
+        Notes
+        -----
+        τ→0 limit (very small k ≈ 0.001): the Gamma PDF evaluated at lags
+        1..K underflows to zero everywhere, so ``h.sum() == 0``. The correct
+        τ→0 limit concentrates all mass on lag 0 (current month, no memory),
+        NOT on uniform weights. The fallback sets ``h[0] = 1`` exactly.
+        Without this guard the optimiser could land on uniform weights
+        (1/K each) precisely where it should find a delta at lag 0.
         """
         from scipy.stats import gamma as gamma_dist
         t = np.arange(1, K + 1, dtype=float)

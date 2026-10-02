@@ -130,6 +130,40 @@ here.
   "logarithmic" everywhere user-facing, including plot labels and the guides; they
   are geometric and are now named so (`gdw`/`giw` replace `lgdw`/`lgiw`).
 
+### Fixed (analysis / benchmarks — this dev cycle)
+- `_nash_kernel` (`benchmark_nash`): with τ ≈ 0.001 the Gamma PDF evaluated at lags
+  1..K underflows to zero everywhere, making `h.sum() == 0`. The old fallback returned
+  uniform weights (1/K), the opposite of the correct τ→0 limit (all mass on lag 0).
+  Now checks `np.isfinite(s) and s > 0`; fallback sets `h[0] = 1.0`.
+- `_convolve_r2` (benchmark Nash hot path): computed R² via OLS (1 − SS_res/SS_tot),
+  which is identical to ρ² for a linear fit with intercept. Replaced with
+  `r = np.corrcoef(y_hat[mask], target[mask])[0, 1]; return float(r**2)` — same
+  result, consistent with `_r2_surface` (which uses `pearsonr`) and avoids the
+  OLS matrix path.
+- `peak_by_family` / `_print_peak_summary`: K_CI bounds were cast with `int()`, which
+  truncates (a bootstrap percentile of 5.9 appeared as 5). Changed to `np.floor` for
+  the lower bound and `np.ceil` for the upper bound, consistent with `_cluster_stats`.
+
+### Added (analysis / visualization — this dev cycle)
+- `analyze_correlation` / `analyze_correlation_seasonal`: after the "Best K per
+  weighting scheme" line, each scheme now also prints `mean_age` — the barycenter
+  (centre of mass) of the effective weight W_eff(j) at that scheme's optimal K.
+  Computed via the new `effective_weights_at_optimum` function in `drought_indices.py`.
+- `analyze_correlation`: new Fig 3 — effective weight curves at each scheme's optimal K
+  (`effective_weights_at_optimum(..., plot=True)`), with mean-age triangles on the
+  x-axis.
+- `analyze_correlation_seasonal`: same Fig 3, one panel per season; panels follow the
+  same `nrows`/`ncols` layout as the scatter figure. The per-season R²(K,w) fill-between
+  figure is removed; the bootstrap peak/cluster figure (`_plot3_peak_clusters`) is
+  retained and shown when `n_boot > 0`.
+- `_plot3_peak_clusters` (visualization.py): curves now use `WEIGHT_COLORS` instead of
+  matplotlib's auto-cycle, so errorbar crosses are colour-consistent with all other
+  scheme-colour plots.
+- `bootstrap_summary_table` (statistics.py): new `mean_age` column (barycenter of
+  effective weight, in months) added to every row of the exported DataFrame/list.
+  Computed via a lazy import of `effective_weights_at_optimum` using `best_k_per_weight`
+  already stored in each season's dict.
+
 ### Fixed
 - `spatial_sidi` passed `self.K` to the grid workers instead of the resolved `K`, so
   an explicit `K=` (or a seasonal/committed calibration) was accepted, reported in

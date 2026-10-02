@@ -45,12 +45,17 @@ The four families always evaluated are:
 - **Pearson type III**
 - **Gaussian KDE** (non-parametric, Silverman bandwidth)
 
-**Primary selection criterion**: lowest Kolmogorov–Smirnov statistic *D* (scale-free,
-valid for all four families including KDE).
+**Primary selection criterion (since 4.0.0)**: lowest mean point-by-point CDF deviation
+(`error_percent`). Unlike the KS statistic, this averages the absolute |fitted − empirical|
+difference over all observations, so a zero-inflated fit's vertical jump at zero counts
+in proportion rather than dominating. See §1.5 and the note on zero-inflation below.
 
 **Secondary criterion**: lowest AIC (Akaike Information Criterion), computed for the
 three parametric families only (KDE is excluded because no canonical number of parameters
 is defined).
+
+**Reported but not used for `recommendation`**: KS statistic *D* (single worst-point
+distance; still available as `"best_by_KS"`).
 
 ---
 
