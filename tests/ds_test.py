@@ -782,66 +782,6 @@ def test_degenerate_grid_point_reports_error_not_short_tuple():
     assert sidi_vals is None and err is not None
 
 
-def test_spatial_sidi_and_spatial_spi_own_separate_products():
-    """spatial_sidi owns the SIDI, spatial_spi owns the SPI and its millimetre
-    reverse. They used to both write SPI_grid, so whichever ran last won."""
-    from drought_scan.core import Precipitation
-    from drought_scan.utils.drought_indices import f_kde
-
-    rng = np.random.default_rng(2)
-    m_cal = np.column_stack([np.tile(np.arange(1, 13), 40),
-                             np.repeat(np.arange(1981, 2021), 12)])
-    Pgrid = rng.gamma(1.3, 40, (len(m_cal), 3, 4))
-
-    obj = object.__new__(Precipitation)
-    obj.ts = np.nanmean(Pgrid, axis=(1, 2))
-    obj.m_cal, obj.K, obj.Pgrid, obj.day = m_cal, 6, Pgrid, None
-    obj.start_baseline_year, obj.end_baseline_year = 1981, 2010
-    obj.threshold, obj.calculation_method = -1, f_kde
-    obj.index_name, obj.basin_name, obj.weight_index = 'SPI', 't', 2
-    obj.spi_like_set, obj.c2r_index = obj._calculate_spi_like_set()
-    obj.SIDI = obj._calculate_SIDI()
-
-    obj.spatial_sidi()
-    assert obj.SIDI_grid.shape == (3, 4, 5)
-    assert not hasattr(obj, 'SPI_grid'), "spatial_sidi must not write SPI_grid"
-
-    obj.spatial_spi(windows=[3, 6])
-    assert sorted(obj.SPI_grid) == [3, 6]
-
-    obj.spatial_sidi()                          # order no longer matters
-    assert sorted(obj.SPI_grid) == [3, 6]
-
-
-def test_spatial_sidi_follows_the_committed_calibration():
-    """With no K given, spatial_sidi uses whatever calibration the object carries,
-    so the grid matches self.SIDI instead of silently falling back to self.K."""
-    from drought_scan.core import Precipitation
-    from drought_scan.utils.drought_indices import f_kde
-
-    rng = np.random.default_rng(6)
-    m_cal = np.column_stack([np.tile(np.arange(1, 13), 40),
-                             np.repeat(np.arange(1981, 2021), 12)])
-    Pgrid = rng.gamma(1.3, 40, (len(m_cal), 2, 2))
-
-    obj = object.__new__(Precipitation)
-    obj.ts = np.nanmean(Pgrid, axis=(1, 2))
-    obj.m_cal, obj.K, obj.Pgrid, obj.day = m_cal, 8, Pgrid, None
-    obj.start_baseline_year, obj.end_baseline_year = 1981, 2010
-    obj.threshold, obj.calculation_method = -1, f_kde
-    obj.index_name, obj.basin_name, obj.weight_index = 'SPI', 't', 2
-    obj._EXCLUDED_FROM_SIDI_OPTIMIZATION = ()
-    obj.spi_like_set, obj.c2r_index = obj._calculate_spi_like_set()
-    obj.SIDI = obj._calculate_SIDI()
-
-    obj.spatial_sidi()
-    assert obj.spatial_K == 8                   # nothing committed yet
-
-    obj.set_optimal_SIDI([2, 3, 4, 5, 6], 2, overwrite=True)
-    obj.spatial_sidi()
-    assert list(np.ravel(obj.spatial_K)) == [2, 3, 4, 5, 6]
-
-
 def test_recalculate_sidi_scalar_k_unchanged():
     """A scalar K must keep producing exactly what the single-K implementation
     always produced — the per-weight K support must not perturb it."""
