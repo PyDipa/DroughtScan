@@ -13,7 +13,7 @@ here.
   not just the single best (K, weight) pair. The full R² surface over every
   (K, weight) combination was already being computed and plotted, but discarded;
   it is now returned. New keys: `best_k_per_weight` (5,), `max_correlation_per_weight`
-  (5,) and `MatCorr` (K, 5). The per-scheme optima are printed alongside the global
+  (5,) and `R2_matrix` (K, 5). The per-scheme optima are printed alongside the global
   best.
 - `recalculate_SIDI` / `set_optimal_SIDI` / `_spi_like_set_ensemble_mean`: `K` may
   now be a sequence with one value per weighting scheme, in addition to a single
@@ -55,10 +55,10 @@ here.
   "scheme". That single exception is what made `weight_index` unanswerable downstream,
   and what forced `ds_balance_all_schemes` and `diagnostics.basin_response` to rebuild
   the four discarded schemes from the raw R² surface, each with its own copy of the
-  loop. The commit now stores the per-scheme columns in `self.SIDI` and the 1-D mosaic
-  alongside in **`self.SIDI_seasonal_best`** — the single absolute-best series is a
-  product in its own right (the real-time monitoring index) and coexists rather than
-  competing.
+  loop. The commit now stores the per-scheme columns in `self.SIDI`. (An intermediate
+  `self.SIDI_seasonal_best` 1-D mosaic was later dropped: several schemes are usually
+  statistically indistinguishable, so a per-season argmax series is a winner's-curse
+  artefact — the user picks a column, default 0.)
 - New `recalculate_SIDI_seasonal_all_schemes(seasonal_corr, seasons)` → `(time, 5)`:
   each column that scheme's own seasonal series at its own per-season K. This is the
   loop that used to live outside the class in two places; verified bit-identical to it
@@ -129,6 +129,96 @@ here.
 - The SIDI weighting schemes built with `np.geomspace` were labelled
   "logarithmic" everywhere user-facing, including plot labels and the guides; they
   are geometric and are now named so (`gdw`/`giw` replace `lgdw`/`lgiw`).
+
+### Architecture review (2026-10)
+
+#### Fixed
+- **`benchmark_ihacres`: the routing kernel was applied reversed.** The fit convolved
+  the driver with `h[::-1]`, giving the largest weight to the OLDEST month, while the
+  plot (and the documented model) gave it to the current month: the reported R² and
+  (τ_fast, τ_slow, α) described a different model from the one drawn. Fit and plot now
+  share one convolution helper (`_lag_convolve`), as do Nash and the OLS benchmarks.
+  **IHACRES results computed before this fix must be recomputed.**
+- `analyze_convolution_irf` could not run (undefined names); rewritten (see Changed).
+- `spi_sqi_corr_test`: the `lag` argument was overwritten by the loop (always LAG-1
+  plotted) and the lag was applied after splitting by calendar month, i.e. in years.
+  Replaced by `spi_sqi_corr_lagged`.
+- `analyze_correlation_test` failed with a NameError. Replaced by
+  `analyze_correlation_lagged`.
+- `analyze_correlation_seasonal_rolling(plot=True)` failed (missing `Line2D` import).
+- `Pet` and `Temperature` ignored a `weight_index` passed to the constructor.
+- Calibration state: committing a global calibration after a seasonal one (or vice
+  versa) left the previous state behind, so `ds_balance` / `spatial_sidi` read a
+  seasonal configuration while `self.SIDI` was global. The two states are now mutually
+  exclusive (see Changed).
+- `spatial_sidi` at a new date invalidated `reverse_SPI_grid` but kept `SPI_grid`,
+  which was then drawn with the new date in the title.
+- `analyze_correlation_seasonal(agg='monthly')` plotted even with `plot=False`.
+- `BFI()` on a `Streamflow` built from `ts`/`m_cal` failed with a TypeError; it now
+  raises a clear error (the daily series is re-read from `data_path`).
+- `export_scan_plot_csv(optimal_k=...)` failed on an import.
+- `_eval_metrics`: documented as "squared Pearson" but computed NSE-like
+  1 − SS_res/SS_tot; now computes r² explicitly (numerically identical at every
+  current call site, where the simulation is OLS-rescaled).
+
+#### Changed
+- **R² is the squared Pearson correlation everywhere** (`_r2_surface`, `_convolve_r2`,
+  the benchmark fits, `_eval_metrics`), so every R² is comparable with D(SPI)'s. The
+  OLS benchmarks still select K on R²_adj.
+- `benchmark_nash`: admissible range of τ is `0 < τ <= 36` months (was `τ <= K`), as in
+  the paper (Benchmark C); docstrings rewritten in the paper's notation (j = 1 is the
+  contemporaneous month).
+- `benchmark_ihacres`: new `driver_var` ('P'|'SPI') and `target_var` ('SQI'|'Q'), also
+  honoured by the bootstrap; defaults unchanged (raw P → SQI1). Plot labels follow.
+- `analyze_convolution_irf(streamflow, driver_var='SPI', plot=True, plot_mode='all')`:
+  the five SIDI weighting shapes used as fixed lag kernels on SPI1 (or raw P); same
+  return keys as `analyze_correlation`.
+- `set_optimal_SIDI(..., overwrite=True)` returns None, like `set_optimal_SIDI_seasonal`.
+- `Pet` can now be calibrated (`set_optimal_SIDI*`), like Precipitation and Balance.
+- New `calibration_mode` property (`None` | `'global'` | `'seasonal'`); every
+  `set_*(overwrite=True)` discards the other calibration, with a note. Methods reading
+  the calibrated SIDI (`plot_scan`, `plot_covariates`, `gap_filling`,
+  `export_scan_plot_csv`, `ds_balance*`, `spatial_sidi`) print which calibration it is.
+- Default SIDI column (`_resolve_weight_index`): explicit `weight_index` → **0 after a
+  seasonal calibration** → `optimal_weight_index` after a global one → construction
+  `weight_index` → 2. `plot_spatial` and `export_scan_plot_csv` now follow it (they
+  hard-coded 2).
+- `ds_balance` defaults to `weight_index=0` whatever the calibration, with a printed
+  reminder.
+- Spatial maps for every gridded class: `spatial_sidi`, `spatial_spi`, `plot_spatial`
+  work for `Pet` (`PETgrid`), `Balance` (pixel-wise `prec_grid − pet_grid`) and
+  `Temperature` (`Tgrid`), labelled with the object's index name.
+- One spatial date: both spatial methods default to the stored `spatial_timestamp`
+  (else the last month), and moving the date removes every product of the other method.
+- Standardization-method registry (`drought_indices.register_standardization` /
+  `get_standardization`): forward/inverse transforms, parameter widths and domain of
+  each method in one place; `core.py` no longer branches on `f_spi/f_spei/f_kde/f_zscore`.
+  Custom methods work once registered; an unknown method fails at construction. The
+  pixel deficit now uses exactly the basin inverse (tail clipping included).
+- Bootstrap `K_CI` rounded outward (floor/ceil) once, at the source in `_peak_summary`:
+  the clustering rule, `ref_K_CI`, tables, prints and figures share the same integers.
+- Constructor defaults aligned: `weight_index=None` (→ 2) on every class; `Streamflow`
+  gains `verbose` and `threshold=None` (→ −1); `Balance` gains `weight_index`.
+- Result keys: `analyze_correlation` returns `R2_matrix`, `R2_boot`, `R2_ci` (were
+  `MatCorr`, `MatCorr_boot`, `MatCorr_ci`), as the seasonal entries do;
+  `"sample number"` → `sample_number` everywhere.
+- `find_trends` documents the Streamflow unit it actually returns: mm-equivalent.
+- `severe_events_old` documented as obsolete, kept only to reproduce Di Paola et al.
+  (2025).
+- Messages and docstrings in English throughout; obsolete comments removed.
+
+#### Added
+- `spi_sqi_corr_lagged(streamflow, max_lag=24, lag=0)`: month-wise R²(SPI_k(t−l), SQI1(t));
+  `lag=0` reproduces `spi_sqi_corr`.
+- `analyze_correlation_lagged(streamflow, lag=1)`: R²(SIDI_{K,w}(t−lag), SQI1(t));
+  `lag=0` reproduces `analyze_correlation`'s `R2_matrix`.
+- Guides (`tests/docs`): capability table per class, calibration states, lagged
+  correlation, `ds_balance`, benchmarks; `spatial_guide.md` rewritten.
+
+#### Removed
+- `spi_sqi_corr_test`, `analyze_correlation_test` (replaced, see Added).
+- The `diagnostics` optional dependency group (the diagnostics site lives in the
+  forecasting twin library).
 
 ### Fixed (analysis / benchmarks — this dev cycle)
 - `_nash_kernel` (`benchmark_nash`): with τ ≈ 0.001 the Gamma PDF evaluated at lags
@@ -219,8 +309,8 @@ here.
   explicitly passed value.
 - `Streamflow.gap_filling` read `precipitation.SIDI[:, 0]` for a seasonally-optimised
   driver. Column 0 is equal weights, not the best scheme — it only looked right while
-  all five columns were copies of the mosaic. It now uses `SIDI_seasonal_best`, the
-  most predictive series, which is what a gap-filling regression wants.
+  all five columns were copies of the mosaic. It now regresses on one column of
+  `self.SIDI`, chosen with `weight_index` (see `_resolve_weight_index`).
 - `severe_events` renamed to `severe_events_old` pending replacement, with its known
   defects recorded in the docstring (polynomial deficit inconsistent with
   `deficit_from_spi`; `-1` hardcoded instead of `threshold` when choosing run parity;
@@ -350,9 +440,17 @@ here.
 ### Migration from 3.x
 
 - `self.SIDI` after `set_optimal_SIDI_seasonal(..., overwrite=True)` is no longer
-  five identical columns. Code reading `SIDI[:, 0]` to get "the" seasonal series
-  must read `self.SIDI_seasonal_best` instead; code reading `SIDI[:, w]` now gets
-  scheme *w*'s own seasonal series, which is the intended meaning.
+  five identical columns: `SIDI[:, w]` is scheme *w*'s own seasonal series, each at
+  its own per-season K. There is no single "best" seasonal series; pick a column
+  (default 0 after a seasonal calibration).
+- `analyze_correlation` keys `MatCorr`, `MatCorr_boot`, `MatCorr_ci` → `R2_matrix`,
+  `R2_boot`, `R2_ci`; `"sample number"` → `sample_number`.
+- `set_optimal_SIDI(..., overwrite=True)` returns None: read `self.SIDI`.
+- `spi_sqi_corr_test` → `spi_sqi_corr_lagged`; `analyze_correlation_test` →
+  `analyze_correlation_lagged`.
+- Default SIDI column after a seasonal calibration is 0 (was the construction
+  default, 2); `ds_balance` defaults to 0.
+- IHACRES and Nash results change (kernel orientation fix; τ bound 36).
 - `spatial_cdn()` is removed — use `spatial_spi()`. `spatial_trends()` still works
   but is deprecated.
 - `plot_spatial(var='CDN')` is removed — use `var='reverse_spi'`.

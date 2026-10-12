@@ -153,7 +153,7 @@ def effective_month_weights(K=36, plot=True, ax=None):
         for i, lab in enumerate(WEIGHT_LABELS):
             ax.plot(lag, W_eff[:, i],  lw=2,
                     color=WEIGHT_COLORS[i], label=lab)
-        ax.set_xlabel('elapsed months', fontsize=12)
+        ax.set_xlabel('lag (months)', fontsize=12)
         ax.set_ylabel('effective weight', fontsize=12)
         idname = rf"$\mathrm{{D}}_{{\mathrm{{(SPI)}}}}$"
         ax.set_title(f'whole single-month weight in {idname}, K={K}', fontsize=14)
@@ -163,6 +163,89 @@ def effective_month_weights(K=36, plot=True, ax=None):
         fig.tight_layout()
 
     return W_eff
+
+def effective_weights_at_optimum(best_k, plot=True, ax=None, title=None, n_lags=None):
+    """
+    Effective per-month weight W_eff(j) of each weighting scheme, each one
+    evaluated at ITS OWN optimal K, plus the mean age of that weight.
+
+    Companion of ``effective_month_weights``. That function compares the five
+    schemes at the SAME K (e.g. K=36, Fig. A1): there decreasing schemes look
+    steep and increasing ones gentle. This one compares them at the K each
+    scheme actually selects on the data, which is what the R2(w, K) optimum
+    describes. The two pictures can differ: an increasing scheme peaking at a
+    short K can retain LESS memory than a decreasing scheme peaking at a long K.
+
+    Mean age (months before t, 0 = current month):
+        age(w) = sum_j j * W_eff(j) / sum_j W_eff(j)
+    i.e. the centre of mass of the W_eff curve. Unlike K, it is comparable
+    across schemes. Same linear reading of D(SPI) as effective_month_weights
+    (the per-scale standardization of SPI_k is not included).
+
+    Args:
+        best_k (sequence of 5 int, or dict {label: K}): optimal K per scheme,
+            in generate_weights / WEIGHT_LABELS order if a sequence - e.g.
+            ``analyze_correlation(...)["best_k_per_weight"]`` or
+            ``analyze_correlation_seasonal(...)[season]["best_k_per_weight"]``.
+        plot (bool): draw the curves (default True).
+        ax (matplotlib Axes, optional): axes to draw into.
+        title (str, optional): panel title.
+        n_lags (int, optional): x-axis extent in months (default max K + 1).
+
+    Returns:
+        dict {label: {"K": int, "W_eff": ndarray (K,), "mean_age": float,
+                      "median_lag": int}}
+        median_lag = first lag at which half of the total effective weight
+        has been accumulated.
+    """
+    # Lazy import, same pattern as effective_month_weights (avoids a circular import).
+    from drought_scan.utils.statistics import WEIGHT_LABELS, WEIGHT_COLORS
+
+    if isinstance(best_k, dict):
+        ks = [int(best_k[lab]) for lab in WEIGHT_LABELS]
+    else:
+        ks = [int(k) for k in np.ravel(best_k)]
+    if len(ks) != len(WEIGHT_LABELS):
+        raise ValueError(f"best_k must give one K per scheme "
+                         f"({len(WEIGHT_LABELS)}), got {len(ks)}.")
+    if min(ks) < 1:
+        raise ValueError("every K must be >= 1.")
+
+    out = {}
+    for w, (lab, K) in enumerate(zip(WEIGHT_LABELS, ks)):
+        we = np.cumsum(generate_weights(K)[::-1, w])[::-1]     # W_eff(j), j = 0..K-1
+        j = np.arange(K)
+        out[lab] = {
+            "K": K,
+            "W_eff": we,
+            "mean_age": float(np.sum(j * we) / np.sum(we)),
+            "median_lag": int(np.searchsorted(np.cumsum(we) / np.sum(we), 0.5)),
+        }
+
+    if plot:
+        if ax is None:
+            _, ax = plt.subplots(figsize=(7, 4.5))
+        n = int(n_lags) if n_lags is not None else max(ks) + 1
+        lags = np.arange(n)
+        for w, lab in enumerate(WEIGHT_LABELS):
+            d = out[lab]
+            y = np.zeros(n)
+            m = min(d["K"], n)
+            y[:m] = d["W_eff"][:m]
+            col = WEIGHT_COLORS[w]
+            ax.plot(lags, y, "-o", color=col, ms=3, lw=1.8,
+                    label=f"{lab}  K={d['K']}, mean age={d['mean_age']:.1f}")
+            # mean age as a small triangle on the x-axis, tip pointing down
+            ax.plot(d["mean_age"], 0.0, marker="v", color=col, ms=8,
+                    clip_on=False, zorder=5)
+        ax.set_xlim(-0.5, n - 0.5)
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_xlabel("lag (months, 0 = current month)")
+        ax.set_ylabel("effective weight")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8, loc="upper right")
+        ax.set_title(title if title else "Effective weight at each scheme's optimal K")
+    return out
 
 
 def plot_weight_families(K=36, plot=True, ax=None):
@@ -204,7 +287,7 @@ def plot_weight_families(K=36, plot=True, ax=None):
             fig = ax.figure
         for i, lab in enumerate(WEIGHT_LABELS):
             ax.plot(k_range, W[:, i], lw=2, color=WEIGHT_COLORS[i], label=lab)
-        ax.set_xlabel('SPI scale (k)', fontsize=12)
+        ax.set_xlabel('scale k', fontsize=12)
         ax.set_ylabel(r'weight $w_k$', fontsize=12)
         ax.set_title(f'The 5 weighting families, K={K}', fontsize=14)
         ax.grid(alpha=0.3)
@@ -748,7 +831,101 @@ def f_spei(balance, stride, m, m_cal, tb1, tb2, fit_params=None):
 # ===================================================================
 #  KDE forward/reverse — shared exact CDF/PPF for f_kde
 # ===================================================================
-def kde_fit_sample(values, log_transform=True):
+def _kde_bandwidth_and_centres(xb, variance_correction=True):
+    """
+    Silverman bandwidth for ``xb``, and the kernel centres the KDE should actually
+    use - the two halves of one decision, so they cannot be computed from
+    different samples (they used to be: ``kde_fit_sample`` returned the sample and
+    both ``f_kde`` and ``statistics._fit_single_dist`` then re-derived ``h`` from it
+    with their own copy of the formula).
+
+    A Gaussian-kernel mixture centred on the sample points has variance
+    ``s0**2 + h**2`` (s0 = population sd of ``xb``), not ``s0**2``: the kernels add
+    their own spread on top of the data's. Evaluating that over-dispersed CDF back
+    at the very points it was fitted on therefore compresses the normal scores by
+    ``1/sqrt(1 + h**2/s0**2)`` - 0.907 at n=30, and it depends on n alone, not on
+    the variable - so an index that is supposed to be N(0,1) over its baseline came
+    out at sd ~0.87 instead. Measured on the Po (1981-2010): P(SPI <= -1) was 12.5%
+    of baseline months against the nominal 15.87%, while f_spi gave 15.83%.
+
+    With ``variance_correction`` the centres are shrunk toward their mean by
+    ``c = sqrt(1 - h**2/s0**2)``, which makes the mixture variance exactly
+    ``h**2 + c**2*s0**2 == s0**2``. The bandwidth is deliberately NOT rescaled: it
+    stays Silverman's rule on the ORIGINAL sample, because the rule is about how
+    much to smooth, not about how wide the result should be. The fit is therefore
+    as smooth as before, only correctly scaled - and every consumer that reads
+    ``xb``/``h`` out of the stored fit (``kde_cdf``, ``kde_ppf``, ``_kde_pdf``,
+    ``statistics._mixture_cdf``/``_mixture_pdf``, ``native_to_spi``,
+    ``spi_to_native``, ``_process_grid_point_spi``) inherits the correction with no
+    change of its own.
+
+    References
+    ----------
+    The variance inflation is a standard property of non-negative kernel density
+    estimates, treated at length in the density-estimation literature but not in
+    the drought-index one - which is where a KDE-based SPI falls between two
+    chairs, since the mainstream non-parametric standardized index (Farahmand &
+    AghaKouchak 2015) uses empirical plotting positions rather than a kernel CDF
+    and so never meets this bias at all.
+
+    - Jones, M.C. (1991). On correcting for variance inflation in kernel density
+      estimation. Computational Statistics & Data Analysis 11(1), 3-15.
+      doi:10.1016/0167-9473(91)90049-8  <- the dedicated treatment of exactly
+      this correction.
+    - Silverman, B.W. & Young, G.A. (1987). The bootstrap: to smooth or not to
+      smooth? Biometrika 74(3), 469-479. Introduces the shrinkage as the way to
+      preserve the variance structure; they apply it to smoothed-bootstrap draws,
+      here it is folded into the fit itself.
+    - Silverman, B.W. (1986). Density Estimation for Statistics and Data
+      Analysis. Chapman & Hall. Source of the 0.9*sigma*n**(-1/5) rule used above.
+    - Farahmand, A. & AghaKouchak, A. (2015). A generalized framework for deriving
+      nonparametric standardized drought indicators. Advances in Water Resources
+      76, 140-145. The plotting-position route, for contrast.
+
+    Cheapest way to catch a regression here without reading any of the above:
+    a standardized index must have sd ~1 over its own baseline, and
+    P(SPI <= -1) must come out near 0.1587. Both are one line of numpy on
+    `spi_like_set[0]` restricted to the baseline.
+
+    What this does NOT remove: a non-parametric CDF evaluated in-sample still puts
+    its own points at plotting positions ~(i-0.5)/n, whose normal scores have sd
+    slightly below 1 (0.979 at n=30, 0.995 at n=120). That residual is a property
+    of in-sample evaluation, not a bias of the fit, and it vanishes as n grows -
+    which is why the corrected baseline sd lands at 0.967, not exactly 1.
+
+    Args:
+        xb (ndarray): the continuous-part sample, already in fit space
+            (log-transformed upstream when applicable).
+        variance_correction (bool): ``False`` restores the uncorrected behaviour,
+            for reproducing numbers published before this correction existed.
+
+    Returns:
+        tuple: ``(xb_centres, h)`` - the centres to store in the fit, and the
+        bandwidth. ``h`` is NaN when the sample is too small to define one.
+    """
+    xb = np.asarray(xb, dtype=float)
+    if xb.size < 2:
+        return xb, np.nan
+    # Silverman's rule of thumb: ddof=1 on purpose - the rule is defined on the
+    # unbiased sample sigma. Do not "align" it with the ddof=0 used to standardize
+    # against the baseline (see BaseDroughtAnalysis._zscore_baseline): they are
+    # different conventions for different purposes. Note this is NOT scipy's own
+    # bw_method="silverman" factor either, whose constant differs from this 0.9.
+    h = 0.9 * np.std(xb, ddof=1) * xb.size ** (-1 / 5)
+    if not variance_correction or not np.isfinite(h) or h <= 0:
+        return xb, h
+    s0 = float(np.std(xb, ddof=0))
+    ratio = (h / s0) ** 2 if s0 > 0 else np.inf
+    if not np.isfinite(ratio) or ratio >= 1.0:
+        # Degenerate: the kernel is as wide as the data itself. Only reachable at
+        # n=2 (where h/s0 = 1.11) or on a constant sample; there is nothing to
+        # correct without inverting the density, so leave the centres alone.
+        return xb, h
+    mean = float(np.mean(xb))
+    return mean + (xb - mean) * np.sqrt(1.0 - ratio), h
+
+
+def kde_fit_sample(values, log_transform=True, variance_correction=True):
     """
     Decide, from one sample, the three things a KDE fit is made of: whether to work
     in log space, the zero-inflation fraction ``qq``, and the sample the continuous
@@ -789,7 +966,7 @@ def kde_fit_sample(values, log_transform=True):
     has_negative = bool(np.any(finite & (values < 0)))
 
     if has_negative:
-        return values[finite], 0.0, False
+        return _kde_bandwidth_and_centres(values[finite], variance_correction) + (0.0, False)
 
     finite_values = values[finite]
     qq = float(np.sum(finite_values == 0) / finite_values.size) if finite_values.size else 0.0
@@ -801,7 +978,7 @@ def kde_fit_sample(values, log_transform=True):
         xb = xb[np.isfinite(xb)]
     else:
         xb = nonzero
-    return xb, qq, log_transform
+    return _kde_bandwidth_and_centres(xb, variance_correction) + (qq, log_transform)
 
 
 def kde_cdf(x, xb, h, qq, log_transform):
@@ -951,7 +1128,7 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
     # appended later change the calibration — and hence already-published SPI values.
     # The rules live in kde_fit_sample so the diagnostic fits in statistics.py apply
     # exactly the same ones (see that function).
-    xb_baseline, qq, log_transform_resolved = kde_fit_sample(xbase, log_transform)
+    xb_baseline, h_baseline, qq, log_transform_resolved = kde_fit_sample(xbase, log_transform)
     if log_transform and not log_transform_resolved:
         warnings.warn(
             f"f_kde: negative data detected in month {m} - month-scale {stride} → "
@@ -998,11 +1175,9 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
             )
 
         kde = gaussian_kde(xb, bw_method="silverman")
-        # Silverman's rule of thumb: ddof=1 on purpose — the rule is defined on the
-        # unbiased sample sigma. Do not "align" it with the ddof=0 used to
-        # standardize against the baseline (see BaseDroughtAnalysis._zscore_baseline):
-        # they are different conventions for different purposes.
-        h = 0.9 * np.std(xb, ddof=1) * xb.size ** (-1 / 5)
+        # Bandwidth AND centres are one decision, taken in kde_fit_sample - see
+        # _kde_bandwidth_and_centres for why they cannot be settled separately.
+        h = h_baseline
         out_params = {
             "kde": kde,
             "bw_factor": float(kde.factor),
@@ -1040,8 +1215,7 @@ def f_kde(prec, stride, m, m_cal, tb1, tb2, log_transform=True, fit_params=None)
                 f"reference frame of the fit that was passed in.",
                 RuntimeWarning, stacklevel=2
             )
-            xb, qq, log_transform = kde_fit_sample(xbase, log_transform)
-            h = 0.9 * np.std(xb, ddof=1) * xb.size ** (-1 / 5)
+            xb, h, qq, log_transform = kde_fit_sample(xbase, log_transform)
         out_params = None
 
     # --- CDF evaluation (exact; same formula reused by native_to_spi/spi_to_native) ---
@@ -1134,25 +1308,156 @@ def c2r_eval(coeff, x, calculation_method):
         return x * std + mean
     return np.polyval(coeff, x)
 
+# ===================================================================
+#  Standardization-method registry
+# ===================================================================
+# Everything the library needs to know about a standardization method, in ONE
+# place: how to go native -> index and index -> native from the fitted params,
+# how wide its numeric params / c2r rows are, whether its params are numeric
+# (stored in the `fit_params` array) or an opaque object (stored in
+# `fit_params_kde`), and its domain. core.py asks the registry instead of
+# branching on `f_spi / f_spei / f_kde / f_zscore` in every method, so adding or
+# fixing a method touches one entry, and a user-defined method works as soon as
+# it is registered with `register_standardization`.
 
-#  Domain requirements  (dominio della distribuzione, non della classe)
-# ===================================================================
-f_spi.requires_positive    = True    # Gamma → (0, +∞)
-f_spei.requires_positive   = False   # Pearson III → ℝ
-f_kde.requires_positive    = False   # KDE → ℝ
+def _clip_prob(p):
+    return np.clip(p, PROB_CLIP, 1 - PROB_CLIP)
 
-# ===================================================================
-#  Numeric fit-parameter width, per method
-# ===================================================================
-# How many floats each method's `params` (4th return value) carries, so that
-# core.py sizes `self.fit_params` from the method itself instead of hard-coding
-# a width per branch — the widths stopped agreeing when f_spi gained its
-# zero-inflation fraction `qq` as a fourth parameter.
-# f_kde's real calibration is a dict living in `fit_params_kde`; its slot in the
-# numeric array is never written, and the value here only keeps the array
-# allocatable.
-f_spi.n_fit_params     = 4   # (alpha, loc, beta, qq)
-f_spei.n_fit_params    = 3   # (c, loc, scale)
-f_kde.n_fit_params     = 3   # unused placeholder — see fit_params_kde
-f_zscore.n_fit_params  = 2   # (baseline_mean, baseline_std)
-f_zscore.requires_positive = False   # z-score → ℝ
+
+def _spi_to_index(x, params):
+    # zero-inflated Gamma mixture: the exact forward transform f_spi applies
+    a, loc, beta, qq = params
+    return norm.ppf(_clip_prob(gamma_cdf_zi(x, a, loc, beta, qq)))
+
+
+def _spi_to_native(z, params):
+    a, loc, beta, qq = params
+    return gamma_ppf_zi(_clip_prob(norm.cdf(z)), a, loc, beta, qq)
+
+
+def _spei_to_index(x, params):
+    c, loc, scale = params
+    return norm.ppf(_clip_prob(pearson3.cdf(x, c, loc=loc, scale=scale)))
+
+
+def _spei_to_native(z, params):
+    c, loc, scale = params
+    return pearson3.ppf(_clip_prob(norm.cdf(z)), c, loc=loc, scale=scale)
+
+
+def _kde_to_index(x, fit):
+    return norm.ppf(_clip_prob(kde_cdf(x, fit['xb'], fit['h'], fit['qq'], fit['log_transform'])))
+
+
+def _kde_to_native(z, fit):
+    return kde_ppf(norm.cdf(z), fit['xb'], fit['h'], fit['qq'], fit['log_transform'])
+
+
+def _zscore_to_index(x, params):
+    mean, std = params
+    return (x - mean) / std
+
+
+def _zscore_to_native(z, params):
+    mean, std = params
+    return z * std + mean
+
+
+class StandardizationMethod:
+    """
+    Registry entry for one standardization method.
+
+    Attributes:
+        func (callable): the method itself, with the f_* signature
+            ``func(ts, stride, m, m_cal, tb1, tb2, fit_params=None)
+            -> (indices, index_values, c2r_coeff, params)``.
+        name (str): display name.
+        to_index (callable): ``to_index(native_values, params) -> index values``
+            for one (scale, month) fit.
+        to_native (callable): ``to_native(index_values, params) -> native values``,
+            the exact inverse of ``to_index``.
+        n_fit_params (int): width of ``params`` when numeric (size of the
+            ``fit_params`` array's last axis).
+        n_c2r (int): width of the (deprecated) c2r coefficient row.
+        numeric_params (bool): True if ``params`` is a flat numeric vector
+            (stored in ``fit_params``); False for an opaque object (stored in
+            ``fit_params_kde``, e.g. f_kde's dict).
+        requires_positive (bool): the method is defined on positive data only.
+    """
+    __slots__ = ("func", "name", "to_index", "to_native", "n_fit_params",
+                 "n_c2r", "numeric_params", "requires_positive")
+
+    def __init__(self, func, name, to_index, to_native, n_fit_params, n_c2r,
+                 numeric_params, requires_positive):
+        self.func, self.name = func, name
+        self.to_index, self.to_native = to_index, to_native
+        self.n_fit_params, self.n_c2r = int(n_fit_params), int(n_c2r)
+        self.numeric_params = bool(numeric_params)
+        self.requires_positive = bool(requires_positive)
+
+    def __repr__(self):
+        return f"StandardizationMethod({self.name})"
+
+
+_STANDARDIZATION_REGISTRY = {}
+
+
+def register_standardization(func, *, to_index, to_native, n_fit_params, n_c2r=4,
+                             numeric_params=True, requires_positive=False, name=None):
+    """
+    Register a standardization method so every DroughtScan class can use it as
+    ``calculation_method`` (forward fit, reverse transforms, spatial maps).
+
+    Args:
+        func (callable): the method, with the f_* signature (see
+            ``StandardizationMethod``).
+        to_index, to_native (callable): exact forward / inverse transforms for one
+            (scale, month) fit, ``(values, params) -> values``.
+        n_fit_params (int): number of floats in ``params`` (if numeric).
+        n_c2r (int): width of the c2r coefficient row the method returns. Default 4.
+        numeric_params (bool): False if ``params`` is an opaque object. Default True.
+        requires_positive (bool): reject series with negative values. Default False.
+        name (str, optional): display name; defaults to ``func.__name__``.
+
+    Returns:
+        StandardizationMethod
+    """
+    spec = StandardizationMethod(func, name or func.__name__, to_index, to_native,
+                                 n_fit_params, n_c2r, numeric_params, requires_positive)
+    _STANDARDIZATION_REGISTRY[func] = spec
+    # mirrored on the function for code that still reads the attributes directly
+    func.requires_positive = spec.requires_positive
+    func.n_fit_params = spec.n_fit_params
+    return spec
+
+
+def get_standardization(calculation_method):
+    """
+    The registry entry of ``calculation_method`` (a registered function, or a
+    ``functools.partial`` of one). Raises ValueError for an unregistered method.
+    """
+    from functools import partial
+    base = calculation_method.func if isinstance(calculation_method, partial) else calculation_method
+    try:
+        return _STANDARDIZATION_REGISTRY[base]
+    except (KeyError, TypeError):
+        raise ValueError(
+            f"Unknown calculation_method {base!r}: expected one of "
+            f"{', '.join(spec.name for spec in _STANDARDIZATION_REGISTRY.values())} "
+            f"(optionally wrapped in functools.partial), or a method registered with "
+            f"drought_scan.utils.drought_indices.register_standardization."
+        ) from None
+
+
+# f_kde's real calibration is a dict living in `fit_params_kde`; its n_fit_params
+# only keeps the (unused) numeric slot allocatable.
+register_standardization(f_spi, to_index=_spi_to_index, to_native=_spi_to_native,
+                         n_fit_params=4, n_c2r=4, requires_positive=True,
+                         name="f_spi (zero-inflated Gamma)")
+register_standardization(f_spei, to_index=_spei_to_index, to_native=_spei_to_native,
+                         n_fit_params=3, n_c2r=4, name="f_spei (Pearson III)")
+register_standardization(f_kde, to_index=_kde_to_index, to_native=_kde_to_native,
+                         n_fit_params=3, n_c2r=4, numeric_params=False,
+                         name="f_kde (Gaussian KDE)")
+register_standardization(f_zscore, to_index=_zscore_to_index, to_native=_zscore_to_native,
+                         n_fit_params=2, n_c2r=2, name="f_zscore (z-score)")

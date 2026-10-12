@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from .statistics import find_overlap
 from .drought_indices import f_spi, f_spei, f_zscore, f_kde
 from .hydrology import Qcs2Qmm, Qmm2Qcs
-from .statistics import test_standardization
+from .statistics import test_standardization, bootstrap_summary_table
 
 __all__ = [
     "find_overlap",
@@ -18,6 +18,7 @@ __all__ = [
     "Qcs2Qmm",
     "Qmm2Qcs",
     "test_standardization",
+    "bootstrap_summary_table",
     "fit_distribution_stats",
     "standardize_data",
     "plot_cdf_comparison",
@@ -40,6 +41,5 @@ def __getattr__(name: str):
         from .visualization import savefig
         return savefig
     raise AttributeError(name)
-
 def __dir__():
     return sorted(list(globals().keys()) + list(_LAZY_STATISTICS) + ["savefig"])

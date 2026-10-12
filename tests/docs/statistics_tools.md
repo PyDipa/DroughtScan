@@ -375,10 +375,10 @@ The distribution used for SPI/SPEI/SQI is controlled by the `calculation_method`
 parameter at initialization. The diagnostic pipeline is:
 
 ```python
-# 1. Initialize with default method (f_spi → Gamma)
+# 1. Initialize with the default method (f_kde → non-parametric KDE)
 ds = DS.Precipitation(prec_path=..., shape_path=..., ...)
 
-# 2. Check if Gamma is appropriate
+# 2. Check which family fits the data
 from drought_scan.utils.statistics import test_standardization
 analysis = test_standardization(ds.ts, groups=ds.m_cal[:, 0])
 
@@ -387,8 +387,10 @@ from drought_scan.utils import f_spei   # Pearson III
 ds = DS.Precipitation(prec_path=..., shape_path=..., calculation_method=f_spei, ...)
 ```
 
-Available calculation methods: `f_spi` (Gamma), `f_spei` (Pearson III),
-`f_zscore` (Gaussian), `f_kde` (KDE).
+Available calculation methods: `f_kde` (KDE, the default), `f_spi` (zero-inflated
+Gamma), `f_spei` (Pearson III), `f_zscore` (Gaussian). A method of your own can be
+added with `drought_scan.utils.drought_indices.register_standardization` (see the
+[User Guide](user_guide.md) §3): it then works everywhere a built-in one does.
 
 **Workflow B — Standalone (for arbitrary data).**
 Use `standardize_data` when you need to standardize a time series that is
@@ -450,7 +452,7 @@ import drought_scan as DS
 from drought_scan.utils.statistics import test_standardization, fit_distribution_stats
 from drought_scan.utils import f_spi, f_spei, f_zscore, f_kde
 
-# 1. Initialize with default (Gamma)
+# 1. Initialize with the default method (f_kde)
 ds = DS.Precipitation(
     prec_path='tests/data/LAPrec1871.v1.1.nc',
     shape_path='tests/data/bacino_pontelagoscuro.shp',
@@ -579,7 +581,8 @@ A typical diagnostic workflow:
 
 5. **Act**:
    - *Within DroughtScan* → re-initialize the object with the appropriate
-     `calculation_method` (`f_spi`, `f_spei`, `f_zscore`, `f_kde`).
+     `calculation_method` (`f_kde`, `f_spi`, `f_spei`, `f_zscore`, or a registered
+     custom method).
    - *Standalone data* → use `standardize_data()` to apply the PIT transform.
 
 These tools do not enforce any specific decision, but provide a **transparent,
@@ -587,10 +590,12 @@ reproducible, and quantitative basis** for choosing how to standardize your
 hydroclimatic time series.
 
 > **Note on trend analysis.**
-> Trend detection on the CDN or on any other time series is available through
-> the DroughtScan methods `find_trends()` and `plot_trends()` (see the
+> `find_trends()` and `plot_trends()` report the accumulated water deficit/surplus
+> over a moving window, from the reverse SPI — not a trend test (see the
 > [Visualization Guide](visualization_guide.md) and the
-> [User Guide](user_guide.md) for details and examples).
+> [User Guide](user_guide.md)). For a significance test of a sustained wet/dry
+> phase, `_rolling_phase_test` tests the mean of SPI-1 over a window against zero;
+> do not run a regression on the CDN, which is cumulative.
 
 ---
 

@@ -13,17 +13,19 @@ and is continuously developed within the activities of Drought Central ([Drought
 ---
 
 ## Key Features
-- Calculation of standardized drought indices (e.g., SPI, SQI, SPEI, SPETI) via parametric (Gamma, Pearson III) or non-parametric (KDE) methods.
+- Calculation of standardized drought indices (e.g., SPI, SQI, SPEI, SPETI, STI) via parametric (zero-inflated Gamma, Pearson III, z-score) or non-parametric (KDE) methods — or your own, registered once.
 - Integration of precipitation, streamflow, PET, temperature, and teleconnection data for basin-level analysis.
 - Multi-temporal scales for flexibility in drought assessment.
-- Spatial extension: gridded SPI/SIDI maps at every grid point within the basin.
+- Calibration of the multi-scale index (SIDI) against streamflow, global or seasonal, with block-bootstrap confidence intervals.
+- Benchmarks of the integrated index against linear and parametric rainfall–runoff kernels.
+- Spatial extension: gridded SPI-like/SIDI maps at every grid point within the basin.
 - Statistical diagnostics for distribution selection and goodness-of-fit evaluation.
-- Visualization tools for drought monitoring, trend detection, and seasonal analysis.
+- Visualization tools for drought monitoring, deficit quantification, and seasonal analysis.
 
 For examples and usage notes see:
 - [User Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/user_guide.md) — How to initialize and use DroughtScan objects.
 - [Visualization Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/visualization_guide.md) — Plotting methods and customization.
-- [Spatial Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/spatial_guide.md) — Gridded SPI/SIDI and trend maps.
+- [Spatial Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/spatial_guide.md) — Gridded SPI-like/SIDI maps and their native-unit reverse.
 - [Statistical Diagnostics](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/statistics_tools.md) — Distribution fitting and standardization tools.
 - [Common Errors](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/common_errors.md) — Troubleshooting guide.
 ---
@@ -63,12 +65,12 @@ pip install .
 ```bash
 pip install git+https://github.com/PyDipa/DroughtScan.git
 ```
-To use a specific  python interpreter for option1, say for example Python 3.10, use: 
+To use a specific python interpreter, say for example Python 3.10, for option 2 use:
 
 ```bash
 python3.10 -m pip install . 
 ```
-for option 2:
+for option 3:
 ```bash
 python3.10 -m pip install git+https://github.com/PyDipa/DroughtScan.git
 ```
@@ -89,9 +91,10 @@ It combines **statistical drought indices**, **quantitative analysis**, and **vi
   - **CDN (Cumulative Deviation from Normal)**: integrates long-term memory of anomalies by cumulating the standard index at 1-month scale.
   - **SQI (Standardized Streamflow Index)**: SPI-like indicator based on river discharge.
   - **SPEI / SPETI**: Balance- and PET-based drought indices.
-- **Standardization methods**: Gamma (`f_spi`), Pearson III (`f_spei`), Gaussian KDE (`f_kde`, default), z-score (`f_zscore`).
-- **Visualization**: the three "pillars" of drought monitoring (heatmap, SIDI, CDN), plus trend analysis, monthly profiles, spatial maps, and precipitation–streamflow diagnostics.
-- **Spatial extension**: Compute SPI, SIDI, and CDN trend maps at every grid point within the basin, with parallel processing.
+- **Standardization methods**: zero-inflated Gamma (`f_spi`), Pearson III (`f_spei`), Gaussian KDE (`f_kde`, default), z-score (`f_zscore`); custom methods via `register_standardization`. Exact forward and inverse transforms (`native_to_spi` / `spi_to_native`).
+- **Calibration against streamflow**: the K and weighting scheme of the SIDI that best explain SQI₁ (also per season and with a time lag), with block-bootstrap CIs; benchmarks (OLS lag kernels, Nash-type Gamma kernel, IHACRES routing). R² is the squared Pearson correlation throughout.
+- **Visualization**: the three "pillars" of drought monitoring (heatmap, SIDI, CDN), plus deficit/surplus bars, monthly profiles, spatial maps, and precipitation–streamflow diagnostics.
+- **Spatial extension**: SPI-like and SIDI maps (and the native-unit deficit/surplus) at every grid point within the basin, for precipitation, PET, P−PET and temperature, with parallel processing.
 
 ---
 
@@ -106,7 +109,7 @@ It combines **statistical drought indices**, **quantitative analysis**, and **vi
 | `Temperature` | NetCDF or arrays | STI | Temperature variability |
 | `Teleindex` | CSV/Excel or arrays | (custom) | Large-scale climate drivers |
 
-All classes share the same base (`BaseDroughtAnalysis`) and produce the same core outputs: `ts`, `m_cal`, `spi_like_set`, `SIDI`, `CDN`.
+All classes share the same base (`BaseDroughtAnalysis`) and produce the same core outputs: `ts`, `m_cal`, `spi_like_set`, `SIDI`, `CDN`. Some analyses only apply to some classes — see the capability table in the [User Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/user_guide.md) §8.
 
 ---
 
@@ -121,42 +124,51 @@ All classes share the same base (`BaseDroughtAnalysis`) and produce the same cor
 - **`shape`**: basin geometry (GeoDataFrame).  
 - **`area_kmq`**: area of the basin in km².  
 - **`K`**: maximum SPI scale (default 36).  
-- **`threshold`**: severity threshold (default −1).
-- **`Pgrid`**: input gridded data within the basin (when initialized from NetCDF).
+- **`threshold`**: severity threshold (default −1; +1 for `Pet` and `Temperature`).
+- **`weight_index`**: default SIDI column before any calibration (default 2).
+- **`calibration_mode`**: `None`, `'global'` or `'seasonal'` — which calibration `SIDI` carries.
+- **`Pgrid` / `PETgrid` / `Tgrid` / `prec_grid`, `pet_grid`**: input gridded data within the basin (when initialized from NetCDF).
 
 ---
 
 ## Main Methods
 
 ### All classes (BaseDroughtAnalysis)
-- **`plot_scan()`**: full overview (heatmap, SIDI, CDN).  
+- **`plot_scan()`**: full overview (heatmap, SIDI, CDN).
 - **`plot_monthly_profile()`**: climatology plot (monthly profile) of the input variable.
 - **`plot_boundary()`**: basin shapefile on an equal-area projection.
-- **`normal_values()`**: compute "normal" values of the climatology via the inverse SPI-like function.
-- **`find_trends()`**: analyze trends in CDN (or any external series) using rolling-window regression.
-- **`plot_trends()`**: visualize CDN trend bars for multiple window sizes.
-- **`severe_events()`**: list and plot severe drought events, ordered by magnitude or duration.
+- **`normal_values()`**: "normal" values of the climatology (index = 0, exact inverse).
+- **`native_to_spi()` / `spi_to_native()`**: exact conversion between native units and the index.
+- **`find_trends()`**: deficit/surplus over moving windows from the reverse SPI (the numbers behind `plot_trends`).
+- **`plot_trends()`**: CDN with deficit/surplus bars for multiple window sizes.
+- **`deficit_from_spi()` / `volume_anomaly_rolling()`**: statistical and direct physical deficit over a window.
 - **`plot_spi_fit()`**: plot the fitted relationship between index values and the raw variable.
-- **`recalculate_SIDI()`**: recompute SIDI with a custom K.
+- **`recalculate_SIDI()`**: recompute SIDI with a custom K (one value, or one per weighting scheme).
 - **`export_scan_plot_csv()`**: export data needed to replicate `plot_scan` in external tools.
+- **`severe_events_old()`**: obsolete, kept only to reproduce Di Paola et al. (2025).
 
-### Precipitation, Pet, Balance (meteorological drivers)
-- **`analyze_correlation(streamflow)`**: find the K and weighting scheme that maximize correlation between SIDI and SQI₁.
-- **`analyze_correlation_seasonal(streamflow)`**: same, per-season optimization.
-- **`set_optimal_SIDI()`**: recompute SIDI with optimal parameters from `analyze_correlation`.
-- **`set_optimal_SIDI_seasonal()`**: recompute SIDI with season-specific parameters.
-- **`plot_covariates(streamflow)`**: plot optimal SIDI alongside SQI₁.
-- **`spi_sqi_corr(streamflow)`**: month-wise SPIₖ–SQI₁ correlation heatmap (R² matrix).
+### Precipitation, Pet, Balance (drivers of a streamflow)
+- **`analyze_correlation(streamflow)`**: R² of SIDI vs SQI₁ for every (K, weighting scheme); optional block bootstrap.
+- **`analyze_correlation_seasonal(streamflow)`** / **`analyze_correlation_seasonal_rolling(streamflow)`**: per season, and on moving windows of years.
+- **`analyze_correlation_lagged(streamflow, lag)`**: the same with the SIDI leading SQI₁ by `lag` months.
+- **`set_optimal_SIDI()`** / **`set_optimal_SIDI_seasonal()`**: commit a global or seasonal calibration (mutually exclusive).
+- **`plot_covariates(streamflow)`**: calibrated SIDI alongside SQI₁.
+- **`spi_sqi_corr(streamflow)`** / **`spi_sqi_corr_lagged(streamflow)`**: month-wise SPIₖ–SQI₁ R² matrix, without or with a time lag.
+- **Benchmarks**: `benchmark_convolution()`, `Dspi_free()`, `benchmark_nash()`, `benchmark_ihacres()`, `analyze_convolution_irf()`.
+
+### Gridded objects (Precipitation, Pet, Balance, Temperature from NetCDF)
+- **`spatial_sidi()`**: gridded SIDI at a target date (follows the committed calibration).
+- **`spatial_spi()`**: gridded SPI-like index and its native-unit deficit/surplus.
+- **`plot_spatial()`**: maps of SIDI, the SPI-like index, or its reverse.
 
 ### Precipitation only
-- **`spatial_sidi()`**: compute the gridded SIDI at a target timestamp (SPI grid: `spatial_spi()`).
-- **`spatial_trends()`**: compute pixel-wise CDN trend maps.
-- **`plot_spatial()`**: visualize spatial maps of SIDI, SPI, or CDN trends.
+- **`ds_balance(streamflow)`** / **`ds_balance_all_schemes(streamflow)`**: monthly water balance of the basin — the part of the streamflow anomaly the precipitation accounts for, and the part it does not.
+- **`import_forecast()`**: import forecast ensembles.
 
 ### Streamflow only
-- **`gap_filling(precipitation)`**: reconstruct missing streamflow using optimized SIDI.
+- **`gap_filling(precipitation)`**: reconstruct missing streamflow from a calibrated SIDI.
 - **`plot_annual_ts(DSO)`**: compare annual streamflow with an external driver.
-- **`BFI()`**: compute the Baseflow Index (daily data required).
+- **`BFI()`**: Baseflow Index (requires the daily file, `data_path`).
 
 > **Note**: internal methods (prefixed with `_`) are used for calculations and should not be called directly.  
 > For detailed reference and examples, see the [User Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/user_guide.md) and [Visualization Guide](https://github.com/PyDipa/DroughtScan/blob/main/tests/docs/visualization_guide.md).

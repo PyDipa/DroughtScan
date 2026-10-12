@@ -8,12 +8,13 @@ This page lists some typical errors you may encounter when initializing or runni
 
 **Context**:  
 The default `calculation_method` for all classes is `f_kde` (non-parametric, since v3.1.0).
-However, if you explicitly set `calculation_method=f_spi`, this assumes **strictly positive values** (Gamma distribution).  
+However, if you explicitly set `calculation_method=f_spi`, this assumes **non-negative values**
+(zero-inflated Gamma: exact zeros are handled as a point mass, negative values are not).
 
-If your time series contains **zeros or negative numbers**, you may get:  
+If your time series contains **negative numbers**, the object is rejected at construction:
 
 ```text
-ValueError: The function value at x=nan is NaN; solver cannot continue
+ValueError: Negative distribution detected (12% of values < 0). f_spi (zero-inflated Gamma) is defined only on positive, right-skewed data. Re-run with calculation_method=f_spei (Pearson III) or calculation_method=f_kde for real-valued variables such as the P-PET balance.
 ```
 
 **Solution**:  
@@ -70,7 +71,8 @@ ISO8601           (e.g., 1960-12-31T23:59:59Z)
 When initializing a class (e.g., `Precipitation`, `Streamflow`, `Balance`), you may encounter:  
 
 ```text
-ValueError: Inconsistent baseline years: define a period within the data temporal domain: [  m yyyy] - [  m yyyy].
+ValueError: Start baseline year 1950 not found in `m_cal`.
+ValueError: End baseline year 2030 not found in `m_cal`.
 ```
 **Possible causes**:
 The baseline years you specified are not fully included in your data.
@@ -99,7 +101,52 @@ ds = DS.Precipitation(ts=my_ts, m_cal=my_mcal, shape=my_shape, calculation_metho
 
 Alternatively, the default `f_kde` (non-parametric) is generally more robust than Gamma on short series, though it still requires a reasonable sample size.
 
-## 5. General advice
+---
+## 5. Unknown `calculation_method`
+
+**Context**: the method passed is not one of the registered standardization methods:
+
+```text
+ValueError: Unknown calculation_method <function my_method ...>: expected one of f_spi (zero-inflated Gamma), f_spei (Pearson III), f_kde (Gaussian KDE), f_zscore (z-score) ...
+```
+
+**Solution**: use a built-in method (optionally wrapped in `functools.partial`), or register
+your own with `drought_scan.utils.drought_indices.register_standardization` (see the
+[User Guide](user_guide.md) §3).
+
+---
+## 6. Methods that need a calibrated SIDI
+
+`plot_covariates`, `ds_balance` and `Streamflow.gap_filling` read the SIDI calibrated against
+the streamflow, and raise if the object still carries the default one. Run the correlation
+analysis and commit it first:
+
+```python
+A = prec.analyze_correlation(streamflow)
+prec.set_optimal_SIDI(A['best_k_per_weight'], A['col_best_weight'], overwrite=True)
+# or, seasonal:
+S = prec.analyze_correlation_seasonal(streamflow, agg='quarter')
+prec.set_optimal_SIDI_seasonal(S, agg='quarter', overwrite=True)
+```
+
+Only `Precipitation`, `Pet` and `Balance` can be calibrated; `Streamflow`, `Temperature`
+and `Teleindex` raise a `TypeError` on the correlation and calibration methods.
+
+---
+## 7. Spatial methods without a grid
+
+```text
+ValueError: No spatial grid for this Precipitation object: the spatial methods need an object built from a gridded NetCDF file (with a shapefile), not from ts/m_cal.
+```
+
+`spatial_sidi`, `spatial_spi` and `plot_spatial` need the gridded data kept at import
+(`Precipitation`, `Pet`, `Balance`, `Temperature` built from NetCDF files). A `Balance`
+whose P and PET grids have different resolutions cannot be mapped pixel by pixel.
+Likewise, `Streamflow.BFI()` needs the daily series and raises if the object was built
+from monthly `ts`/`m_cal` instead of `data_path`.
+
+---
+## 8. General advice
 
 - Always verify that your **baseline years** are included in the data (otherwise index computation may fail).  
 - Ensure that `ts` (time series) and `m_cal` (calendar) arrays have the same length and no gaps in the timestamp.  
