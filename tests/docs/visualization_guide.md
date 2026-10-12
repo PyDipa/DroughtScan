@@ -48,7 +48,8 @@ ds.plot_scan()
 
 ```python
 ds.plot_scan(optimal_k=10)           # Highlight an optimal integration timescale
-ds.plot_scan(weight_index=4)         # Use logarithmically increasing weights for SIDI
+ds.plot_scan(weight_index=4)         # Use geometrically increasing weights for SIDI
+                                     # (default column: User Guide §9.1.3)
 ds.plot_scan(year_ext=(2000,2010))   # Zoom in on a specific period
 ds.plot_scan(plot_order='HSC')       # set the order of the subplots: H > heatmap; S = SIDI ==(D(SPI)); C=CDN
 ds.plot_scan(split_plot=True)        # plot Heatmap, SIDI and CDN in single plots 
@@ -66,7 +67,13 @@ savefig('PATH/my_figure.png')
 
 ---
 
-## 3) Identify severe drought events
+## 3) Identify severe drought events (obsolete)
+
+> **Obsolete.** `severe_events_old` is kept only to reproduce the first publication
+> of the method (Di Paola et al., 2025). It has known defects (listed in its
+> docstring: polynomial `c2r_index` inverse instead of the exact one, and wrong
+> durations/sign with a threshold other than −1, e.g. on `Pet`/`Temperature`). Do not
+> use it for new analyses; a replacement is pending.
 
 Use the threshold to detect events:
 
@@ -74,14 +81,14 @@ Use the threshold to detect events:
 print("Default threshold:", ds.threshold)
 ds.threshold = -1.5  # Custom threshold
 
-tstartid, tendid, duration, deficit = ds.severe_events()
+tstartid, tendid, duration, deficit = ds.severe_events_old()
 print("Severe events started at:", ds.m_cal[tstartid])
 ```
 
 ### Show multiple events
 
 ```python
-ds.severe_events(max_events=10, labels=True)
+ds.severe_events_old(max_events=10, labels=True)
 ```
 
 
@@ -89,21 +96,29 @@ ds.severe_events(max_events=10, labels=True)
 
 ## 4) Equivalent precipitation for a target SPI
 
-`normal_values()` returns precipitation amounts equivalent to SPI=0.  
-Use regression coefficients (`c2r_index`) to convert an SPI value to precipitation.
+`normal_values()` returns precipitation amounts equivalent to SPI=0.
+Use `spi_to_native()` to convert any SPI value to precipitation.
 
 ```python
-import numpy as np
 print("Normal precipitation values:", ds.normal_values())
 
-coeff = ds.c2r_index
-spi_value = -1.5
-month_index = 3   # March
-scale_index = 18  # SPI18
-
-equivalent_precipitation = np.polyval(coeff[scale_index-1, month_index-1, :], spi_value)
+equivalent_precipitation = ds.spi_to_native(-1.5, month_scale=18, ref_month=3)
 print(f"Equivalent precipitation for SPI18=-1.5 in March: {equivalent_precipitation}")
+
+# and the other direction
+print(ds.native_to_spi(1000.0, month_scale=18, ref_month=3))
 ```
+
+`spi_to_native` / `native_to_spi` invert the fitted distribution exactly — the
+Gamma's zero-inflated ppf for `f_spi`, Pearson III for `f_spei`, the KDE
+cumulative for `f_kde`, mean+std for `f_zscore`.
+
+> **Deprecated:** `ds.c2r_index` holds a degree-3 polynomial approximation of the
+> same mapping, evaluated with `np.polyval`. It is kept for backward compatibility
+> only and is not used by any live computation (except the obsolete
+> `severe_events_old`): its error is non-trivial in the
+> distribution tails, and it does not represent the point mass at zero at all.
+> Do not use it for new code.
 **Visual inspection with `plot_spi_fit()`** 
 
 For exploratory purposes, the method `plot_spi_fit(K, month)` provides a graphical representation of the regression curves used to link SPI values to raw data (precipitation, PET, or balance).
@@ -127,54 +142,49 @@ print(equivalent_precipitation)
 
 ## 5) Trend detection in CDN
 
-Detect long-term positive/negative cycles with a rolling window (default=60 months).
+Quantify long-term dry/wet phases over one or more moving windows (`find_trends`
+defaults to `ds.K`; `plot_trends` to windows 12, 36, 60 and 120 months).
 
 ```python
 window = 36
-R = ds.find_trends(window=window)
+R = ds.find_trends(windows=window)[window]
 
-# Arrays returned:
-# 'trend': -1 (negative), 0 (none), 1 (positive)
-# 'slope': slope coefficient
-# 'p_value': statistical significance
-# 'delta': cumulative change of the CDN over the window (standardized units)
+# Arrays returned, all aligned with ds.ts:
+# 'spi'            : SPI-like index at accumulation scale `window`
+# 'anomaly'        : deficit (<0) / surplus (>0): mm, or mm-equivalent for Streamflow
+#                    (the volume in m³ divided by the basin area)
+# 'anomaly_masked' : the same, zeroed inside the near-neutral band |SPI| < 0.5
+# 'unit'           : 'mm' or 'mm-eq'
 
-# Example: trend status in Nov 2017
+# Example: state at Nov 2017
 date_idx = np.where((ds.m_cal[:,0]==11) & (ds.m_cal[:,1]==2017))[0][0]
-print(f"Trend at Nov 2017 (W={window}m): "
-      f"direction={R['trend'][date_idx]}, p-value={R['p_value'][date_idx]:.3f}")
+print(f"Nov 2017, last {window} months: SPI{window}={R['spi'][date_idx]:.2f}, "
+      f"anomaly={R['anomaly'][date_idx]:.0f} {R['unit']}")
 
-# To convert the trend into physical units (mm or m^3), see
-# `deficit_from_spi` in the subsection below.
+# Already in physical units: `find_trends` calls `deficit_from_spi` internally,
+# which inverts the fitted distribution exactly (`spi_to_native`).
 
 ```
 
-**Using external variables**
+**External variables are no longer accepted**
 
-By default, `find_trends` operates on CDN, but it can also be applied to any external time series aligned with the same calendar:
-
-```python
-import numpy as np
-n = 600
-rng = np.random.default_rng(0)
-
-t = np.arange(n)
-my_timeseries = 0.5*np.sin(2*np.pi*t/50) + 0.3*np.sin(2*np.pi*t/200) + rng.normal(0, 0.2, n)
-
-R = ds.find_trends(var=my_timeseries, window=48)
-```
+`find_trends(var=...)` used to run its regression on any array. The reverse SPI is
+defined only against *this* object's fitted distributions, so a foreign series has
+no deficit to report and the argument now raises `TypeError`. Build a DroughtScan
+object around that series instead, or use `utils.statistics._rolling_phase_test`
+for a level test on an arbitrary SPI-1-like series.
 
 ### Plot trends
 
 `plot_trends` visualizes the CDN curve together with the cumulative water
 deficit/surplus estimated over one or more moving windows. Bars on the right
-axis report the deficit in **physical units** — millimetres for `Precipitation`,
-cubic metres for `Streamflow` — inferred automatically from the object type.
-Bars are set to zero wherever no statistically significant monotonic trend is
-detected, so a magnitude is shown only during phases of significant change.
+axis report the deficit in **physical units** — millimetres, or mm-equivalent for
+`Streamflow` — inferred automatically from the object type. Bars are blanked
+inside the near-neutral band |SPI_W| < 0.5, so a magnitude is shown only outside
+"normal" conditions (the same band `plot_spatial` greys out on its maps).
 
 ```python
-ds.plot_trends()                          # default window
+ds.plot_trends()                          # default windows [12, 36, 60, 120]
 ds.plot_trends(windows=[36, 60])          # multiple windows
 ds.plot_trends(windows=[36], show_spi=True)  # overlay the SPI series at that scale
 ```
@@ -192,20 +202,23 @@ ds.plot_trends(windows=[36], ax=axs[0])
 ds.plot_trends(windows=[60], ax=axs[1])
 ```
 
-> **Note**: `plot_trends` always visualizes the CDN trend; it does not accept a
-> custom variable. Use `find_trends(var=...)` to compute trends on external
-> series.
+> **Note**: `plot_trends` draws the CDN plus the deficit/surplus bars for the
+> requested windows; it does not accept a custom variable. `find_trends(windows=...)`
+> returns the same numbers programmatically — the figure calls it, so the two
+> cannot disagree.
 
 ### Cumulative deficit/surplus in physical units
 
 Two complementary methods quantify the cumulative water deficit/surplus over a
-moving window, both expressed in native units (mm for `Precipitation`, total m^3
+moving window, both expressed in native units (mm for `Precipitation`, total m³
 for `Streamflow`) relative to the SPI=0 reference (which equals
-`normal_values()`):
+`normal_values()`). Note the difference with `find_trends`/`plot_trends`, which
+express the Streamflow volume as mm-equivalent:
 
 ```python
-# Statistical-rarity estimate (used internally by plot_trends):
-# maps the SPI-like anomaly at the window scale back to native units via c2r_index.
+# Statistical-rarity estimate (used internally by plot_trends): maps the SPI-like
+# anomaly at the window scale back to native units via the exact inverse of the
+# fitted distribution (spi_to_native), relative to the SPI=0 reference.
 deficit = ds.deficit_from_spi(window=36)
 
 # Direct observation-based water balance: sum of monthly (obs - normal) anomalies.
@@ -214,7 +227,7 @@ volume = ds.volume_anomaly_rolling(window=36)
 
 `deficit_from_spi` reflects the **statistical rarity** of the accumulated anomaly
 and is symmetric in SPI space (though, once converted back to physical units via
-the non-linear gamma calibration, it remains physically asymmetric — e.g.
+the non-linear calibration — Gamma, Pearson III or KDE — it remains physically asymmetric — e.g.
 precipitation is bounded below by zero). `volume_anomaly_rolling` is the **direct
 physical water balance** and serves as a sanity check and complementary metric.
 The two correlate strongly but diverge at extremes.
@@ -232,8 +245,19 @@ print(f"Peak deficit over 36 months: {d[idx]:.3e} "
 
 ## 6) Monthly profiles of input data
 
-Visualize the intra-annual cycle of the input variable through monthly profiles (by default: precipitation if the instance is initialized with Precipitation, snowfall if initialized with Snowfall, etc.).
-The method shows the mean and interquartile range (IQR) for each month over the available years. The name of the variable must be specified by the user.
+Visualize the intra-annual cycle of the input variable through monthly profiles (by default the object's own series: precipitation for a Precipitation object, PET for a Pet object, etc.).
+The method shows a central reference line and the interquartile range (IQR) for each month over the baseline years. The name of the variable must be specified by the user.
+
+When plotting the DSO's own series (`var=None`, the default), the central line
+is `normal_values()`'s per-month "normal" — the exact inverse of the SPI-like
+index at 0 (via `spi_to_native`), the same SPI=0 reference `deficit_from_spi`
+and `volume_anomaly_rolling` use — **not** the raw arithmetic mean. This
+matters for skewed and/or zero-inflated variables (typical for precipitation),
+where the mean and the SPI=0 "normal" (closer to the median) can differ
+noticeably. When plotting an arbitrary `var` instead (e.g. `ds.spi_like_set[0]`
+below), there is no associated fit to invert, so the central line falls back
+to the plain baseline arithmetic mean. The IQR/10-90 percentile bands are
+always the plain empirical baseline percentiles in both cases.
 
 ```python
 ds.plot_monthly_profile(var_name='P')
@@ -293,12 +317,17 @@ ds.plot_boundary(ax=axs[0])
 
 ## 8) Precipitation–Streamflow covariates
 
-After optimizing the SIDI with `analyze_correlation` and `set_optimal_SIDI` (see [User Guide](user_guide.md), Section 8.1),
-the method `plot_covariates` shows the optimal SIDI and SQI1 time series side by side.
+After calibrating the SIDI with `analyze_correlation[_seasonal]` and `set_optimal_SIDI[_seasonal]` (see [User Guide](user_guide.md), §9.1.3),
+the method `plot_covariates` shows the calibrated SIDI and SQI1 time series side by side.
+It prints which calibration (global or seasonal) the SIDI carries; the column is
+chosen with `weight_index` (default: see the User Guide §9.1.3 — the committed one
+after a global calibration, `0` after a seasonal one).
 
 ```python
-# Requires: ds.set_optimal_SIDI(optimal_k, optimal_weight_index, overwrite=True)
+# Requires: ds.set_optimal_SIDI(...) or ds.set_optimal_SIDI_seasonal(...), overwrite=True
 ds.plot_covariates(streamflow)
+ds.plot_covariates(streamflow, weight_index=2)       # a specific scheme
+ds.plot_covariates(streamflow, weight_index='all')   # overlay the five schemes
 
 # Zoom on a period
 ds.plot_covariates(streamflow, year_ext=(2000, 2019))
@@ -332,7 +361,9 @@ streamflow.plot_annual_ts(ds, values='std')
 ## 10) Baseflow Index (Streamflow only)
 
 The method `BFI` computes the Baseflow Index using the Institute of Hydrology method
-(Gustard et al., 1992). Requires **daily** streamflow data.
+(Gustard et al., 1992). Requires **daily** streamflow data: the daily series is
+re-read from the file, so the `Streamflow` object must be built with `data_path`
+(an object built from monthly `ts`/`m_cal` raises a clear error).
 
 ```python
 bfi, baseflow = streamflow.BFI(block_size=5, plot=True)
@@ -347,8 +378,12 @@ The method `export_scan_plot_csv` exports the minimum data needed to replicate
 the `plot_scan` visualization in another workspace (e.g., R, MATLAB).
 
 ```python
-ds.export_scan_plot_csv(weight_index=2, name='Po_basin', out_dir='exports')
+ds.export_scan_plot_csv(name='Po_basin', out_dir='exports')                 # default column
+ds.export_scan_plot_csv(weight_index=2, name='Po_basin', out_dir='exports') # explicit column
 ```
+
+Without `weight_index` the exported SIDI column follows the same default as the
+plots (User Guide §9.1.3).
 
 This creates CSV files for `m_cal`, `CDN`, `spi_like_set`, `SIDI`, and a JSON metadata file.
 
@@ -356,10 +391,11 @@ This creates CSV files for `m_cal`, `CDN`, `spi_like_set`, `SIDI`, and a JSON me
 
 ## 12) Spatial visualization
 
-For spatially distributed maps of SPI, SIDI, and CDN trends at every grid point
-within the basin, see the [Spatial Guide](spatial_guide.md).
+For spatially distributed maps of the SIDI, the SPI-like index and its native-unit
+reverse at every grid point within the basin (Precipitation, Pet, Balance and
+Temperature objects built from NetCDF files), see the [Spatial Guide](spatial_guide.md).
 
 Key methods:
-- `ds.spatial_maps()` — compute gridded SPI and SIDI at a target timestamp.
-- `ds.spatial_trends()` — compute pixel-wise CDN trend maps.
+- `ds.spatial_sidi()` — compute the gridded SIDI at a target timestamp.
+- `ds.spatial_spi()` — compute pixel-wise SPI-like maps and their native-unit reverse.
 - `ds.plot_spatial()` — visualize the output maps.

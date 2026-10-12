@@ -1,33 +1,43 @@
-"""
-author: PyDipa
-# © 2025 Arianna Di Paola
-# License: GNU General Public License v3.0 (GPLv3)
-
-Custom functions for visualization
-"""
-
+import matplotlib as mpl
 import numpy as np
 from matplotlib import pyplot as plt
-from matplotlib.colors import ListedColormap, BoundaryNorm
+# plt.style.use("drought_scan/utils/default.mplstyle")
+# mpl.rcParams['font.family'] = ['Helvetica', 'DejaVu Sans', 'Arial']
+
+from matplotlib.colors import ListedColormap, BoundaryNorm, to_rgb
 from drought_scan.utils.drought_indices import *
-from drought_scan.utils.statistics import *
+from drought_scan.utils.statistics import find_overlap, WEIGHT_LABELS, WEIGHT_COLORS
 from matplotlib.colors import Normalize
+
+
 import os
-
-import matplotlib as mpl
-import matplotlib.font_manager as fm
-available = {f.name for f in fm.fontManager.ttflist}
-if 'Helvetica' in available:
-    mpl.rcParams['font.family'] = 'Helvetica'
-else:
-    mpl.rcParams['font.family'] = 'Arial'
-
 
 try:
     import cmcrameri.cm as cmc
 except Exception:
     cmc = None
 
+# -------------------- Dimenion of the full plot --------------------
+def _figure_size_for_length(n: object) -> object:
+    """
+    Compute figure width and height as a continuous function of series length n,
+    clamped within predefined min/max limits and rounded to 1 decimal place.
+    """
+    # coefficiente di scala derivato dal caso n=1200 -> w≈20.9
+    k = 20.9 / 1200.0
+    w = k * n
+
+    # clamp tra valori minimi e massimi (dai tuoi vecchi casi)
+    w = max(20.9 / 250 * n, min(w, 20.9 / 1800 * n * 1800 / 1200))  # opzionale se vuoi stringere
+    w = min(max(w, 20.9 / 250 * 250), 20.9 / 1800 * 1800)  # clamp effettivo tra 20.9 e ~20.9 (scalato)
+
+    # oppure più semplice: clamp tra 10 e 21
+    w = min(max(w, 10), 21)
+
+    # altezza come proporzione della larghezza
+    h = w / 2 if n >= 300 else w / 1.2
+
+    return round(w, 1), round(h, 1)
 
 def savefig(fname):
     plt.savefig(fname,
@@ -56,32 +66,10 @@ def heatmap_cmap():
 
     return mpl.colors.LinearSegmentedColormap.from_list('Custom cmap', cmap, xmap.N)
 
-
-  # -------------------- Dimenion of the full plot --------------------
-def _figure_size_for_length(n: object) -> object:
-    """
-    Compute figure width and height as a continuous function of series length n,
-    clamped within predefined min/max limits and rounded to 1 decimal place.
-    """
-    # coefficiente di scala derivato dal caso n=1200 -> w≈20.9
-    k = 20.9 / 1200.0
-    w = k * n
-
-    # clamp tra valori minimi e massimi (dai tuoi vecchi casi)
-    w = max(20.9 / 250 * n, min(w, 20.9 / 1800 * n * 1800 / 1200))  # opzionale se vuoi stringere
-    w = min(max(w, 20.9 / 250 * 250), 20.9 / 1800 * 1800)  # clamp effettivo tra 20.9 e ~20.9 (scalato)
-
-    # oppure più semplice: clamp tra 10 e 21
-    w = min(max(w, 10), 21)
-
-    # altezza come proporzione della larghezza
-    h = w / 2 if n >= 300 else w / 1.2
-
-    return round(w, 1), round(h, 1)
-
 def spi_cmap(n_levels=13):
+    """Create a red-2-green palette using the colors by cmcrameri (falls back
+    to heatmap_cmap() if cmcrameri is not installed)."""
     if cmc is not None:
-        """Create a red-2-green palette using the coulors by Crimeri"""
         # take part of colors by lajolla (red) bamako (green)
         n_half = (n_levels - 2) // 2  # esempio: 5 su 13
         # ROSSI puri: prendiamo solo da index 0.40 a 0.75
@@ -153,30 +141,8 @@ def highlight_drought(ax, series, color='brown' ,offset=None, threshold=None):
         else:
             ax.axvspan(start +offset-0.5, end +offset-0.5, color=color, alpha=0.1)
 
-# -------------------- Dimenion of the full plot --------------------
-    def _figure_size_for_length(n):
-        """
-        Compute figure width and height as a continuous function of series length n,
-        clamped within predefined min/max limits and rounded to 1 decimal place.
-        """
-        # coefficiente di scala derivato dal caso n=1200 -> w≈20.9
-        k = 20.9 / 1200.0
-        w = k * n
-
-        # clamp tra valori minimi e massimi (dai tuoi vecchi casi)
-        w = max(20.9 / 250 * n, min(w, 20.9 / 1800 * n * 1800 / 1200))  # opzionale se vuoi stringere
-        w = min(max(w, 20.9 / 250 * 250), 20.9 / 1800 * 1800)  # clamp effettivo tra 20.9 e ~20.9 (scalato)
-
-        # oppure più semplice: clamp tra 10 e 21
-        w = min(max(w, 10), 21)
-
-        # altezza come proporzione della larghezza
-        h = w / 2 if n >= 300 else w / 1.2
-
-        return round(w, 1), round(h, 1)
-
-def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_plot=False,
-                  plot_order=None,figsize=None):
+def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None,
+                  split_plot=False, plot_order=None,figsize=None):
     """
     Plot the drought scan visualization: Heatmap(H),  SIDI(S) and  CDN (C),
 
@@ -188,13 +154,13 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_p
         If provided, SIDI is recomputed using the specified optimal K.
     weight_index : int, optional
         Index of the weighting scheme for SIDI calculation.
-        Defaults to 2 (logarithmically decreasing weights).
+        Defaults to 2 (geometrically decreasing weights).
         Options:
             0 = equal weights
             1 = linear decreasing
-            2 = logarithmic decreasing
+            2 = geometric decreasing
             3 = linear increasing
-            4 = logarithmic increasing
+            4 = geometric increasing
     year_ext : tuple(int, int), optional
         (start_year, end_year). If provided, limits the x-axis to this period.
     split_plot : bool, default=False
@@ -224,13 +190,11 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_p
 
 
     # -------------------- parametri di default --------------------
-    if DSO.is_seasonal_sidi:
-        print(f"Note: SIDI is seasonally optimized — "
-              f"weight_index={weight_index} is ignored (all columns identical).")
-
-    if weight_index is None:
-        weight_index = 2  # log-decreasing
-
+    # One resolver for the whole library (BaseDroughtAnalysis._resolve_weight_index):
+    # explicit argument -> committed calibration -> construction default -> 2. This
+    # used to hardcode 2, so a plot drawn after set_optimal_SIDI(k, w) showed column 2
+    # rather than the calibrated column w.
+    weight_index = DSO._resolve_weight_index(weight_index)
 
     # -------------------- SIDI: ricalcolo opzionale --------------------
     if optimal_k is not None:
@@ -259,7 +223,7 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_p
                 rgba_matrix[i, :, -1] *= 0.3  # trasparenza per scale > Kopt
 
     # -------------------- xticks labels --------------------
-    labels = np.array([str(int(c[1])) for c in DSO.m_cal]).astype(int)  # anni
+    labels = np.array([str(int(c[1])) for c in DSO.m_cal]).astype(int) # anni
 
     # -------------------- graphical helpers  --------------------
     def _apply_xlim(ax):
@@ -345,7 +309,7 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_p
     # validazione ordine: deve essere una permutazione di 'HSC'
     plot_order = plot_order.upper()
     if len(plot_order) != 3 or set(plot_order) != set("HSC"):
-        raise ValueError("plot_order deve essere una permutazione di 'HSC', es. 'CHS', 'HSC', 'SCH', ...")
+        raise ValueError("plot_order must be a permutation of 'HSC', e.g. 'CHS', 'HSC', 'SCH', ...")
 
     order = list(plot_order)  # es. ['S','C','H']
     # # order check
@@ -354,9 +318,11 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_p
 
     order = list(plot_order)
 
+
+
     # -------------------- PLOTTING --------------------
     if not split_plot:
-        # unic panel with 3 subplots
+        # unica figura con 3 pannelli nell'ordine scelto
         if figsize is None:
             fig_w, fig_h = _figure_size_for_length(len(DSO.ts))
         else:
@@ -382,7 +348,6 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_p
         title = (f"Drought Scan for {DSO.basin_name}, Area kmq: {int(np.round(DSO.area_kmq))}. "
                  f"Baseline: {DSO.start_baseline_year} - {DSO.end_baseline_year}")
         fig.suptitle(title, fontsize=14)
-        fig.subplots_adjust(left=0.1)
         plt.show(block=False)
 
     else:
@@ -392,6 +357,7 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_p
                 fig_w, fig_h = _figure_size_for_length(len(DSO.ts))
             else:
                 fig_w, fig_h = figsize
+
             fig, ax = plt.subplots(figsize=(fig_w, fig_h / 3), dpi=100)
             if key == 'H':
                 PANELS[key](ax, add_colorbar=True, show_xticks=True)
@@ -407,7 +373,6 @@ def plot_overview(DSO, optimal_k=None, weight_index=None, year_ext=None, split_p
             subtitle = (f"{DSO.basin_name} | Baseline {DSO.start_baseline_year}-{DSO.end_baseline_year} | "
                         f"Area {int(np.round(DSO.area_kmq))} km²")
             fig.suptitle(subtitle, fontsize=14, y=0.96)
-            fig.subplots_adjust(left=0.1)
             plt.tight_layout()
             plt.show(block=False)
 
@@ -416,11 +381,12 @@ def plot_severe_events(DSO, tstartid, duration, deficit, max_events=None, labels
     Generalized plot for severe drought events, ordered by magnitude or duration.
 
     Args:
+        DSO (object): DroughtScan object providing the calendar (`DSO.m_cal`) for event labels.
         tstartid (ndarray): Indices marking the start of each drought event.
-        tendid (ndarray): Indices marking the end of each drought event.
         duration (ndarray): Duration (in time steps) of each drought event.
         deficit (ndarray): Water deficit for each drought event.
         max_events (int, optional): Maximum number of events to plot. Defaults to None (all events).
+        labels (bool, optional): If True, annotate bars with event start dates. Defaults to False.
         unit (str, optional): Unit of measure for the data. Defaults to "mm".
         name (string, optional): the name of the basin identified by the shape
     """
@@ -467,170 +433,16 @@ def plot_severe_events(DSO, tstartid, duration, deficit, max_events=None, labels
             ax[0].text(v - 1, i, f"{v:.1f}", va='center', ha='right')
 
     # Set the title and layout
+    # Set the title and layout
     title = f'Drought Scan, severe events profile for {DSO.basin_name}. Baseline: {DSO.start_baseline_year} - {DSO.end_baseline_year}'
     fig.suptitle(title, fontsize=12)
     plt.show(block=False)
 
-def plot_cdn_trends_old(DSO, windows, figsize=(14,10),ax=None,year_ext=None,unit=None,show_spi=False):
-    """
-    Plot trends in the Cumulative Deviation from Normal (CDN) time series
-    over multiple moving window lengths, highlighting the net change
-    (translated into mm equivalent) for each period.
 
-    Args:
-        DSO: DroughtScan-like object containing the CDN time series,
-             method `find_trends(window=...)`, calendar `m_cal`,
-             and transformation coefficients `c2r_index`.
-        windows (list of int, optional): List of moving window sizes (in months)
-             over which to compute and visualize trend magnitudes.
-
-    Notes:
-        - For each window, the function calls `DSO.find_trends()` to detect monotonic
-          trends and computes the corresponding delta in standardized units.
-        - The delta values are rescaled using a climatological coefficient derived
-          from the polynomial calibration stored in `DSO.c2r_index`.
-        - Bars represent the intensity of the trend (positive or negative), in mm equivalent.
-        - The underlying CDN curve is shown as a black line.
-        - The dual y-axis allows visualizing both CDN and rescaled trends on the same plot.
-
-    Returns:
-        None. Displays a matplotlib figure.
-    """
-    from numpy.lib.stride_tricks import sliding_window_view
-    from drought_scan.core import Streamflow
-
-
-    cmap = plt.get_cmap('Set1')  # o 'Set1', 'Dark2'...
-    colors = [cmap(i % cmap.N) for i in range(len(windows))]
-
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize, ncols=1, nrows=len(windows))
-        ax = ax.ravel()
-    else:
-        if len(windows) == 1:
-            ax = [ax]  # singole axis
-        else:
-            ax = np.asarray(ax).ravel()  # make it iterable
-        fig = ax[0].figure
-
-    anni = np.unique(DSO.m_cal[:, 1]).astype(int)
-    normal_values = DSO.normal_values()
-    coeff = DSO.c2r_index
-    # average std, used to move from delta changes into mm
-    # std_to_native_rate = [np.polyval(coeff[0, m, :], 1) - normal_values[m] for m in range(12)]
-    # std_to_native_rate = np.mean(np.absolute( std_to_native_rate))
-    DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    avg_seconds_per_month = np.mean(DAYS_IN_MONTH) * 86400  # ~2.63e6 s
-
-
-
-    # Quanto vale 1σ (z=+1) in unità native (mm per Precipitation, m³/s per Streamflow), mese per mese
-    std_to_native_rate_monthly = np.abs(np.array([
-        np.polyval(coeff[0, m, :], 1) - normal_values[m] for m in range(12)
-    ]))
-
-    # Mappo il rate stagionale su ogni step della serie temporale
-    cal_months_0 = DSO.m_cal[:, 0].astype(int) - 1  # 0-based
-    rate_series = std_to_native_rate_monthly[cal_months_0]  # shape = (n,)
-
-
-    for i, window in enumerate(windows):
-        R = DSO.find_trends(window=window)
-        # Rate medio sulla finestra che termina al mese corrente (allineato come delta)
-        rate_w = np.full(len(rate_series), np.nan)
-        if len(rate_series) >= window:
-            rate_w[window - 1:] = sliding_window_view(rate_series, window).mean(axis=1)
-
-        # Conversione delta → unità fisiche
-        if isinstance(DSO, Streamflow):
-            val = R["delta"] #* rate_w * avg_seconds_per_month
-            unit = "m³"
-        else:
-            val = R["delta"] #* rate_w
-            unit = "mm"
-
-        val[R['trend'] == 0] = 0
-
-
-        # if isinstance(DSO, Streamflow):
-        #
-        #     val = R["delta"] *  std_to_native_rate * avg_seconds_per_month
-        #     unit = "m³"
-        # else:
-        #     val = R["delta"] *  std_to_native_rate
-        #     unit = "mm"
-        val[R['trend'] == 0] = 0
-        line1,=ax[i].plot(DSO.CDN, '-k',label='CDN')
-        ax[i].set_ylabel('CDN', fontsize=12)
-        # ax[i].legend(loc=2)
-        ax[i].set_xticks(np.arange(0, len(val), 12))
-        ax[i].set_xticklabels(anni, rotation=90)
-
-        ax2 = ax[i].twinx()
-        line2= ax2.bar(np.arange(len(val)), val, color=colors[i],alpha=0.3, label=f'Trend {window} mesi')
-
-        ax2.axhline(y=0,color='lightgrey')
-        ax2.set_ylabel(f'Change [{unit}]', fontsize=12)
-        ax2.set_xlim(36, len(val))
-
-        # ----------------------------------------------------
-        # ylim domain for ax2:
-        ymax = np.nanmax(np.abs(val))
-        n_levels = 11
-        step = np.ceil(ymax / ((n_levels - 1) // 2))
-        base = 10 ** np.floor(np.log10(step))
-        for mult in [1, 2, 5, 10]:
-            if step <= mult * base:
-                step = mult * base
-                break
-        # make it symmetric
-        ymax_rounded = int(np.ceil(ymax / step) * step)
-        yticks = np.arange(-ymax_rounded, ymax_rounded + step, step)
-        # ----------------------------------------------------
-
-        ax2.set_yticks(yticks)
-        ax2.set_ylim(yticks[0], yticks[-1])
-
-        # combine the curves to work with a single label
-        lines = [line1, line2[0]] #take only a proxy for the barharty
-        labels = ['CDN' , f'trend over {window} months (moving window)']
-
-        if show_spi and window<=DSO.K:
-            ax3 = ax[i].twinx()
-            ax3.spines["right"].set_position(("axes", 1.12))
-            line3, = ax3.plot(DSO.spi_like_set[window - 1], '-',
-                              color='dimgrey', alpha=0.7,
-                              label=f'SPI{window})')
-            ax3.set_ylabel(f'SPI{window}', fontsize=12, color='dimgrey')
-            ax3.tick_params(axis='y', labelcolor='dimgrey')
-            lines.append(line3)
-            labels.append(f'SPI{window}')
-
-        ax[i].legend(lines, labels, loc='upper left')
-
-        if year_ext is None:
-            ax[i].set_xlim(36, len(DSO.CDN))
-        else:
-            x1 = np.where(DSO.m_cal[:, 1] == year_ext[0])[0]
-            x2 = np.where(DSO.m_cal[:, 1] == year_ext[1])[0]
-
-            if len(x1) == 0:
-                raise ValueError(f"The first year in year_ext={xlim} is outside the available time domain: "
-                                 f"{int(DSO.m_cal[0, 1])}–{int(DSO.m_cal[-1, 1])}")
-
-            if len(x2) == 0:
-                x2 = len(DSO.CDN)
-                print(f"The domain has been closed at year {int(DSO.m_cal[x2 - 1, 1])}.")
-            else:
-                x2 = x2[-1]  # include the last instance of the year (e.g., December)
-
-            ax[i].set_xlim(x1[0], x2)
-
-
-    fig.suptitle(DSO.basin_name)
-    fig.tight_layout()
-    plt.show(block=False)
-
+# Half-width, in SPI units, of the near-neutral band the bars are blanked in:
+# "normal" gets a visible extent instead of a hairline at zero. Same convention as
+# plot_spatial's own `neutral_band`, and the default of DSO.find_trends.
+NEUTRAL_BAND = 0.5
 
 
 def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
@@ -644,14 +456,14 @@ def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
       for Precipitation, cubic metres for Streamflow). The deficit is computed by
       `DSO.deficit_from_spi(window)`, i.e. the SPI-like anomaly at the accumulation
       scale equal to the window length, converted back to native cumulative units
-      via the `c2r_index` calibration relative to the SPI=0 reference. Bars are set
-      to zero wherever `find_trends` detects no statistically significant monotonic
-      trend, so that a magnitude is reported only during phases of significant
-      change.
+      via the exact inverse of the fitted distribution (`spi_to_native`), relative to
+      the SPI=0 reference — not the deprecated `c2r_index` polynomial. Bars are set
+      to zero wherever the SPI-like anomaly at the window scale falls within
+      [-0.5, 0.5], so that a magnitude is reported only outside this near-neutral band.
 
       Args:
           DSO: DroughtScan-like object exposing the CDN series, the calendar
-              `m_cal`, the calibration coefficients `c2r_index`, and the methods
+              `m_cal`, and the methods
               `find_trends(window=...)` and `deficit_from_spi(window=...)`.
           windows (list of int): Moving-window sizes, in months, over which to
               compute and display the deficit/surplus. One subplot is drawn per
@@ -671,9 +483,7 @@ def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
               as breaks in the SPI line.
 
       Returns:
-          dict: `Changes`, mapping each window size to its array of deficit/surplus
-          values (in native units, zeroed where no significant trend is detected).
-          The function also renders the figure.
+          None. Displays the figure.
       """
 
     from drought_scan.core import Streamflow
@@ -690,7 +500,8 @@ def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
 
     anni = np.unique(DSO.m_cal[:, 1]).astype(int)
     if unit is None:
-        unit = "m³" if isinstance(DSO, Streamflow) else "mm"
+        # "m³"
+        unit = "mm-eq" if isinstance(DSO, Streamflow) else "mm"
 
 
 
@@ -700,16 +511,16 @@ def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
 
         if window <= DSO.K:
             spi_w = DSO.spi_like_set[window - 1, :]
-            coeff_w = DSO.c2r_index[window - 1]
         else:
-            spi_w, coeff_w = DSO._compute_spi(month_scale=window)
+            spi_w, _ = DSO._compute_spi(month_scale=window)
 
         # Deficit/surplus
-        anomaly = DSO.deficit_from_spi(window=window, spi=spi_w, coeff=coeff_w)
+        anomaly = DSO.deficit_from_spi(window=window, spi=spi_w)
+        if isinstance(DSO, Streamflow):
+            anomaly = anomaly / (DSO.area_kmq * 1e6) * 1000
 
         val = anomaly.copy()
-        val[(spi_w>-0.5) & (spi_w<0.5) ] = 0
-        # val[R['trend'] == 0] = 0  # azzera dove non c'è trend significativo
+        val[(spi_w > -0.5) & (spi_w < 0.5)] = 0
 
         # --- CDN, asse sinistro ---
         line1, = ax[i].plot(DSO.CDN, '-k', label='CDN')
@@ -741,17 +552,19 @@ def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
             ax2.set_ylim(yticks[0], yticks[-1])
 
         lines = [line1, line2[0]]
-        labels = ['CDN', f'water anomaly over {window} months (sig. trend only)']
+        labels = ['CDN',
+                  f'water anomaly over {window} months '
+                  f'(|{DSO.index_name}{window}| \u2265 {NEUTRAL_BAND})']
 
         if show_spi:
             ax3 = ax[i].twinx()
             ax3.spines["right"].set_position(("axes", 1.12))
             line3, = ax3.plot(spi_w, '-', color='dimgrey', alpha=0.7,
-                              label=f'SPI{window}')
-            ax3.set_ylabel(f'SPI{window}', fontsize=12, color='dimgrey')
+                              label=f'{DSO.index_name}{window}')
+            ax3.set_ylabel(f'{DSO.index_name}{window}', fontsize=12, color='dimgrey')
             ax3.tick_params(axis='y', labelcolor='dimgrey')
             lines.append(line3)
-            labels.append(f'SPI{window}')
+            labels.append(f'{DSO.index_name}{window}')
 
         ax[i].legend(lines, labels, loc='lower left',fontsize=10,frameon=False)
 
@@ -778,8 +591,10 @@ def monthly_profile(DSO,var=None, var_name=None,cumulate=False, ax=None,highligh
 
     Parameters
     ----------
-    var : a DSO timeseries to be profiled. If None, `self.ts` will be used as default.
-        Must be a 1D array with the same length as `self.m_cal`.
+    DSO : DroughtScan-like object providing `DSO.ts` and `DSO.m_cal`.
+
+    var : a DSO timeseries to be profiled. If None, `DSO.ts` will be used as default.
+        Must be a 1D array with the same length as `DSO.m_cal`.
 
     var_name : str or None, optional
         Optional label to include in the plot title.
@@ -832,10 +647,23 @@ def monthly_profile(DSO,var=None, var_name=None,cumulate=False, ax=None,highligh
     perc_10 = np.zeros(12)
     perc_90 = np.zeros(12)
 
+    # The reference line: normal_values()'s per-month "normal" (the exact
+    # inverse of SPI-like=0 at scale 1 via spi_to_native), NOT the raw
+    # arithmetic mean — consistent with deficit_from_spi/volume_anomaly_rolling,
+    # which both anchor to normal_values() as the SPI=0 reference. Only valid
+    # when profiling DSO.ts itself (the series the distribution was fitted
+    # to): an arbitrary `var` has no associated fit, so it falls back to the
+    # plain baseline mean.
+    using_normals = not cumulate and var is None
+    mean_label = 'Monthly Normal (SPI=0, baseline)' if using_normals else 'Monthly Mean (baseline)'
+    if using_normals:
+        monthly_means = DSO._monthly_normals()
+
     if not cumulate:
         for month in range(1, 13):
             monthly_data = x[(months == month) & baseline_mask]
-            monthly_means[month - 1] = np.nanmean(monthly_data)
+            if not using_normals:
+                monthly_means[month - 1] = np.nanmean(monthly_data)
             perc_25[month - 1] = np.nanpercentile(monthly_data, 25)
             perc_75[month - 1] = np.nanpercentile(monthly_data, 75)
             perc_10[month - 1] = np.nanpercentile(monthly_data, 10)
@@ -871,7 +699,7 @@ def monthly_profile(DSO,var=None, var_name=None,cumulate=False, ax=None,highligh
     # Plotting
     # plt.figure(figsize=(12, 6))
 
-    ax.plot(months_n, mean_n, color='darkgray', label='Monthly Mean (baseline)', linewidth=3)
+    ax.plot(months_n, mean_n, color='darkgray', label=mean_label, linewidth=3)
     ax.fill_between(months_n, p25_24, p75_24, color='gray', alpha=0.5, label='25–75 Percentile')
     ax.fill_between(months_n, p10_24, p90_24, color='lightgray', alpha=0.5, label='10–90 Percentile')
 
@@ -915,11 +743,11 @@ def monthly_profile(DSO,var=None, var_name=None,cumulate=False, ax=None,highligh
     plt.tight_layout()
     plt.show(block=False)
 
-
 #---------------------------------------------------
 # optimal SIDI and SQI1 - diagnostic tool
 # -------------------------------------------------
-def plot__covariates(DSO, streamflow, weight_index, year_ext=None, split_plot=False):
+def plot__covariates(DSO, streamflow, weight_index, year_ext=None, split_plot=False,
+                     ax=None):
     """
     Plot the covariate relationship between a Precipitation-based drought index (SIDI)
     and a Streamflow-based index (SQI1), highlighting overlapping drought signals and
@@ -943,17 +771,40 @@ def plot__covariates(DSO, streamflow, weight_index, year_ext=None, split_plot=Fa
             (1) Optimal SIDI vs SQI1
             (2) Their difference (SQI1 - SIDI).
         If False (default), combines both in a single figure with two stacked panels.
+        In both cases, an additional figure with a time series + scatter comparison
+        is always rendered.
+    ax : matplotlib.axes.Axes, optional
+        Only valid together with ``weight_index='all'``. When given, the
+        5-scheme time-series overlay (normally the first of the three 'all'
+        figures) is drawn into this axis instead of its own figure — nothing
+        is shown or closed, and the other two 'all' figures (the per-season
+        errorbar grid and the per-class median-error line chart) are skipped.
+        Use this to build a composite figure — e.g. one row per basin — by
+        looping the call over a grid of axes you own; nothing is returned.
 
     Notes
     -----
     - Requires utility functions: `find_overlap`, `spi_cmap`, `highlight_drought`.
     - Assumes DSO and streamflow share at least some overlapping monthly timeline (`m_cal`).
+    - In the ``weight_index='all'`` time-series overlay the shaded bands mark the
+      months the observed streamflow was in drought (SQI1 < ``streamflow.threshold``,
+      -1 by default). This is only meaningful because the panel is fed a real
+      streamflow object and an optimized SIDI (``DSO.set_optimal_SIDI()`` already
+      called): the shading documents when the basin actually ran dry, against which
+      the five SIDI schemes on the same axis can be read.
     """
 
     # --- Resolve plot index and color ---
     colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:pink', 'tab:purple']
-    _plot_index = 0 if weight_index is None else weight_index
-    _color      = 'red' if weight_index is None else colors[weight_index]
+    wlabels = list(WEIGHT_LABELS)
+    multi = isinstance(weight_index, str) and weight_index.lower() == 'all'
+    if ax is not None and not multi:
+        raise ValueError(
+            "ax is only supported together with weight_index='all' (it draws "
+            "the 5-scheme time-series overlay into that axis)."
+        )
+    _plot_index = 0 if weight_index is None else (0 if multi else weight_index)
+    _color      = 'orange' if weight_index is None else ('k' if multi else colors[weight_index])
 
     # --- Temporal overlap ---
     self_indices, streamflow_indices = find_overlap(DSO.m_cal, streamflow.m_cal)
@@ -965,7 +816,7 @@ def plot__covariates(DSO, streamflow, weight_index, year_ext=None, split_plot=Fa
     vec   = np.arange(len(m_cal))
 
     # --- Extract series ---
-    x     = DSO.SIDI[:, _plot_index][self_indices]          # SIDI
+    x     = DSO.SIDI[:, _plot_index][self_indices]          # SIDI (or column 0 when multi)
     y     = streamflow.spi_like_set[0][streamflow_indices]  # SQI1
     delta = y - x                                           # Difference
 
@@ -981,8 +832,18 @@ def plot__covariates(DSO, streamflow, weight_index, year_ext=None, split_plot=Fa
 
     def _apply_xlim(ax):
         if year_ext is None:
-            ax.set_xlim(0, len(x))
+            ax.set_xlim(0, len(m_cal))
         else:
+            if (not isinstance(year_ext, (tuple, list)) or len(year_ext) != 2
+                    or not all(isinstance(v, (int, np.integer)) for v in year_ext)):
+                # The likely mistake: weight_index='all' passed positionally,
+                # landing in year_ext (the actual 2nd positional parameter).
+                raise TypeError(
+                    "year_ext must be a (start_year, end_year) tuple of int, e.g. "
+                    f"(2000, 2010); got {year_ext!r}. If you meant weight_index="
+                    f"'all', pass it as a keyword: plot_covariates(streamflow, "
+                    f"weight_index='all')."
+                )
             try:
                 x1 = np.where(m_cal[:, 1] == year_ext[0])[0][0]
                 x2 = np.where(m_cal[:, 1] == year_ext[1])[0][-1]
@@ -990,8 +851,182 @@ def plot__covariates(DSO, streamflow, weight_index, year_ext=None, split_plot=Fa
                 raise IndexError("provide a tuple of years within the actual time domain")
             ax.set_xlim(x1, x2)
 
-    width = _figure_size_for_length(len(x))[0] / 4 * 3
-    hight = _figure_size_for_length(len(x))[1] / 3
+    width = _figure_size_for_length(len(m_cal))[0] / 4 * 3
+    hight = _figure_size_for_length(len(m_cal))[1] / 3
+
+    # ================================================================
+    # weight_index='all': (1) time-series overlay of the 5 SIDI schemes +
+    # SQI1; (2) a 2x3 grid of SIDI vs SQI1 (grey monthly points) with
+    # per-season median / 5th-95th pct errorbars binned by SQI1 interval;
+    # (3) a line chart of the median |SQI1 - SIDI| per SQI1 class, one line
+    # per scheme. The delta / colormap panel is single-series, skipped here.
+    # ================================================================
+    if multi:
+        X = DSO.SIDI[self_indices, :]                       # (T_overlap, 5)
+        embedded = ax is not None
+        if embedded:
+            ax_ts = ax
+        else:
+            fig, ax_ts = plt.subplots(1, 1, figsize=(width, hight))
+
+        # Short displayed span (<= 20 years, after year_ext) -> thicker lines and
+        # a larger legend so the overlay stays readable on a narrow x-axis. The
+        # legend text is bold regardless of the span.
+        shown_months = (len(m_cal) if year_ext is None
+                        else (int(year_ext[1]) - int(year_ext[0]) + 1) * 12)
+        short_span = shown_months <= 20 * 12
+        lw_sqi = 1.8 if short_span else 0.9
+        lw_sidi = 1.4 if short_span else 0.7
+        leg_fs = 11 if short_span else 8
+
+        # Shade the months the observed streamflow was itself in drought
+        # (SQI1 < streamflow.threshold, -1 by default): it documents, on the
+        # same axis as the optimized SIDI schemes, when the basin actually
+        # ran dry, so the overlay can be read as "did any scheme see it coming".
+        highlight_drought(ax_ts, y, offset=0, threshold=streamflow.threshold)
+
+        ax_ts.plot(vec, y, c='k', label=f'{streamflow.index_name}1', linewidth=lw_sqi)
+        for w in range(X.shape[1]):
+            ax_ts.plot(vec, X[:, w], c=colors[w], label=wlabels[w],
+                       linewidth=lw_sidi, alpha=0.9)
+        ax_ts.set_ylim(-4, 4)
+        ax_ts.legend(ncol=2, prop={'weight': 'bold', 'size': leg_fs})
+        ax_ts.set_title(f"{DSO.basin_name}: {DSO.SIDI_name} (5 schemes) vs "
+                        f"{streamflow.index_name}1")
+        ax_ts.set_xticks(year_ticks)
+        ax_ts.set_xticklabels(year_labels, rotation=90, fontweight='bold')
+        ax_ts.grid(axis='y')
+        _apply_xlim(ax_ts)
+
+        if embedded:
+            # Caller owns this axis and its figure — draw into it and stop:
+            # figures 2 and 3 ('all' mode's errorbar grid and line chart)
+            # only make sense as their own standalone figures.
+            return
+        fig.tight_layout()
+        plt.show()
+
+        # --- month -> season mapping for the per-scheme scatter below -----
+        # Prefer the committed seasonal calibration; fall back to the four
+        # meteorological seasons when the SIDI was not optimized seasonally.
+        months_ov = m_cal[:, 0].astype(int)
+        if getattr(DSO, 'is_seasonal_sidi', False):
+            season_map = DSO.seasonal_params['seasons']
+        else:
+            season_map = {'DJF': [12, 1, 2], 'MAM': [3, 4, 5],
+                          'JJA': [6, 7, 8], 'SON': [9, 10, 11]}
+        s_names = list(season_map)
+        # Okabe-Ito qualitative palette (colour-vision-deficiency safe). Colour
+        # legibility still needs work (Arianna 2026-08-31: "ci lavoreremo").
+        _OKABE_ITO = ['#0072B2', '#E69F00', '#009E73', '#D55E00',
+                      '#CC79A7', '#56B4E9', '#F0E442', '#000000']
+        s_colors = [_OKABE_ITO[i % len(_OKABE_ITO)] for i in range(len(s_names))]
+
+        # SQI1 classes: open-ended below -2 and above 2, unit-wide in between,
+        # except one single central class spanning -1..1 (no split at 0).
+        sqi_edges = [-np.inf, -2.0, -1.0, 1.0, 2.0, np.inf]
+
+        # --- Figure: per-scheme SIDI vs SQI1, grey cloud + per-season
+        #     5th-95th percentile crosses binned by integer SQI1 class ------
+        fig3, axes3 = plt.subplots(2, 3, figsize=(min(width, 13.0), 8.5))
+        axes3 = axes3.ravel()
+        axis_ticks = np.arange(-4, 5, 1)
+        for w in range(X.shape[1]):
+            ax = axes3[w]
+            xf, yf = X[:, w], y
+            fin = np.isfinite(xf) & np.isfinite(yf)
+            ax.scatter(xf[fin], yf[fin], s=10, color='0.6', alpha=0.30,
+                       edgecolors='none', zorder=1)
+            # R2 of this scheme's reconstructed SIDI (its own seasonally-
+            # optimized K per season, already baked into X = DSO.SIDI) vs SQI1,
+            # over the whole overlap - same finite mask as the scatter/crosses.
+            if fin.sum() >= 2 and np.std(xf[fin]) > 0 and np.std(yf[fin]) > 0:
+                r2 = np.corrcoef(xf[fin], yf[fin])[0, 1] ** 2
+                ax.text(0.03, 0.97, f"R²={r2:.2f}", transform=ax.transAxes,
+                        ha='left', va='top', fontsize=10, fontweight='bold',
+                        zorder=6, bbox=dict(boxstyle='round', facecolor='white',
+                                           edgecolor='none', alpha=0.7))
+            for si, sname in enumerate(s_names):
+                m_sea = np.isin(months_ov, season_map[sname]) & fin
+                for lo, hi in zip(sqi_edges[:-1], sqi_edges[1:]):
+                    cell = m_sea & (yf > lo) & (yf <= hi)
+                    if not np.any(cell):
+                        continue
+                    xs, ys = xf[cell], yf[cell]
+                    xm, ym = np.median(xs), np.median(ys)
+                    # 5th-95th percentiles: trims the single most extreme point
+                    # per tail so one outlier month doesn't stretch the whisker.
+                    x0, x100 = np.percentile(xs, [5, 95])
+                    y0, y100 = np.percentile(ys, [5, 95])
+                    ax.errorbar(xm, ym,
+                                xerr=[[xm - x0], [x100 - xm]],
+                                yerr=[[ym - y0], [y100 - ym]],
+                                fmt='o', ms=6, color=s_colors[si],
+                                markeredgecolor='black', markeredgewidth=1.0,
+                                ecolor=s_colors[si], elinewidth=2,
+                                capsize=3, capthick=2, alpha=0.95, zorder=3,
+                                label=sname)
+            ax.plot([-4, 4], [-4, 4], color='k', ls='--', lw=0.8, alpha=0.7)
+            ax.set_xlim(-4.5, 4.5)
+            ax.set_ylim(-4.5, 4.5)
+            ax.set_xticks(axis_ticks)
+            ax.set_yticks(axis_ticks)
+            # every panel keeps its own tick labels and axis labels: with an
+            # empty 6th panel, shared axes would blank the x labels of the
+            # panels above it and the y labels of the middle column.
+            ax.tick_params(labelbottom=True, labelleft=True)
+            ax.set_aspect('equal', adjustable='box')
+            ax.set_title(wlabels[w], fontsize=10)
+            ax.set_xlabel(DSO.SIDI_name)
+            ax.set_ylabel(f"{streamflow.index_name}1")
+            ax.grid(True, alpha=0.3)
+        axes3[5].axis('off')
+        _handles = [plt.Line2D([], [], marker='o', ms=6, ls='none',
+                               color='0.6', label='monthly values')]
+        _handles += [plt.Line2D([], [], marker='o', ms=6, ls='none',
+                                color=s_colors[i], label=n)
+                     for i, n in enumerate(s_names)]
+        axes3[5].legend(handles=_handles, loc='upper left', frameon=False)
+        fig3.suptitle(f"{DSO.basin_name}: {DSO.SIDI_name} vs {streamflow.index_name}1 "
+                      f"— errorbars (median, 5th-95th pct) by {streamflow.index_name}1 interval")
+        fig3.tight_layout()
+        plt.show()
+
+        # --- Figure: one glance at which scheme misses which intensity class -
+        # x = 5 SQI1 classes, y = median |SQI1 - SIDI| in that class, one
+        # broken line per weighting scheme. A scheme that systematically fails
+        # on a class shows a clear bump there.
+        cls_edges = [-np.inf, -1.5, -0.5, 0.5, 1.5, np.inf]
+        cls_lbl = ["≤−1.5", "−1.5…−0.5",
+                   "−0.5…0.5", "0.5…1.5", ">1.5"]
+        xc = np.arange(len(cls_lbl))
+        fig4, ax4 = plt.subplots(figsize=(min(width, 10.0), 4.6))
+        for w in range(X.shape[1]):
+            ae = np.abs(y - X[:, w])
+            med = []
+            for lo, hi in zip(cls_edges[:-1], cls_edges[1:]):
+                m = np.isfinite(ae) & (y > lo) & (y <= hi)
+                med.append(np.median(ae[m]) if np.any(m) else np.nan)
+            ax4.plot(xc, med, marker='o', ms=6, lw=1.8, color=colors[w],
+                     markeredgecolor='black', markeredgewidth=0.6,
+                     label=wlabels[w])
+        ax4.set_xticks(xc)
+        ax4.set_xticklabels(cls_lbl)
+        ax4.set_xlabel(f"{streamflow.index_name}1 class")
+        ax4.set_ylabel(f"median |{streamflow.index_name}1 − {DSO.SIDI_name}|")
+        ax4.set_ylim(bottom=0)
+        ax4.grid(alpha=0.3)
+        ax4.legend(fontsize=9, ncol=2)
+        ax4.set_title(f"{DSO.basin_name}: median error by {streamflow.index_name}1 "
+                      f"class, per weighting scheme")
+        fig4.tight_layout()
+        plt.show()
+
+        # NOTE: the per-scheme anomaly (SQI1 - SIDI) histogram + KDE grid that
+        # used to be here was replaced by the season-coloured scatter above
+        # (Arianna 2026-08-31). It is preserved in git history at commit
+        # 9029ba6 if it is ever wanted back.
+        return
 
     # ================================================================
     # Figure 1: timeseries + delta
@@ -1081,6 +1116,8 @@ def plot__covariates(DSO, streamflow, weight_index, year_ext=None, split_plot=Fa
     ax_ts.set_xticklabels(year_labels, rotation=90, fontweight='bold')
     ax_ts.grid(axis='y')
     _apply_xlim(ax_ts)
+    # highlight_drought(ax_ts, x, offset=0, threshold=DSO.threshold)
+    ax_ts.axhline(y=DSO.threshold, linestyle='--', color='red')
 
     # Right: scatter
     ax_sc = axes2[1]
@@ -1097,3 +1134,311 @@ def plot__covariates(DSO, streamflow, weight_index, year_ext=None, split_plot=Fa
 
     fig2.tight_layout()
     plt.show()
+
+#--------------------------------------------------------------------
+# function and settings for plotting FORECASTS
+# -------------------------------------------------------------------
+
+def add_esm_forecast(ax, forecast_data,percentile,t0,color_mean="#4A001F"):
+    """Plot forecast median line and percentile bands."""
+
+    fmean = np.percentile(forecast_data,percentile, axis=0)
+    p = {k: np.percentile(forecast_data, k, axis=0) for k in [1, 10, 25, 75, 90, 99]}
+    x = np.arange(len(fmean))
+
+    # ax.plot(x[-window-1::], fmean[-window-1 ::], color_mean, linewidth=4,
+    #         label='Forecast (Ens. Median)', alpha=0.7)
+
+    ax.plot(x[t0::], fmean[t0::], color_mean, linewidth=4,
+            label='Forecast (Ens. Median)', alpha=0.7)
+    ax.fill_between(x, p[25], p[75], color=color_mean, linewidth=0, alpha=0.2,
+                    label='25°–75° percentile range')
+    # 'mediumorchid' 0.2; 'violet' 0.1
+    ax.fill_between(x, p[10], p[90], color=color_mean, linewidth=0, alpha=0.1,
+                    label='10°–90° percentile range')
+    # ax.fill_between(x, p[1], p[99], color="darkslateblue", linewidth=0, alpha=0.1, label='1–99 percentile range')
+
+def add_ml_forecast(ax, prediction,rmse,t0,window, color_mean="#4A001F"):
+    """Plot forecast median line and percentile bands."""
+    x = np.arange(t0, t0 + 1 + window)
+    ax.plot(x, prediction, color_mean, linewidth=4,
+            label='ML Forecast (F)             ', alpha=0.7)
+
+    # shaodows
+    ax.fill_between(x,prediction - rmse,  prediction + rmse, color=color_mean,
+                     label='F ± 1 RMSE                  ', alpha=0.2)
+    ax.fill_between(x,prediction - 2 * rmse, prediction + 2 * rmse, color=color_mean,
+                     label='F ± 2 RMSE                  ', alpha=0.1)
+
+
+     # ax.fill_between(x, p[1], p[99], color="darkslateblue", linewidth=0, alpha=0.1, label='1–99 percentile range')
+
+def add_whatif_curves(ax, x, curves, t0,t2, factors, Probability, month):
+    letters = [r'( $\mathit{g}$ )', r'( $\mathit{f}$ )', r'( $\mathit{e}$ )', r'( $\mathit{d}$ )',
+               r'( $\mathit{c}$ )', r'( $\mathit{b}$ )', r'( $\mathit{a}$ )']
+    for ii, factor in enumerate(factors):
+        # print(ii,factors)
+        # width = ((np.log1p(Probability[ii, month - 1]) ** 2) / 3) ** 1.1
+        width = ((np.log1p(Probability[ii]) ** 2) / 3) ** 1.1
+        if width<=0.05:
+            width=0.5
+        # print(width)
+        prob_text = ('≤' if ii < 3 else '≥')
+        color = ("darkgoldenrod" if ii < 3 else "lightseagreen")
+
+        if ii == len(factors):
+            ax.plot(x[t0::], np.zeros((len(x[t0::]),)) * np.nan, color='w', alpha=0, label='    ')
+
+        ax.plot(x[t0::], curves[ii, t0::], c=color, linewidth=width,
+                linestyle='--', alpha=1,
+                label=f'{letters[ii]} {factor} x NP ({prob_text}  {int(Probability[ii])}%)')
+                # label=f'{letters[ii]} {factor} x NP ({prob_text} {int(Probability[ii, month - 1])}%)   ')
+
+        ax.text(x[t2] - 0.45, curves[ii, t2] + 0.28, letters[ii], fontsize=11)
+
+def add_legends(fig, ax, upper_title, bottom_title,only_WI=False,index=None):
+    """Place two legends below the figure."""
+    handles, labels = ax.get_legend_handles_labels()
+    handles = handles[::-1]
+    labels = labels[::-1]
+    if only_WI==False:
+        group2_handles, group2_labels = handles[4:], labels[4:]
+        group1_handles, group1_labels = handles[:4][::-1], labels[:4][::-1]
+
+        if index == 'CDN':
+            fig.legend(group1_handles, group1_labels, loc='upper right', bbox_to_anchor=(0.99, 0.865),
+                       title=upper_title, ncol=2, fontsize=11, title_fontsize=12, labelspacing=1.05)
+            fig.legend(group2_handles, group2_labels, loc='upper right', bbox_to_anchor=(0.988, 0.735),
+                       title=bottom_title, ncol=1, fontsize=11, title_fontsize=12, alignment='left' ,labelspacing=1.05)
+
+        else:
+            fig.legend(group1_handles, group1_labels, loc='upper right', bbox_to_anchor=(0.99, 0.85),
+                       title=upper_title, ncol=2, fontsize=11, title_fontsize=12, labelspacing=1.05)
+            fig.legend(group2_handles, group2_labels, loc='upper right', bbox_to_anchor=(0.988, 0.73),
+                       title=bottom_title, ncol=1, fontsize=11, title_fontsize=12, alignment='left' ,labelspacing=1.05)
+
+    else:
+        fig.legend(handles, labels, loc='upper right', bbox_to_anchor=(0.99, 0.85),
+                   title=bottom_title, ncol=1, fontsize=11, title_fontsize=12, alignment='left' ,labelspacing=1.05)
+
+def compute_n_dash(window, pad_left=5, n_left_ref=50, n_right_ref=64):
+    """
+    Number of '·' dots for the two banner segments, proportional to their width (months).
+    - pad_left: months of the observed segment
+    - window:   months of the forecast segment (1..7)
+    - n_left_ref / n_right_ref: dots measured in the reference case
+    - window_ref: forecast window of the reference case (e.g. 6)
+
+    Returns (n_left, n_right) as integers.
+    """
+
+    window_ref = 6
+    tot_win = window_ref+pad_left
+    dens_left_ref  = (n_left_ref+n_right_ref)  * (pad_left/tot_win )     # puntini per mese lato observed
+    dens_right_ref = (n_left_ref+n_right_ref)* (window_ref/tot_win )    # puntini per mese lato forecast
+
+    n_left  = int(round(dens_left_ref  * ((tot_win-window)/pad_left)))   # resta ~costante (= n_left_ref)
+    n_right = int(round(dens_right_ref  * ((tot_win-pad_left)/window)))     # scala con window
+
+    return n_left, n_right
+
+def add_dot_banner_proportional(ax, tf1, tf2, window, pad_left=5):
+    # Calcola puntini proporzionali
+    n_left, n_right = compute_n_dash(window)
+
+    y_frac = 1.2
+
+    # Stringhe
+    left_str  = "|" + "·"*n_left  + r" $\leftarrow$ " + " Observed "
+    right_str = " Forecasted " + r" $\rightarrow$ " + "·"*n_right + "|"
+
+    # Centri dei segmenti (in coordinate x dati), y in frazione asse
+    x_left   = tf1 - pad_left
+    x_split  = tf2 - window
+    x_right  = tf2
+
+    x_center_left  = 0.5 * (x_left  + x_split)
+    x_center_right = 0.5 * (x_split + x_right)
+
+    trans = ax.get_xaxis_transform()  # x in dati, y in [0..1]
+    ax.text(x_center_left,  y_frac, left_str,  ha="center", va="center", transform=trans, fontsize=12)
+    ax.text(x_center_right, y_frac, right_str, ha="center", va="center", transform=trans, fontsize=12)
+
+# ---------------------------------------------------------
+# SHAP
+# -------------------------------------------------------
+
+
+
+def plot_forecast_shap(localshap,month,year,feat_names,basin_name,mode='classic'):
+    # A = localshap[:, :, 0]  # (max_lag, n_features)
+    # feat_names = np.array(self.feature_labels)
+    # xmap =plt.get_cmap('coolwarm',13)
+    n_lag, n_feat = localshap.shape
+    n_ticks=15
+    xmap =cmc.vik_r.resampled(n_ticks)
+    cmap = np.array([xmap(i) for i in range(xmap.N)])
+    cmap[6, :] = (0.8, 0.8, 0.8, 1)  # Gray for near-neutral SPI
+    cmap[7, :] = (0.8, 0.8, 0.8, 1)  # Gray for near-neutral SPI
+    cmap[8, :] = (0.8, 0.8, 0.8, 1)
+    cmap= ListedColormap(cmap)
+
+    if mode == 'classic':
+        A = localshap.astype(float)
+        text_label = 'SHAP (CDN, contributo additivo)'
+        title_mode = 'Local SHAP (signed)'
+    elif mode == 'relative':
+        # somma per lead (lungo le feature)
+        col_sum = np.sum(localshap, axis=1)  # shape (n_lag,)
+        # gestione casi quasi-zero per stabilità
+        eps = 1e-9
+        safe_den = np.where(np.abs(col_sum) < eps, np.nan, col_sum)  # evita divisione per ~0
+        # quota percentuale: per-feature share del totale del lead
+        A = (localshap / safe_den[:, None]) * 100.0  # (n_lag, n_feat)
+        text_label = 'Relative contribution (%) to the total SHAP of the lead'
+        title_mode = 'Relative contribution per lead (%)'
+    else:
+        raise ValueError('mode must be "classic" or "relative"')
+
+    v = np.nanmax(np.abs(A))
+
+    # confini delle bande (14 confini per 13 colori)
+    bounds = np.linspace(-v, v, cmap.N + 1)
+    norm = BoundaryNorm(bounds, cmap.N)
+
+    plt.figure(figsize=(10, 0.35 * n_feat))
+    im = plt.imshow(A.T, aspect='auto', cmap=cmap, norm=norm)
+
+    # tick al centro di ogni fascia
+    tick_vals = (bounds[:-1] + bounds[1:]) / 2
+
+    cbar = plt.colorbar(im, boundaries=bounds, ticks=tick_vals)
+    cbar.set_label(text_label)
+    cbar.set_ticklabels([f"{t:.2f}" for t in tick_vals])
+
+    plt.xlabel('Lead months',fontsize=12)
+    plt.xticks(ticks=np.arange(n_lag), labels=np.arange(1, n_lag + 1))
+
+    K = min(25, n_feat)
+    plt.yticks(ticks=np.arange(K), labels=feat_names[:K])
+    plt.ylim(K - 0.5, -0.5)
+
+    plt.title(f'{basin_name} — {title_mode}\nCDN Forecast {month}/{year}', fontsize=14)
+    plt.tight_layout()
+    plt.show(block=False)
+
+    # # ordina le feature per importanza media assoluta
+    # order = np.argsort(np.nanmean(np.abs(A), axis=0))[::-1]
+    # A_ord = A[:, order].T                         # (n_features, max_lag) per plot
+    # labels_ord = feat_names[order]
+    #
+    # import matplotlib.pyplot as plt
+    # v = np.nanmax(np.abs(A_ord))
+    # plt.figure(figsize=(10, 0.35*len(labels_ord)))  # altezza proporzionale alle feature
+    # im = plt.imshow(A_ord, aspect='auto', cmap='coolwarm', vmin=-v, vmax=+v)
+    # plt.colorbar(im, label='SHAP (CDN, unità modello)')
+    # plt.xlabel('Lead (lag)')
+    # plt.ylabel('Feature')
+    # plt.xticks(ticks=np.arange(A.shape[0]), labels=np.arange(1, A.shape[0]+1))
+    # # mostra solo le top-K se sono tante:
+    # K = min(25, len(labels_ord))
+    # plt.yticks(ticks=np.arange(K), labels=labels_ord[:K])
+    # plt.ylim(K-0.5, -0.5)
+    # plt.title('Local SHAP su forecast CDN per lag=1..max_lag')
+    # plt.tight_layout()
+    # plt.show()
+
+
+# ==============================================================================
+# Bootstrap R²(K, weighting scheme) plot helpers
+#
+# Shared low-level drawing routines for the peak/cluster and benchmark-CI panels
+# produced by BaseDroughtAnalysis.analyze_correlation[_seasonal] and the
+# benchmark_nash bootstrap (core.py). Not meant to be called directly by users.
+# ==============================================================================
+
+def _plot3_peak_clusters(ax, MatCorr, K_range, summary, title="", legend=True):
+    """The peak/cluster figure of analyze_correlation[_seasonal]: the per-scheme R²(K) curves
+    (dotted, to keep them out of the way of the crosses) and, at each scheme's
+    peak, a CROSS (x = peak K with its bootstrap CI, y = peak R² with its CI)
+    in a slightly darker shade of that scheme's own curve colour. Every cross
+    gets a centre marker; which symbol is incidental - the CI mutual-inclusion
+    rule (``_peak_summary``: same K cluster, then same R² sub-cluster) decides
+    only whether two schemes end up sharing one (same response group) or each
+    keep their own (independent group of one)."""
+    # One marker symbol per response sub-cluster - sized 1 or more - cycled so
+    # distinct groups are told apart without redrawing the boxes this figure
+    # used to carry. Every family belongs to exactly one sub-cluster, so this
+    # covers every scheme, not just the ones sharing a group.
+    _GROUP_MARKERS = ("o", "s", "^", "D", "v", "P", "X", "*")
+    group_marker = {}
+    gi = 0
+    for c in summary.get("clusters", []):
+        for su in c.get("subclusters", []):
+            sym = _GROUP_MARKERS[gi % len(_GROUP_MARKERS)]
+            gi += 1
+            for f in su.get("families", []):
+                group_marker[f] = sym
+
+    def _darken(color, factor=1):
+        r, g, b = to_rgb(color)
+        return (r * factor, g * factor, b * factor)
+
+    pbf = summary.get("peak_by_family", {})
+    xk = np.arange(1, len(K_range) + 1)
+    for wi, name in enumerate(pbf):
+        color = WEIGHT_COLORS[wi % len(WEIGHT_COLORS)]
+        ax.plot(xk, MatCorr[:, wi], linewidth=1.6, linestyle="--", label=name, color=color)
+        d = pbf[name]
+        pr, kk = d.get("peak_R2"), d.get("argmax_K")
+        if kk and pr is not None and np.isfinite(pr):
+            clo, chi = d["peak_CI"]
+            klo, khi = d.get("K_CI", (np.nan, np.nan))
+            yerr = [[max(0.0, pr - clo)], [max(0.0, chi - pr)]]
+            xerr = ([[max(0.0, kk - klo)], [max(0.0, khi - kk)]]
+                    if np.all(np.isfinite([klo, khi])) else None)
+            marker = group_marker.get(name, "o")
+            ecolor = _darken(color)
+            ax.errorbar(kk, pr, yerr=yerr, xerr=xerr, fmt=marker, ms=7,
+                        markerfacecolor=ecolor, markeredgecolor="black", markeredgewidth=2,
+                        ecolor=ecolor, elinewidth=4, capsize=3, zorder=5)
+
+    ax.set_xlim(1, len(K_range))
+    ax.set_ylim(0, 1)
+    ax.set_xlabel("Month-scale (K)", fontsize=13)
+    ax.set_ylabel(r"$R^2$", fontsize=13)
+    ax.grid(alpha=0.3)
+    if legend:
+        ax.legend(fontsize=9, loc="lower right")
+    if title:
+        ax.set_title(title, fontsize=13)
+
+
+def _plot_benchmark_ci_box(ax, ci, k_hat, r2_hat, color="#c1121f"):
+    """Overlay the block-bootstrap CI of ``(optimal_K, R²)`` on a benchmark's
+    R²_adj(K) panel: a translucent rectangle spanning the K-CI on x (lag months)
+    and the R²-CI on y, plus an errorbar cross at the point estimate. Same visual
+    language as the peak/cluster boxes of ``analyze_correlation[_seasonal]``
+    (see ``_plot3_peak_clusters``). ``ci`` is a benchmark result's ``'ci'`` dict;
+    a no-op when it lacks finite ``optimal_K`` / ``R2_adj_opt`` intervals."""
+    from matplotlib.patches import Rectangle
+    from matplotlib.colors import to_rgba
+
+    klo, khi = ci.get("optimal_K", (np.nan, np.nan))
+    rlo, rhi = ci.get("R2_adj_opt", (np.nan, np.nan))
+    if np.all(np.isfinite([klo, khi, rlo, rhi])):
+        ax.add_patch(Rectangle(
+            (klo, rlo), max(khi - klo, 0.4), max(rhi - rlo, 1e-3),
+            facecolor=to_rgba(color, 0.12), edgecolor=to_rgba(color, 0.55),
+            linewidth=0.8, zorder=0, label="bootstrap 95% CI"))
+        for xv in (klo, khi):
+            ax.plot([xv, xv], [0, rhi], color="0.8", ls=":", lw=0.8, zorder=0.5)
+    xerr = ([[max(0.0, k_hat - klo)], [max(0.0, khi - k_hat)]]
+            if np.all(np.isfinite([klo, khi])) else None)
+    yerr = ([[max(0.0, r2_hat - rlo)], [max(0.0, rhi - r2_hat)]]
+            if np.all(np.isfinite([rlo, rhi])) else None)
+    ax.errorbar(k_hat, r2_hat, xerr=xerr, yerr=yerr, fmt='o', ms=5, color=color,
+                ecolor=color, elinewidth=1.1, capsize=3, zorder=5)
+
+
+

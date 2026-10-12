@@ -35,7 +35,7 @@ To run Drought-Scan you need at least:
 - A **precipitation dataset** in NetCDF format.  
 - A **shapefile** delimiting the hydrographic basin of interest.  
 
-Note: In `test/data` you will find some dataset for running the following examples
+Note: In `tests/data` you will find some datasets for running the following examples
 
 The tool will automatically:
 1. Select the gridded data that fall within the shapefile.  
@@ -115,7 +115,7 @@ Below are the most impactful options, with defaults and when you might want to c
   In short, larger `K` → longer memory and smoother signals.
 
 - **`threshold` (float)** — *severity threshold for events (e.g., on SIDI)*  
-  Default: `-1`.  
+  Default: `-1` (`+1` for `Pet` and `Temperature`, where high values are the critical ones).  
   Meaning: events below the threshold are flagged as severe.  
   - `-1` corresponds to 1 standard deviation below the mean of a standardized index.  
   - In the Po River case study (see paper), `-1` proved effective for **severe** drought identification; adjust for your basin by comparing the SIDI with some observed impact variable.
@@ -137,14 +137,33 @@ Below are the most impactful options, with defaults and when you might want to c
   To verify which distribution best fits your data, see the diagnostic tools in
   [statistics_tools.md](statistics_tools.md).
 
+  **Your own method.** Every method lives in a registry
+  (`drought_scan.utils.drought_indices`) that tells the library how to go from
+  native units to the index and back. A custom function with the same signature as
+  the `f_*` functions works everywhere (forward fit, `native_to_spi` /
+  `spi_to_native`, deficits, spatial maps) once registered:
+
+  ```python
+  from drought_scan.utils.drought_indices import register_standardization
+  register_standardization(my_method,
+                           to_index=lambda x, p: ...,    # native -> index, one (scale, month) fit
+                           to_native=lambda z, p: ...,   # its exact inverse
+                           n_fit_params=2, n_c2r=2)
+  ```
+  An unregistered method is rejected at construction with the list of the available ones.
+
 - **`weight_index` (int)** — *weighting scheme for SIDI aggregation across scales*  
-  Default: `2` (logarithmically decreasing).  
+  Default: `2` (geometrically decreasing), for every class.  
+  This is the column that plots and exports read *before* any calibration. After a
+  calibration against a streamflow the default column changes (see §9.1.3): the
+  committed `optimal_weight_index` after a global calibration, `0` (equal weights)
+  after a seasonal one. `ds_balance` always defaults to `0`.  
   Options:
   - `0`: equal weights  
   - `1`: linear decreasing  
-  - `2`: **logarithmically decreasing** *(default; favors recent months)*  
+  - `2`: **geometrically decreasing** *(default; favors recent months)*  
   - `3`: linear increasing  
-  - `4`: logarithmically increasing  
+  - `4`: geometrically increasing  
 
   In practice, decreasing schemes (1–2) often improve responsiveness to recent conditions while preserving multi-scale context.
 
@@ -153,7 +172,7 @@ Below are the most impactful options, with defaults and when you might want to c
 
 - **`index_name` (str)** — label used in outputs/plots (default `'SPI'`).
 
-- **`verbose` (bool)** — print initialization details (default `True`).
+- **`verbose` (bool)** — print initialization details (default `True`, every class).
 
 **Defaults**
 
@@ -164,12 +183,7 @@ Using the same baseline across precipitation and streamflow analyses ensures com
 This level is widely used in drought monitoring (e.g. to flag *severe drought*).  
 You can easily adjust the threshold (e.g. –1.5 for stricter detection) and test the impact on event identification.
 
-- These defaults are directly used by the method:
-
-```python
-ds.severe_events()
-```
-and can be visualized through:
+- These defaults can be visualized through:
 
 ```python
 ds.plot_scan()
@@ -177,6 +191,11 @@ ds.plot_trends()
 ```
 
 which show how baseline and threshold affect the scan of SPI/SIDI/CDN time series and the detection of drought episodes.
+
+> `ds.severe_events_old()` (event detection and deficit per event) is **obsolete**:
+> it is kept only to reproduce the first publication of the method
+> (Di Paola et al., 2025) and has known defects listed in its docstring. Do not use
+> it for new analyses.
  
 Please see the [Visualization Guide](visualization_guide.md) for further details about plotting methods.
 
@@ -221,7 +240,7 @@ ds3 = DS.Precipitation(
     start_baseline_year=1981,
     end_baseline_year=2010,
     basin_name='Po',
-    calculation_method=partial(f_kde, log_transform=True),   #  default is False
+    calculation_method=partial(f_kde, log_transform=True),   # True is already the default
     index_name='SPI (f_kde) '
 )
 # user can easily check the calibration obtained by the methods
@@ -253,9 +272,9 @@ You can always extract raw arrays and build your own plots.
 Note that ds.SIDI holds 5 time-series, one for each weighting scheme:
   - `0`: equal weights  
   - `1`: linear decreasing  
-  - `2`: **logarithmically decreasing** *(default; favors recent months)*  
+  - `2`: **geometrically decreasing** *(default; favors recent months)*  
   - `3`: linear increasing  
-  - `4`: logarithmically increasing  
+  - `4`: geometrically increasing  
 
 ```python
 import matplotlib.pyplot as plt
@@ -298,18 +317,28 @@ anomaly over time, so it is a natural starting point to identify
 
 ### Detecting trends
 
-`find_trends(window=W)` applies a rolling linear regression to the CDN over a
-moving window of `W` months and flags **monotonic, statistically significant**
-trends (p < 0.05). Returns four arrays:
+`find_trends(windows=W)` returns the water deficit/surplus accumulated over a
+moving window of `W` months, in native units, obtained from the **reverse SPI**:
+the SPI-like index at accumulation scale `W`, mapped back through the fitted
+distribution (`spi_to_native`) relative to the SPI = 0 reference. These are
+exactly the bars `plot_trends()` draws.
 
 ```python
-window = 36
-R = ds.find_trends(window=window)
-# R['trend']  : -1 negative, 0 none, 1 positive
-# R['slope']  : slope coefficient of the regression
-# R['p_value']: p-value of the trend test
-# R['delta']  : cumulative CDN change over the window (slope × W), in standardized units
+R = ds.find_trends(windows=[12, 36])
+# R[36]['spi']            : SPI-like index at scale 36
+# R[36]['anomaly']        : deficit (<0) / surplus (>0), mm for Precipitation,
+#                           mm-equivalent over the basin area for Streamflow
+# R[36]['anomaly_masked'] : the same, zeroed where |SPI36| < 0.5 (the near-neutral
+#                           band), i.e. what gets plotted
+# R[36]['unit']           : 'mm' or 'mm-eq'
 ```
+
+> Until 2026-09 this method ran a rolling OLS regression on the CDN and reported
+> slopes and p-values. The CDN is a cumulative sum, so those p-values were
+> spurious by construction, and `plot_trends()` had already stopped using them.
+> For a genuine test of a sustained wet/dry phase, use
+> `utils.statistics._rolling_phase_test`, which tests the **mean of SPI-1**
+> (approximately serially independent) over a window against zero.
 
 Larger `W` filters short-term oscillations and emphasizes structural cycles.
 For typical basin-scale analyses, **W = 36–60 months** captures multi-annual
@@ -321,7 +350,9 @@ Detecting a trend is one thing; communicating its magnitude as
 "X mm of missing rainfall" or "Y million m³ of missing discharge"
 requires conversion from standardized to physical units. Drought-Scan
 offers two complementary methods, both returning native units (mm for
-`Precipitation`, total m³ for `Streamflow`, derived units for `Pet`/`Balance`):
+`Precipitation`, total m³ for `Streamflow`, derived units for `Pet`/`Balance`).
+`find_trends` / `plot_trends` express the Streamflow volume as **mm-equivalent**
+(m³ divided by the basin area), so it is directly comparable with precipitation:
 
 - **`deficit_from_spi(window)`** — *statistical-rarity perspective.*
   The SPI-like index at the matching accumulation scale is converted back
@@ -426,10 +457,23 @@ Note: If daily data are detected in Streamflow, they are **averaged** to monthly
   - *Pet*: climatic driver that can be used on its own or combined with precipitation.  
   - *Balance*: meteorological drought using the input for SPEI-like indices.  
 
-In practice this means that, aside from the different input format and sensible defaults,
-all classes are **symmetric**: once initialized they provide the same workflow and
-diagnostic outputs, allowing the user to compare meteorological, hydrological and climatic
-drought signals under a unified framework.
+Once initialized, every class provides the same core outputs (SPI-like set,
+SIDI, CDN, reverse transforms, deficits, plots), so meteorological, hydrological and
+climatic signals can be compared under a unified framework. Some analyses, however,
+only make sense for some classes:
+
+| Capability | Precipitation | Pet | Balance | Streamflow | Temperature | Teleindex |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|
+| Core outputs, `plot_scan`, `find_trends`, deficits | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Correlation with a streamflow (`analyze_correlation*`, `spi_sqi_corr*`, benchmarks) | ✓ | ✓ | ✓ | – | – | – |
+| SIDI calibration (`set_optimal_SIDI*`) | ✓ | ✓ | ✓ | – | – | – |
+| Spatial maps (`spatial_sidi`, `spatial_spi`, `plot_spatial`) — needs a NetCDF input | ✓ | ✓ | ✓ (pixel P−PET) | – | ✓ | – |
+| Water balance (`ds_balance`) | ✓ | – | – | – | – | – |
+| `gap_filling`, `BFI`, `plot_annual_ts` | – | – | – | ✓ | – | – |
+
+For `Pet`, the correlation with streamflow is usually **negative** (high PET, low
+flow): R² does not show the sign, but the calibrated SIDI and the regressions that
+use it (`plot_covariates`, `gap_filling`) keep it.
 
 
 
@@ -465,10 +509,11 @@ It works by testing different month-scales (K) and weighting functions applied t
 
 What it does:
 - Finds the overlapping time period between the driver and streamflow data.
-- Computes SIDI values for multiple temporal scales (K) and weighting schemes (equal, linear, logarithmic).
+- Computes SIDI values for multiple temporal scales (K) and weighting schemes (equal, linear, geometric).
 - Evaluates the correlation (R²) between each SIDI configuration and the streamflow SQI1.
 - Identifies the best K and weighting scheme that maximize correlation.
-- Optionally produces plots showing how R² varies with K across weighting schemes, the relationship between the optimized SIDI and SQI1, and a diagnostic scan plot with the optimal configuration.
+- Optionally produces plots: a diagnostic scan plot at the best configuration, the scatter of that SIDI vs SQI1, the R²(K) curves (one per weighting scheme), and the effective weights of every scheme at its own optimal K.
+- Prints, for every scheme, its optimal K, its R² there and the **mean age** of its effective weights (see §9.1.2).
 
 NOTE: This optimization task does not require that the SIDI and SQI1 time series cover the same time interval, thus facilitating analyses even for situations where the streamflow data are shorter or only partially temporally overlapped with the precipitation data.
 
@@ -510,6 +555,7 @@ A = ds.analyze_correlation(streamflow, plot=True, plot_mode='monthly')
 
 
 # if desired, SIDI can be recomputed with optimal K and weight_index and become a proxy for SQI1
+# (with overwrite=True the result is committed to ds.SIDI and the method returns None)
 ds.set_optimal_SIDI(
     optimal_k=A['best_k'],
     optimal_weight_index=A['col_best_weight'],
@@ -525,6 +571,26 @@ SIDI_matrix = ds.recalculate_SIDI(K=A['best_k'])              # shape: (time, n_
 sidi_opt    = SIDI_matrix[:, A['col_best_weight']]            # 1D vector (time,)
 
 ```
+
+**Each weighting scheme has its own optimal K.** `A['best_k']` is the K of the single
+best (K, weight) pair — applying it to all five columns leaves the other four
+calibrated at a scale that is not their own. `analyze_correlation` also reports the
+optimum of every scheme, so each column of SIDI can keep its own scale:
+
+```python
+A['best_k_per_weight']            # ndarray (5,) — optimal K of each weighting scheme
+A['max_correlation_per_weight']   # ndarray (5,) — R² each scheme reaches at its own K
+A['R2_matrix']                    # ndarray (K, 5) — the full R² surface
+
+# every column optimized on its own terms; col_best_weight stays the one to read
+ds.set_optimal_SIDI(
+    optimal_k=A['best_k_per_weight'],
+    optimal_weight_index=A['col_best_weight'],
+    overwrite=True
+)
+```
+
+Passing a single integer keeps the historical behaviour, so existing code is unaffected.
 
 ### 9.1.1) Seasonal correlation analysis
 
@@ -543,57 +609,360 @@ my_seasons = {'wet': [10, 11, 12, 1, 2, 3], 'dry': [4, 5, 6, 7, 8, 9]}
 seasonal_corr = ds.analyze_correlation_seasonal(streamflow, agg='custom',
                                                  seasons=my_seasons, plot=True)
 
-# Apply seasonal optimization
-ds.set_optimal_SIDI_seasonal(seasonal_corr, agg='quarter', overwrite=True)
+# Apply seasonal optimization (agg must match the one used above)
+ds.set_optimal_SIDI_seasonal(seasonal_corr, agg='custom', seasons=my_seasons, overwrite=True)
 ```
-### 9.1.2) Understanding SIDI optimization states
+
+Each season's entry of `seasonal_corr` carries `best_k`, `col_best_weight`,
+`max_correlation`, `best_k_per_weight` (5,), `R2_matrix` (K, 5) and `sample_number`.
+With `plot=True` the method draws, one panel per season: the SIDI-vs-SQI1 scatter
+of the seasonal mosaic, the bootstrap peak/cluster figure (only with `n_boot > 0`),
+and the effective weights of every scheme at its own per-season K. With
+`agg='monthly'` it draws a bar chart of the max R² per month instead.
+
+For the **gridded** seasonal SIDI, pass the same `seasonal_corr` (with its `agg`)
+straight to `spatial_sidi` — no need to commit it first:
+
+```python
+ds.spatial_sidi(seasonal_params=seasonal_corr, agg='quarter')
+```
+
+See the [Spatial Guide](spatial_guide.md) §2.6 for both the committed and
+non-committed routes.
+
+### 9.1.2) Uncertainty on R²(w, K): the block bootstrap
+
+`analyze_correlation` / `analyze_correlation_seasonal` return one R²(w, K)
+surface. It came from one particular stretch of history; a slightly different but
+equally believable weather record would have moved the numbers, and maybe changed
+which K looks best. Pass `n_boot > 0` and the method rebuilds the whole
+calculation on many resampled histories, then reports how much the answer moves:
+
+```python
+A = ds.analyze_correlation(
+    streamflow,
+    n_boot=500,            # 0 (default) -> behaviour and return value unchanged
+    block_length=None,     # L in months; default max(24, 2*K) rounded to whole years
+    ci=(2.5, 97.5),        # band percentiles
+    circular=True,         # wrap blocks around the series end
+    random_state=0,
+)
+A["R2_matrix"]      # (K, 5)      the point estimate, exactly as before
+A["R2_ci"]          # (2, K, 5)   [lo, hi] percentile band
+A["R2_boot"]        # (B, K, 5)   every replica's surface (for your own stats)
+A["boot_meta"]      # dict: block_length, n_blocks, contaminated_fraction (K,), ...
+A["summary_raw"]    # dict: the raw per-scheme bootstrap result (peak_by_family, clusters)
+A["summary"]        # per-scheme table: peak K / peak R2 (+ CIs), mean age — see below
+```
+
+`analyze_correlation_seasonal(..., n_boot=500)` builds **one** replica set on the
+continuous overlap and slices it per season, so each season's dict gains
+`"R2_boot"`, `"R2_ci"`, `"boot_meta"` and `"summary"` (the raw per-scheme bootstrap
+result for that season), plus a top-level `result["summary"]` table with one row
+per (season, weighting scheme).
+
+> **Note.** With `n_boot > 0` the seasonal result therefore has one key, `"summary"`,
+> that is **not** a season (it is a DataFrame). When looping over seasons, iterate
+> over your `seasons` mapping, or skip non-dict values:
+> `for name, v in result.items(): if isinstance(v, dict): ...`
+
+---
+
+#### Why a *block* bootstrap and not the classic one
+
+The classic bootstrap resamples **one month at a time**, as if months were
+independent. They are not: rainfall and streamflow persist from one month to the
+next, and SPI/SQI are themselves moving averages that share input months between
+consecutive points by construction. Month-by-month resampling would break that
+link and make the data look richer in independent information than it is, giving
+an artificially narrow uncertainty. The fix is to resample **whole blocks of
+consecutive months**.
+
+#### Step 1 — Block length `L`
+
+`L` must be long enough to contain the system's memory:
+
+> `L` = the larger of 24 months (2 years) and 2 × the maximum `K` tested, then
+> rounded to the nearest whole number of years.
+
+Twice `K`, not `K`: every join between two blocks produces a small unusable zone
+`K-1` months wide (Step 5). With `L = K` almost the whole block would be that
+zone; with `L = 2K` the damaged part stays a limited fraction and the rest is
+clean.
+
+**Whole-year blocks** (multiples of 12 months): SPI and SQI are computed
+calendar-month by calendar-month (January's fit uses only past Januaries, etc.).
+A block that cut a year in half would distort the balance of the 12 months in the
+synthetic series. Whole-year blocks keep every replica on a valid calendar; the
+library lays the blocks end-to-end under a fresh contiguous calendar so that each
+synthetic month equals its real month.
+
+#### Step 2 — The pool of blocks
+
+From the real series (N years long) every run of `block_years` consecutive years
+is a candidate block: one starting at year 1, one at year 2, and so on — these
+overlap (the *moving block bootstrap*). With `circular=True` the series wraps
+after its last year, so years near the ends are not systematically under-sampled.
+
+#### Step 3 — Resample rainfall and streamflow **together**
+
+Blocks are drawn at random, with replacement, until the original length is
+covered. **The same span of years is always drawn for both series** — never
+independently — otherwise the rainfall→streamflow link the analysis exists to
+measure would be broken and the result would be meaningless.
+
+#### Step 4 — Rebuild everything from scratch
+
+Nothing is reused: on each synthetic series the whole chain is recomputed —
+SPI at every scale `K`, then SQI1, then the full R²(w, K) surface. Only this way
+does the estimated uncertainty reflect how the *entire procedure* would move.
+
+#### Step 5 — The seams, and how they are handled
+
+At every block join the synthetic series places side by side two moments that
+were never consecutive in reality (e.g. October of one year followed by March of
+another). Individual values are fine; the problem is the **K-month moving
+average** (SPI_K): near a seam it blends months that were not really adjacent,
+producing a physically meaningless accumulation.
+
+The fix: the months within `K-1` steps of a seam are **discarded (set to NaN)**
+before R² is computed for that scale. The larger `K`, the more months are dropped
+near each seam — unavoidable, since a longer window reaches further back.
+
+**Practical consequence:** as `K` grows, fewer valid points remain, so a wider
+band at high `K` does **not** necessarily mean "more physical uncertainty" — it
+can partly just mean "less data left, for a technical reason". The library prints
+a table (also in `boot_meta["contaminated_fraction"]` and
+`boot_meta["eff_n_per_scale"]`) of how much was dropped and how much survives at
+each `K`. **Read that table before interpreting the width of a band.**
+
+#### Step 6 — Repeat
+
+Steps 3–5 are repeated `n_boot` times. A few hundred to a couple of thousand is
+usual; the library's interactive default is 500. (The diagnostics site build
+leaves it off by default — it re-runs the full pipeline `B` times and is slow
+with `f_kde` at large `K`.)
+
+#### Step 7 — The confidence interval
+
+For each (w, K) cell, the `ci` percentiles (default 2.5 / 97.5) of the `n_boot`
+values are the 95% band: *"reran under a slightly different but statistically
+similar history, 95% of the time R² would land in here."*
+
+#### Step 8 — Seasons: one bootstrap, sliced afterward
+
+Do **not** bootstrap each season on its own months only: a long-`K` SPI computed
+in (say) January reaches back into the previous February–December, so cutting the
+season out *before* rebuilding SPI would lose that memory. The procedure is: one
+bootstrap on the whole continuous series (Steps 1–6), then — only at the end,
+after SPI/SQI1 are rebuilt — keep the months of the season of interest and
+compute R² on that subset.
+
+#### The `summary` table — one row per weighting scheme
+
+`analyze_correlation_seasonal(..., n_boot>0)` builds a table with **one row per
+(season, weighting scheme)** at `result["summary"]` (a pandas DataFrame); the
+raw per-season bootstrap result is in `result[season]["summary"]`.
+`analyze_correlation` builds the same with `season = "whole period"`. It is also
+printed.
+
+For **each** of the 5 weighting schemes the bootstrap gives its **peak**: the
+highest R² it reaches over all K, the K where that happens, and a 95 % CI for
+**both** — the R² CI (percentiles of the per-replica peak R²) and the **K CI**
+(percentiles of the per-replica peak K). K is discrete, so the K CI is rounded
+**outward** to whole months (floor of the lower bound, ceiling of the upper one):
+the interval is never narrower than the one estimated, and the same integer bounds
+are used by the clustering rule, the table, the printout and the figure. Those are
+the horizontal + vertical arms of the **cross** in the peak figure.
+
+**Which schemes are not distinguishable.** Two schemes are statistically
+indistinguishable when **each one's observed peak K falls inside the other's
+bootstrap K CI** (symmetric, on K) **and** the same holds for their peak R² CIs
+— i.e. neither the timescale nor the strength of the response separates them.
+A scheme whose peak K or peak R² sits clearly outside another's CI stays on its
+own. This is exactly the rule that decides which schemes share the same marker
+symbol at their peak in the response-surface figure (Fig. 3, see below); the
+table's `not_distinguishable_from` column names them directly.
+
+It is also printed, one block per season:
+
+```
+  --- bootstrap peak summary (per weighting scheme) — DJF ---
+   ew       peak K=6    [4, 12]      peak R2=0.678  [0.617, 0.796]
+   lindw    peak K=9    [6, 12]      peak R2=0.687  [0.625, 0.806]
+   geodw    peak K=12   [8, 12]      peak R2=0.689  [0.626, 0.808]
+   liniw    peak K=4    [3, 11]      peak R2=0.664  [0.589, 0.773]
+   geoiw    peak K=4    [3, 10]      peak R2=0.662  [0.587, 0.773]
+  Note: not distinguishable (overlapping bootstrap CI, same marker in Fig. 3):
+    - ew, liniw, geoiw
+    - lindw, geodw
+  Most economical top-R2 scheme: geoiw (K=4 [3, 10], R2=0.662 [0.587, 0.773]) (statistically tied on R2 with: ew, geodw, lindw, liniw)
+```
+
+| column | plain meaning |
+|---|---|
+| `season` | season name, or `"whole period"` for `analyze_correlation`. |
+| `family` | the weighting scheme (`ew`, `lindw`, `geodw`, `liniw`, `geoiw` — `WEIGHT_LABELS`). |
+| `peak_K` `[peak_K_CI]` | the K where this scheme's R²(K) peaks, with its bootstrap CI. |
+| `peak_R2` `[peak_R2_CI]` | that peak R², with its bootstrap CI. |
+| `mean_age` | mean age (months) of the scheme's effective weights at its own `peak_K` — see below. |
+| `not_distinguishable_from` | the other schemes sharing this one's marker in Fig. 3 (see above), or `"-"` when this scheme's peak stands on its own. |
+
+Reading it: a scheme with `"-"` in `not_distinguishable_from` marks its own
+response mechanism, at its own timescale and strength. Several schemes sharing
+a value there are not separable given the record length — pick any one of them,
+or keep the simplest (`ew`), rather than reading real meaning into which one
+happens to have the highest point estimate.
+
+**The "most economical" scheme — R² only, across the whole record.** The
+`not_distinguishable_from` groups above are nested: two schemes only land in
+the same group when they **also** share a K cluster (rule 1) — so `lindw` and
+`geodw` in the DJF example are each on their own there, even though their R²
+is statistically the same as everyone else's. The last printed line answers a
+different, simpler question, using **R² alone** (rule 2), applied globally
+across all five schemes regardless of K: starting from the scheme with the
+single highest peak R², every other scheme whose peak R² is statistically tied
+with it (mutual CI inclusion, chained transitively) joins the same group —
+even schemes at a clearly different K, which rule 1 would have kept apart.
+Within that group, the scheme with the **smallest peak K** is printed as the
+"most economical": the shortest, cheapest memory that is not measurably worse
+than the best. In the example, `geoiw` (K=4) is printed even though `geodw`
+(K=12) has the nominally higher point estimate — their R² CIs overlap, so the
+shorter-memory scheme is the more defensible pick.
+
+The per-season dict also has `peak_by_family` — `peak_R2`, `argmax_K`, `peak_CI`
+and `K_CI` for every scheme, if you want them directly.
+
+**Effective weights and mean age.** D(SPI) aggregates nested windows, so a calendar
+month at lag j (0 = current month) enters every SPI_k with k ≥ j + 1, and its
+effective weight is the sum of the scale-weights of all those terms:
+
+    W_eff(j) = Σ_{k>j} w_k = 1 − Σ_{k≤j} w_k
+
+W_eff is non-increasing in j for **every** scheme — the response is attenuating,
+never delayed; schemes differ only in how steeply it declines. W_eff counts the
+membership of a month in the nested windows and does not include the per-scale
+standardization of SPI_k, which would change the steepness but not the
+monotonicity. The **mean age** is the barycentre of W_eff,
+Σ_j j·W_eff(j) / Σ_j W_eff(j): unlike K it is comparable across schemes (an
+increasing scheme peaking at short K can keep less memory than a decreasing scheme
+peaking at long K). It is printed by `analyze_correlation[_seasonal]`, reported in
+the `summary` table and drawn by `effective_weights_at_optimum` (the last figure).
+`effective_month_weights(K)` draws W_eff for the five schemes at the same K.
+
+#### What the figures show (with `n_boot>0`)
+
+`analyze_correlation` draws, in this order: the scan plot at the best
+configuration; the SIDI-vs-SQI1 scatter; the R²(K) curves, one per scheme, each
+with its per-cell percentile band; **the peak figure**; the effective weights at
+each scheme's optimal K. `analyze_correlation_seasonal` draws the per-season
+scatter, the peak figure (one panel per season) and the effective weights (one
+panel per season); it has no separate R²(K)-curve figure.
+
+The **peak figure** shows the R²(K) curves plus a **cross** at each scheme's peak
+(horizontal arm = the peak-K CI, vertical arm = the peak-R² CI), drawn with a
+**marker symbol** — schemes that are not distinguishable (see above) share the
+same symbol, so the plot reads at a glance which schemes describe one response
+mechanism and which stand apart — and a shaded box per scale cluster.
+
+#### In one sentence
+
+Many plausible alternative histories are rebuilt by resampling whole consecutive
+chunks of rainfall-and-streamflow **together**, the entire method is recomputed
+on each, the points where resampling glued together moments that were never
+really adjacent are discarded, and what is reported is not just where the peak
+falls but how stable that choice is — an interval, not a bare point.
+
+### 9.1.3) Understanding SIDI optimization states
 
 After running `analyze_correlation` or `analyze_correlation_seasonal`, the SIDI
-can be optimized in two ways. Understanding the difference is important because
-it affects how downstream methods (plotting, gap filling, forecasting) select
-the correct SIDI.
+can be committed to the object in two ways. `ds.SIDI` always has the same meaning
+— shape `(N, 5)`, one column per weighting scheme — what changes is how each column
+was built. `ds.calibration_mode` tells you which state the object is in:
+`None` (default SIDI), `'global'` or `'seasonal'`.
 
-**Global optimization** (`set_optimal_SIDI`):
-a single K and weight_index are applied to all months.
+**Global calibration** (`set_optimal_SIDI`): the same K applies to all months.
 
 ```python
 A = ds.analyze_correlation(streamflow)
 ds.set_optimal_SIDI(A['best_k'], A['col_best_weight'], overwrite=True)
 
 # After this call:
+#   ds.calibration_mode      → 'global'
 #   ds.optimal_k             → int (the chosen K)
-#   ds.optimal_weight_index  → int (the chosen column of SIDI)
-#   ds.SIDI                  → shape (N, 5), read column ds.optimal_weight_index
-#   ds.is_seasonal_sidi      → False
+#   ds.optimal_weight_index  → int (the default column from now on)
+#   ds.SIDI                  → shape (N, 5)
 ```
 
-**Seasonal optimization** (`set_optimal_SIDI_seasonal`):
-each season gets its own K and weight_index. The resulting SIDI is a single
-series (tiled to 5 identical columns for backward compatibility).
+With a scalar K, **only the `optimal_weight_index` column is calibrated at its own
+optimum** — the other four are computed at a K chosen for a different scheme, so they
+should not be read. To keep all five interpretable, pass one K per scheme:
+
+```python
+ds.set_optimal_SIDI(A['best_k_per_weight'], A['col_best_weight'], overwrite=True)
+
+# After this call:
+#   ds.optimal_k             → ndarray (5,) — one K per weighting scheme
+#   ds.SIDI                  → shape (N, 5), every column at its own optimal K
+```
+
+**Seasonal calibration** (`set_optimal_SIDI_seasonal`): each column is one weighting
+scheme, built with **that scheme's own optimal K in every season** and standardized
+per season on the baseline.
 
 ```python
 S = ds.analyze_correlation_seasonal(streamflow, agg='quarter')
 ds.set_optimal_SIDI_seasonal(S, agg='quarter', overwrite=True)
 
 # After this call:
-#   ds.seasonal_params       → dict with per-season config
-#   ds.SIDI                  → shape (N, 5), all 5 columns identical
-#   ds.is_seasonal_sidi      → True
-#   ds.optimal_k             → does NOT exist (K varies by season)
+#   ds.calibration_mode      → 'seasonal'
+#   ds.seasonal_params       → dict: 'agg', 'seasons', per-season 'config'
+#   ds.SIDI                  → shape (N, 5), one column per weighting scheme,
+#                              each at ITS OWN per-season K
+#   ds.optimal_k             → does NOT exist (K varies by season and scheme)
 ```
 
-**How downstream code selects SIDI:**
+There is **no single "best" seasonal series**: several schemes are usually
+statistically indistinguishable (§9.1.2), so picking the argmax scheme of each
+season would be a winner's-curse artefact. You choose the column.
 
-| Method | What it reads |
-|--------|---------------|
-| `plot_scan(weight_index=w)` | `ds.SIDI[:, w]` — works in both cases |
-| `plot_covariates(streamflow)` | auto-selects from `optimal_weight_index` or seasonal |
-| `gap_filling(ds)` | requires `overwrite=True`; reads the active SIDI |
-| ESM scenarios | re-applies optimization automatically after recalculation |
+To get the five per-scheme seasonal series without committing anything:
+
+```python
+seasons = {"DJF": [12, 1, 2], "MAM": [3, 4, 5],
+           "JJA": [6, 7, 8],  "SON": [9, 10, 11]}
+
+S = ds.analyze_correlation_seasonal(streamflow, seasons=seasons, plot=False)
+all_schemes = ds.recalculate_SIDI_seasonal_all_schemes(S, seasons)   # (N, 5)
+```
+
+**One calibration at a time.** The two states are mutually exclusive: committing a
+global calibration discards a previous seasonal one, and vice versa, with a printed
+note. Every method that reads the calibrated SIDI then reminds you which one it is
+reading, e.g.:
+
+```
+Note: SIDI calibrated SEASONALLY (set_optimal_SIDI_seasonal, agg='quarter', seasons=['DJF', 'MAM', 'JJA', 'SON']): one column per weighting scheme, each at its own per-season K; default column weight_index=0.
+```
+
+Both setters return the new `(N, 5)` array with `overwrite=False` (nothing is
+stored) and `None` with `overwrite=True`.
+
+**Which column is read by default** (`weight_index` not passed):
+
+| State | Default column |
+|---|---|
+| not calibrated | the construction `weight_index` (2 unless set) |
+| global | `ds.optimal_weight_index` |
+| seasonal | `0` (equal weights) |
+| `ds_balance`, any state | `0` (equal weights), with a printed reminder |
+
+An explicit `weight_index=...` always wins. This rule is shared by `plot_scan`,
+`plot_covariates`, `gap_filling`, `export_scan_plot_csv` and `plot_spatial`.
 
 **Rule of thumb**: always call `set_optimal_SIDI` or `set_optimal_SIDI_seasonal`
 with `overwrite=True`. If you want to go back to the default SIDI,
-re-initialize the Precipitation object.
+re-initialize the object.
 
 
 ## 9.2) Streamflow Gap Filling
@@ -601,7 +970,7 @@ Observed streamflow time series may contain **missing values** due to monitoring
 The method `gap_filling` of the `Streamflow` class allows you to fill short gaps and preserve continuity in index calculation.
 
 **Concept.** Gaps in the streamflow record are reconstructed **using the precipitation-based SIDI** that best explains SQI1.  
-You must first **optimize the SIDI configuration** on the Precipitation object with `set_optimal_SIDI` (with `overwrite=True`), then pass the Precipitation object to `Streamflow.gap_filling`.
+You must first **calibrate the SIDI** of the driver (Precipitation, Pet or Balance) with `set_optimal_SIDI` or `set_optimal_SIDI_seasonal` (with `overwrite=True`), then pass that object to `Streamflow.gap_filling`. SQI1 is regressed on the chosen SIDI column (default: §9.1.3; pass `weight_index=` to choose) and the predictions are converted back to discharge with the exact inverse of the fitted distribution.
 
 ```python
 # Assuming ds (Precipitation) and streamflow (Streamflow) are already initialized
@@ -691,10 +1060,115 @@ streamflow = DS.Streamflow(
 )
 
 # Compute the month-wise SPIk–SQI1 correlation matrix (R²)
-R2 = prec.spi_sqi_corr(streamflow, plot=True)
+# spi_sqi_corr returns (R2_matrix, suggested_seasons)
+R2, suggested_seasons = prec.spi_sqi_corr(streamflow, plot=True)
 
 print("Shape of R² matrix:", R2.shape)   # Expected: (12, K)
 ```
+---
+
+
+### 9.3.1) With a time lag: `spi_sqi_corr_lagged`
+
+Same month-wise R², but between the index at scale k **l months before** and SQI1:
+R²(SPI_k(t − l), SQI1(t)) for every calendar month of SQI1 and every lag
+l = 0..`max_lag`. The lag moves the *end* of the accumulation window back in time:
+it tests whether a window that closed l months earlier explains the streamflow of
+that month better than one closing in the month itself. `lag=0` reproduces
+`spi_sqi_corr` exactly.
+
+```python
+R2_lag = prec.spi_sqi_corr_lagged(streamflow, max_lag=24, lag=3, plot=True)
+R2_lag.shape          # (12, K, max_lag + 1); R2_lag[:, :, 3] is the matrix plotted
+```
+
+---
+
+## 9.4) Lagged and rolling SIDI correlation
+
+**`analyze_correlation_lagged(streamflow, lag=1)`** — `analyze_correlation` with the
+SIDI leading SQI1 by `lag` months: R²(SIDI_{K,w}(t − lag), SQI1(t)) for every
+(K, weighting scheme). It measures how much predictive lead time the index offers.
+Pairs are matched through the calendar, so `lag` is exactly `lag` months; `lag=0`
+gives the same `R2_matrix` as `analyze_correlation`. Same return keys, plus `"lag"`.
+
+```python
+L = prec.analyze_correlation_lagged(streamflow, lag=2, plot=True, plot_mode='monthly')
+L['best_k'], L['col_best_weight'], L['max_correlation'], L['R2_matrix'].shape
+```
+
+**`analyze_correlation_seasonal_rolling(streamflow, agg='quarter', window_length=30, step=10)`**
+repeats the seasonal R²(K) analysis on moving windows of `window_length` years,
+shifted by `step` years, to explore the stability of the SIDI–streamflow
+relationship over time. The windows overlap: read it as a sensitivity /
+non-stationarity analysis, not as independent replicas.
+
+---
+
+## 9.5) Water balance of the basin: `ds_balance`
+
+`ds_balance(streamflow)` (Precipitation only) splits the observed streamflow anomaly,
+month by month, into the part the precipitation accounts for and the part it does
+not (abstraction, reservoirs, aquifers, and model error). It **requires a
+calibrated SIDI** (§9.1.3) and returns a DataFrame indexed by month with, among
+others, `Qn` (normal discharge), `Qo` (observed), `Qa` (discharge the
+precipitation implies), `rain_share = Qa − Qn`, `divergence = Qo − Qa`
+(`rain_share + divergence == Qo − Qn` exactly), the `typical_volume` band and
+`rain_deficit_k`. See the method docstring for the full derivation.
+
+```python
+S = prec.analyze_correlation_seasonal(streamflow, seasons=seasons, plot=False)
+prec.set_optimal_SIDI_seasonal(S, seasons=seasons, overwrite=True)
+df = prec.ds_balance(streamflow)                    # weight_index=0 (ew) by default
+df = prec.ds_balance(streamflow, weight_index=2)    # another scheme
+balances = prec.ds_balance_all_schemes(streamflow)  # {scheme label: DataFrame}
+```
+
+`ds_balance` defaults to **`weight_index=0`** whatever the calibration, and prints a
+reminder: no scheme is optimal in every season, so the choice is left explicit.
+`ds_balance_all_schemes` computes the balance for all five schemes, each with its
+own per-season K.
+
+---
+
+## 9.6) Benchmarks for D(SPI)
+
+These methods (Precipitation, Pet, Balance) fit simpler or alternative models of
+SQI1 from the same driver, to measure what D(SPI) adds. All of them report **R² as
+the squared Pearson correlation** — the same definition used by
+`analyze_correlation` — so every R² is directly comparable (the OLS benchmarks also
+report R²_adj, used to choose K). All accept `agg=` / `seasons=` for a seasonal
+split and `n_boot=` for a block-bootstrap CI on their scalar results (§9.1.2).
+
+| Method | Model |
+|---|---|
+| `benchmark_convolution(var='P')` | Benchmark A: free OLS lag kernel on raw P → Q (unit hydrograph). |
+| `benchmark_convolution(var='SPI')` | Benchmark B: free OLS lag kernel on SPI1 → SQI1. |
+| `Dspi_free()` | Free OLS weights on the scales SPI_1..SPI_K → SQI1 (no lag). |
+| `benchmark_nash()` | Benchmark C: two-parameter Gamma kernel (shape n, scale τ) on SPI1 → SQI1. |
+| `benchmark_ihacres()` | Two linear reservoirs (fast/slow, mixed by α) — IHACRES routing. |
+| `analyze_convolution_irf()` | The five SIDI weighting shapes used as fixed lag kernels on SPI1 (or raw P). |
+
+**Kernel convention.** In every kernel benchmark the first ordinate multiplies the
+contemporaneous month: ŷ(t) = Σ_{j=1}^{L} h(j)·x(t − j + 1). The fit and its plot
+use the same convolution.
+
+**Benchmark C (Nash-type kernel).** h(j; n, τ) = j^(n−1) e^(−j/τ) / (τ^n Γ(n)),
+j = 1..L, normalised to sum to 1. (n, τ) and L are optimised jointly by
+unconstrained Nelder–Mead, restarted from the 3 × 3 grid n₀, τ₀ ∈ {1, 2, 4};
+solutions outside 0 < n ≤ 20 and 0 < τ ≤ 36 months score R² = −1. For n > 1 the
+kernel is bell-shaped with mode j* = (n − 1)τ, i.e. a delay of j* − 1 months.
+
+**Driver and target.** `benchmark_nash` and `benchmark_ihacres` accept
+`driver_var='SPI'|'P'` and `target_var='SQI'|'Q'`; defaults are SPI1 → SQI1 for
+Nash and raw P → SQI1 for IHACRES. Plots and labels follow the choice.
+
+```python
+nash = prec.benchmark_nash(streamflow, plot=True)                      # SPI1 -> SQI1
+ihac = prec.benchmark_ihacres(streamflow, driver_var='SPI', plot=True) # SPI1 -> SQI1
+nash['optimal_n'], nash['optimal_k'], nash['optimal_K'], nash['R2']
+```
+
 ---
 
 

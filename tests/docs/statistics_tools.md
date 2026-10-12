@@ -45,12 +45,17 @@ The four families always evaluated are:
 - **Pearson type III**
 - **Gaussian KDE** (non-parametric, Silverman bandwidth)
 
-**Primary selection criterion**: lowest Kolmogorov–Smirnov statistic *D* (scale-free,
-valid for all four families including KDE).
+**Primary selection criterion (since 4.0.0)**: lowest mean point-by-point CDF deviation
+(`error_percent`). Unlike the KS statistic, this averages the absolute |fitted − empirical|
+difference over all observations, so a zero-inflated fit's vertical jump at zero counts
+in proportion rather than dominating. See §1.5 and the note on zero-inflation below.
 
 **Secondary criterion**: lowest AIC (Akaike Information Criterion), computed for the
 three parametric families only (KDE is excluded because no canonical number of parameters
 is defined).
+
+**Reported but not used for `recommendation`**: KS statistic *D* (single worst-point
+distance; still available as `"best_by_KS"`).
 
 ---
 
@@ -62,7 +67,7 @@ from drought_scan.utils.statistics import test_standardization
 result = test_standardization(
     data,
     groups=None,
-    shift_for_gamma=True,
+    shift_for_gamma=False,
     plot=True,
     n_bootstrap=0,
     seed=None
@@ -79,8 +84,20 @@ result = test_standardization(
   Grouping labels (e.g., months, seasons). Same length as `data`.
   If provided, the analysis is run independently per group.
 
-- `shift_for_gamma` : bool, default `True`
-  Add +1 to data before Gamma fitting to handle zeros.
+- `shift_for_gamma` : bool, default `False`
+  Add +1 to the strictly-positive part of the data before Gamma fitting.
+  **Defaults to `False` since 4.0.0**, because `f_spi` does not shift: it fits
+  `gamma.fit(x[x > 0], floc=0)` on the raw positive part, carrying the exact zeros
+  in `qq` instead. With the old default of `True`, this function scored a Gamma
+  fitted on `x + 1` — a different model from the one the library would actually
+  apply, which is precisely what it exists to judge. It has nothing to do with
+  zeros (see "Handling exact zeros" below); leave it `False` unless you are
+  reproducing a legacy shifted fit.
+
+> **Which sample to pass.** This function judges whatever you hand it. To choose a
+> `calculation_method` for a DroughtScan object, pass the **baseline** slice of the
+> series — that is the period `f_spi`/`f_kde` calibrate the fit, the zero-inflation
+> fraction and the log decision on. The diagnostics report does this for you.
 
 - `plot` : bool, default `True`
   Generate empirical vs theoretical CDF/PDF comparison figures
@@ -102,9 +119,10 @@ result = test_standardization(
   | `"skewness"`         | float  | Sample skewness                               |
   | `"normality_p_value"`| float  | p-value from D'Agostino & Pearson test        |
   | `"fits"`             | dict   | `{family: fit_dict}` for all four families    |
+  | `"best_by_mean_error"` | str  | Family with lowest mean point-by-point CDF deviation |
   | `"best_by_KS"`       | str    | Family with lowest KS statistic               |
   | `"best_by_AIC"`      | str    | Family with lowest AIC (parametric only)      |
-  | `"recommendation"`   | str    | Primary recommendation (= `best_by_KS`)      |
+  | `"recommendation"`   | str    | Primary recommendation (= `best_by_mean_error`) |
 
   Each entry in `"fits"` is a dictionary with keys:
   `distribution`, `params`, `KS_statistic`, `KS_p_value`,
@@ -118,9 +136,52 @@ result = test_standardization(
 > are anti-conservative (Lilliefors 1967). The KS statistic *D* itself remains a valid
 > distance metric. For formal inference, use `n_bootstrap ≥ 999`.
 
+> **Why the recommendation is not the KS winner (changed in 4.0.0).**
+> The KS statistic *D* is the single **worst** point of disagreement. A
+> zero-inflated fit (gamma/kde on a month with exact zeros) has a genuine vertical
+> jump of height `qq` at *x* = 0, and *D* latches onto that jump: it returns ≈ `qq`
+> however well the curve tracks the data everywhere else. It is therefore not just
+> "less discriminating" on such samples — it stops ranking the families at all, and
+> hands the win to whichever family has no jump to be penalised for. Measured on a
+> synthetic gamma sample:
+>
+> | zero fraction | gaussian | gamma | pearson3 | kde | winner by *D* |
+> |---|---|---|---|---|---|
+> | 0.00 | 0.165 | 0.047 | 0.043 | **0.029** | kde ✓ |
+> | 0.12 | 0.170 | 0.123 | 0.123 | 0.123 | pearson3 (tie) |
+> | 0.31 | **0.221** | 0.315 | 0.315 | 0.315 | gaussian ✗ |
+>
+> `"recommendation"` is therefore `error_percent`, the **mean** deviation over all
+> observations, where the tie at zero counts in proportion instead of dominating.
+> *D* is still reported alongside; on samples with no exact zeros the two criteria
+> agree.
+
 ---
 
-### 1.3 Example usage
+### 1.3 Handling exact zeros (zero-inflation)
+
+Real precipitation series routinely have exact zeros (dry months/days). Gaussian
+and Pearson III have no special handling for them (matching `f_zscore`/`f_spei`,
+which don't either — real-valued data isn't naturally zero-inflated). **Gamma**
+and **KDE** use the same zero-inflation mixture as `f_spi`/`f_kde`
+(`drought_indices.py`), so a `test_standardization`/`fit_distribution_stats` call
+is always directly comparable to what those two functions would actually do:
+
+- `qq = P(X = 0)`, the empirical fraction of exact zeros in the sample.
+- The continuous family (Gamma or KDE) is fitted on the **strictly-positive
+  subset only** — zeros are masked out, never shifted into the fit or left in.
+- `H(x) = qq` for `x <= 0`, `H(x) = qq + (1 - qq) * G(x)` for `x > 0`, where
+  `G` is the continuous family's CDF.
+
+`params["qq"]` is present for `"gamma"` and `"kde"` fits (`0.0` — i.e. absent
+in practice — for `"gaussian"`/`"pearson3"`). If you build a `params` dict by
+hand (rather than from `_fit_single_dist`/`fit_distribution_stats`) and pass it
+to `plot_cdf_comparison`, a missing `"qq"` key is treated as `0.0` — no
+zero-inflation — so include it explicitly if the data has exact zeros.
+
+---
+
+### 1.4 Example usage
 
 ```python
 import numpy as np
@@ -163,9 +224,10 @@ print("January:", results_by_month[1]["recommendation"])
 print("July:",    results_by_month[7]["recommendation"])
 ```
 
-### 1.4 Interpreting the results: KS vs AIC
+### 1.5 Interpreting the results: KS vs AIC
 
-It is normal for `best_by_KS` and `best_by_AIC` to disagree. They measure
+It is normal for `best_by_mean_error`, `best_by_KS` and `best_by_AIC` to
+disagree. They measure
 different things:
 
 - **KS statistic *D*** measures the maximum pointwise distance between the
@@ -179,14 +241,20 @@ A practical example: if Gamma has D = 0.08 and Pearson III has D = 0.21 but
 lower AIC, it means Pearson III explains the bulk of the data marginally better
 in a likelihood sense, but has a much worse worst-case mismatch in the tails.
 
-**Rule of thumb for drought indices**: prefer the KS-based recommendation
-(`best_by_KS`). SPI/SPEI are built on the CDF transform, so the CDF shape
+**Rule of thumb for drought indices**: prefer `"recommendation"`
+(`best_by_mean_error`). SPI/SPEI are built on the CDF transform, so the CDF shape
 matters more than overall likelihood. A distribution that deviates in the
 tails will distort exactly the extreme events you are trying to detect.
 
-The `goodness_percent` field (= 100 × (1 − D)) is a quick readable metric:
-values above 90% indicate a strong fit; below 80% suggest that the family
-may not be appropriate for that dataset or month.
+`error_percent`/`goodness_percent` are a **different, milder** summary than
+`KS_statistic`: instead of the worst-case/max deviation (a single point),
+they average the absolute deviation between the fitted and empirical CDF
+**point by point**, over every observed value (`error_percent` = 100 x mean
+deviation, `goodness_percent` = 100 - `error_percent`). A family can have a
+high `goodness_percent` (good on average) yet a mediocre `KS_statistic` (one
+bad tail point) — the two intentionally answer different questions ("how
+good on average" vs "how bad in the worst case"), so treat `goodness_percent`
+as a quick readability aid, not a substitute for the KS-based recommendation.
 
 ---
 
@@ -209,7 +277,7 @@ stats = fit_distribution_stats(
     data,
     dist="gamma",
     groups=None,
-    shift_for_gamma=True,
+    shift_for_gamma=False,
     plot=True,
     n_bootstrap=0,
     seed=None
@@ -221,7 +289,8 @@ stats = fit_distribution_stats(
 - `data` : array-like — input dataset.
 - `dist` : `{"gaussian", "gamma", "pearson3", "kde"}`, default `"gamma"` — target distribution.
 - `groups` : array-like or `None` — grouping labels.
-- `shift_for_gamma` : bool, default `True` — add +1 before Gamma fitting.
+- `shift_for_gamma` : bool, default `False` — add +1 to the strictly-positive
+  part before Gamma fitting (zeros are handled separately, see §1.3).
 - `plot` : bool, default `True` — show empirical vs theoretical CDF/PDF for the chosen distribution.
 - `n_bootstrap` : int, default `0` — Lilliefors-corrected p-value (≥ 999 recommended).
 - `seed` : int or `None` — random seed.
@@ -242,14 +311,17 @@ stats = fit_distribution_stats(
   | `"log_likelihood"`       | float  | Sum of log-PDF values                           |
   | `"AIC"`                  | float  | Akaike Information Criterion (`NaN` for KDE)    |
   | `"k_params"`             | int    | Number of estimated parameters (`None` for KDE) |
-  | `"error_percent"`        | float  | `100 × D`                                       |
-  | `"goodness_percent"`     | float  | `100 × (1 − D)`                                |
+  | `"error_percent"`        | float  | Point-by-point mean `\|fitted CDF − empirical CDF\|`, x100 — NOT derived from `KS_statistic` (see §1.5) |
+  | `"goodness_percent"`     | float  | `100 − error_percent`                           |
 
   **`params` structure by distribution:**
-  - Gamma: `{"shape", "loc", "scale", "shift_applied"}`
+  - Gamma: `{"shape", "loc", "scale", "shift_applied", "qq"}`
   - Pearson III: `{"shape", "loc", "scale"}`
   - Gaussian: `{"mu", "sigma"}`
-  - KDE: `{"bw_method", "bw_factor", "n_fit", "_kde_cdf"}`
+  - KDE: `{"bw_method", "h", "xb", "qq", "log_transform", "n_fit"}` — `xb`/`h`
+    are the exact fit ingredients (baseline sample and bandwidth), the same
+    ones `f_kde` stores in its own `out_params`; `qq`/`log_transform` are
+    needed to reproduce the CDF exactly (see §1.3).
 
 - If `groups` is provided — `{group_label: <same dict>}`.
 
@@ -303,10 +375,10 @@ The distribution used for SPI/SPEI/SQI is controlled by the `calculation_method`
 parameter at initialization. The diagnostic pipeline is:
 
 ```python
-# 1. Initialize with default method (f_spi → Gamma)
+# 1. Initialize with the default method (f_kde → non-parametric KDE)
 ds = DS.Precipitation(prec_path=..., shape_path=..., ...)
 
-# 2. Check if Gamma is appropriate
+# 2. Check which family fits the data
 from drought_scan.utils.statistics import test_standardization
 analysis = test_standardization(ds.ts, groups=ds.m_cal[:, 0])
 
@@ -315,8 +387,10 @@ from drought_scan.utils import f_spei   # Pearson III
 ds = DS.Precipitation(prec_path=..., shape_path=..., calculation_method=f_spei, ...)
 ```
 
-Available calculation methods: `f_spi` (Gamma), `f_spei` (Pearson III),
-`f_zscore` (Gaussian), `f_kde` (KDE).
+Available calculation methods: `f_kde` (KDE, the default), `f_spi` (zero-inflated
+Gamma), `f_spei` (Pearson III), `f_zscore` (Gaussian). A method of your own can be
+added with `drought_scan.utils.drought_indices.register_standardization` (see the
+[User Guide](user_guide.md) §3): it then works everywhere a built-in one does.
 
 **Workflow B — Standalone (for arbitrary data).**
 Use `standardize_data` when you need to standardize a time series that is
@@ -378,7 +452,7 @@ import drought_scan as DS
 from drought_scan.utils.statistics import test_standardization, fit_distribution_stats
 from drought_scan.utils import f_spi, f_spei, f_zscore, f_kde
 
-# 1. Initialize with default (Gamma)
+# 1. Initialize with the default method (f_kde)
 ds = DS.Precipitation(
     prec_path='tests/data/LAPrec1871.v1.1.nc',
     shape_path='tests/data/bacino_pontelagoscuro.shp',
@@ -453,7 +527,7 @@ plot_cdf_comparison(
     data,
     dist="gamma",
     params=None,
-    shift_for_gamma=True,
+    shift_for_gamma=False,
     unit=None
 )
 ```
@@ -461,10 +535,14 @@ plot_cdf_comparison(
 #### Parameters
 
 - `data` : array-like — input dataset.
-- `dist` : `{"gamma", "pearson3", "gaussian"}` — distribution family.
+- `dist` : `{"gamma", "pearson3", "gaussian"}` — distribution family (KDE is
+  not supported by this standalone plot; use `fit_distribution_stats(..., dist="kde", plot=True)` instead).
 - `params` : dict or `None` — pre-computed parameters from `fit_distribution_stats()`.
-  If `None`, parameters are fitted internally.
-- `shift_for_gamma` : bool, default `True` — consistent with `fit_distribution_stats`.
+  If `None`, parameters are fitted internally (zero-inflation-aware for
+  `"gamma"`, see §1.3). If you pass `params` in yourself for `dist="gamma"`,
+  include `"qq"` — a missing key defaults to `0.0` (no zero-inflation).
+- `shift_for_gamma` : bool, default `False` — consistent with `fit_distribution_stats`;
+  only used when `params=None` (internal fitting).
 - `unit` : str or `None` — label for the x-axis (e.g., `"mm"`, `"m³/s"`).
   Defaults to `"value"`.
 
@@ -503,7 +581,8 @@ A typical diagnostic workflow:
 
 5. **Act**:
    - *Within DroughtScan* → re-initialize the object with the appropriate
-     `calculation_method` (`f_spi`, `f_spei`, `f_zscore`, `f_kde`).
+     `calculation_method` (`f_kde`, `f_spi`, `f_spei`, `f_zscore`, or a registered
+     custom method).
    - *Standalone data* → use `standardize_data()` to apply the PIT transform.
 
 These tools do not enforce any specific decision, but provide a **transparent,
@@ -511,10 +590,12 @@ reproducible, and quantitative basis** for choosing how to standardize your
 hydroclimatic time series.
 
 > **Note on trend analysis.**
-> Trend detection on the CDN or on any other time series is available through
-> the DroughtScan methods `find_trends()` and `plot_trends()` (see the
+> `find_trends()` and `plot_trends()` report the accumulated water deficit/surplus
+> over a moving window, from the reverse SPI — not a trend test (see the
 > [Visualization Guide](visualization_guide.md) and the
-> [User Guide](user_guide.md) for details and examples).
+> [User Guide](user_guide.md)). For a significance test of a sustained wet/dry
+> phase, `_rolling_phase_test` tests the mean of SPI-1 over a window against zero;
+> do not run a regression on the CDN, which is cumulative.
 
 ---
 

@@ -1,102 +1,111 @@
 # Spatial Extension
 
-This section documents the **spatial analysis tools** available in Drought-Scan.  
-While the standard workflow aggregates gridded precipitation to a single basin-average time series,
-the spatial extension allows computing **SPI and SIDI at every grid point** within the basin,
-producing spatially distributed maps of drought conditions at a target date.
+This section documents the **spatial analysis tools** available in Drought-Scan.
+While the standard workflow aggregates gridded data to a single basin-average time series,
+the spatial extension computes the **SPI-like index and the SIDI at every grid point**
+within the basin, producing spatially distributed maps at a target date.
 
 ---
 
 ## 1. Overview
 
-When a `Precipitation` object is initialized from a NetCDF file, the library internally retains
-the full 3D precipitation grid (`ds.Pgrid`, shape: `n_months × n_rows × n_cols`) before spatial
-aggregation. The spatial methods leverage this grid to replicate the same SPI/SIDI pipeline
-independently at each valid grid point.
+When an object is initialized from a gridded NetCDF file (with a shapefile), the library
+retains the full 3D grid (`n_months × n_rows × n_cols`) before spatial aggregation. The
+spatial methods replicate the same pipeline as the basin-level index — standardization,
+weighted ensemble mean, standardization on the baseline — independently at each valid
+grid point, so a pixel's SIDI is exactly what `ds.SIDI` would be for a basin made of that
+pixel alone.
 
-Output maps are stored in the DSO and can be visualized with `plot_spatial()`.
+| Class | Grid used | Maps of |
+|---|---|---|
+| `Precipitation` | `ds.Pgrid` | SPI, SIDI |
+| `Pet` | `ds.PETgrid` | SPETI, SIDI |
+| `Balance` | `ds.prec_grid − ds.pet_grid` (pixel-wise P − PET) | SPEI, SIDI |
+| `Temperature` | `ds.Tgrid` | STI, SIDI |
 
-> **Note on performance**  
-> Computing SPI at K temporal scales for every grid point is computationally intensive.
-> The library automatically parallelizes the computation across all available CPU cores
-> using `joblib`, and skips masked or degenerate grid points (e.g., outside the shapefile,
-> constant series) before starting. An estimated completion time is printed at the beginning
-> of the run.
+Objects built from `ts`/`m_cal` (no grid), `Streamflow` and `Teleindex` have no spatial
+maps and raise a clear error. A `Balance` whose P and PET grids have different spatial
+resolutions cannot be mapped pixel by pixel (a warning is issued at import).
+
+The maps are stored in the object and drawn with `plot_spatial()`.
+
+> **Note on performance**
+> Computing the index at many scales for every grid point is computationally intensive.
+> The library parallelizes the computation across all available CPU cores with `joblib`,
+> and skips degenerate grid points (all-NaN, e.g. outside the shapefile, or constant
+> series) before starting. An estimated completion time is printed at the beginning of
+> the run.
+
+**Two methods, two products, one date.**
+
+- `spatial_sidi()` → `ds.SIDI_grid` (the SIDI, all weighting schemes) and `ds.spatial_K`;
+- `spatial_spi()` → `ds.SPI_grid` (the SPI-like index at the requested windows) and
+  `ds.reverse_SPI_grid` (its native-unit deficit/surplus).
+
+All the maps stored on the object refer to **one** date, `ds.spatial_timestamp` (§4).
 
 ---
 
-## 2. `spatial_maps`
+## 2. `spatial_sidi`
 
-### 2.1 Purpose
-
-Computes, for each valid grid point within `ds.Pgrid`:
-
-- **SPI** at selected temporal scales (`month_scales`)
-- **SIDI** across all implemented weighting schemes
-
-All results are stored as spatial arrays in the DSO at a target timestamp.
-
----
-
-### 2.2 Method signature
+### 2.1 Signature
 
 ```python
-ds.spatial_maps(
-    month_scales=None,
+ds.spatial_sidi(
     timestamp=None,
     K=None,
-    seasonal_params=None
+    seasonal_params=None,
+    agg=None,
+    seasons=None
 )
 ```
 
 #### Parameters
 
-- `month_scales` : list of int, optional  
-  Temporal scales for which SPI maps are stored.  
-  Default: `[1, 3, 6, 12, 18, 24]`.  
-  All values must be ≤ `K`; scales exceeding `K` are silently ignored with a warning.
+- `timestamp` : tuple `(month, year)`, optional
+  Target date. Default: the stored `ds.spatial_timestamp` if a previous spatial call set
+  one, else the last month of `ds.m_cal` (§4).
 
-- `timestamp` : tuple `(month, year)`, optional  
-  Target date for the output maps.  
-  Default: last available timestamp in `ds.m_cal`.  
-  Example: `timestamp=(9, 2022)` for September 2022.
+- `K` : int or sequence of 5 int, optional
+  Month-scale(s) of the SIDI ensemble: one value for all five weighting schemes, or one
+  per scheme (as `analyze_correlation`'s `best_k_per_weight`). `ds.K` is never modified.
+  Default: **whatever calibration the object carries** — `ds.seasonal_params` if a
+  seasonal SIDI was committed, else `ds.optimal_k` if a global one was, else `ds.K` — so
+  the grid matches `ds.SIDI`. A printed note says which calibration is followed.
 
-- `K` : int, optional  
-  Maximum temporal scale. Overrides `ds.K` for this computation only.  
-  After the method completes, `ds.K` is restored to its original value.
+- `seasonal_params` : dict, optional
+  A seasonal calibration to map **without committing it**. Two shapes are accepted:
+  - the `set_optimal_SIDI_seasonal` wrapper (i.e. `ds.seasonal_params`), which carries
+    `'seasons'` and `'config'`;
+  - the raw output of `analyze_correlation_seasonal()`. Then also pass `agg=` (or
+    `seasons=`) so months can be mapped to seasons; it falls back to a committed
+    `ds.seasonal_params['agg']` if present.
 
-- `seasonal_params` : dict, optional  
-  Output of `set_optimal_SIDI_seasonal`'s `ds.seasonal_params`. If provided, `K`
-  is automatically resolved to the `best_k` of the season containing `timestamp`
-  (or the last available timestamp), overriding any `K` passed explicitly.
-  A warning reports the suggested `weight_index` to use in `plot_spatial` for
-  consistency with the season-specific optimization.
-  See [§2.6 Using an optimized SIDI](#26-using-an-optimized-sidi) below.
+  `K` is resolved to the per-scheme optima (`best_k_per_weight`) of the season
+  containing `timestamp`, overriding any `K` passed, and each pixel is standardized on
+  that season's baseline months only — the same per-season reference as the seasonal
+  SIDI.
 
----
+- `agg` : str, optional
+  `'quarter'`, `'semiannual'`, `'four-monthly'`, `'monthly'` or `'custom'`. Only used with
+  the raw `analyze_correlation_seasonal` output; must match the `agg` it was computed with.
 
-### 2.3 Stored attributes
+- `seasons` : dict, optional
+  `{season_name: [month_ints]}` for `agg='custom'` — same role as `agg`.
 
-After running `spatial_maps`, the following attributes are added to the DSO:
+### 2.2 Stored attributes
 
-- **`ds.SIDI_grid`** : ndarray, shape `(n_rows, n_cols, n_weights)`  
-  SIDI at the target timestamp for all weighting schemes.  
-  Access a specific weight with: `ds.SIDI_grid[:, :, weight_index]`  
-  Default display weight: `weight_index=2` (logarithmically decreasing).
+- **`ds.SIDI_grid`** : ndarray `(n_rows, n_cols, 5)` — the SIDI at the target date, one
+  layer per weighting scheme (`ds.SIDI_grid[:, :, weight_index]`).
+- **`ds.spatial_K`** : the K used (scalar or one per scheme).
+- **`ds.spatial_timestamp`** : ndarray `(2,)`, `[month, year]`.
 
-- **`ds.SPI_grid`** : dict `{scale: ndarray (n_rows, n_cols)}`  
-  SPI maps at the target timestamp for each scale in `month_scales`.  
-  Example: `ds.SPI_grid[12]` is the SPI-12 map.
+Grid points with degenerate series remain `np.nan`.
 
-- **`ds.spatial_timestamp`** : ndarray `(2,)`, i.e. `[month, year]`  
-  The timestamp corresponding to the stored maps.
+> **Gotcha**: `spatial_sidi` stores into `ds` and returns `None`. Do not write
+> `A = ds.spatial_sidi(...)`.
 
-Grid points outside the shapefile or with degenerate series (all-NaN, zero variance)
-remain `np.nan` in all output arrays.
-
----
-
-### 2.4 Example usage
+### 2.3 Example
 
 ```python
 import drought_scan as DS
@@ -112,278 +121,170 @@ ds = DS.Precipitation(
     basin_name='Po'
 )
 
-# Compute spatial SIDI and SPI maps at the last available timestamp
-ds.spatial_maps()
-
-# Compute at a specific date, with custom scales and K
-ds.spatial_maps(
-    month_scales=[1, 3, 6, 12, 18, 24],
-    timestamp=(8, 2003),   # August 2003
-    K=36
-)
-
-# Inspect outputs
-print("SIDI grid shape:", ds.SIDI_grid.shape)      # (n_rows, n_cols, n_weights)
-print("SPI-12 map shape:", ds.SPI_grid[12].shape)  # (n_rows, n_cols)
-print("Timestamp:", ds.spatial_timestamp)           # [8, 2003]
+ds.spatial_sidi()                                 # last month of the record
+ds.spatial_sidi(timestamp=(8, 2003), K=36)        # August 2003, explicit K
+print(ds.SIDI_grid.shape)                         # (n_rows, n_cols, 5)
+print(ds.spatial_timestamp)                       # [8, 2003]
 ```
 
----
+### 2.4 Mapping a calibrated SIDI
 
-### 2.5 Accessing specific weighting schemes
-
-SIDI is computed for all five weighting schemes (see [User Guide](user_guide.md), Section 3, `weight_index`).
-You can extract any of them:
+**A. Known K, nothing committed.** Pass `K` directly:
 
 ```python
-import matplotlib.pyplot as plt
-
-# Default: logarithmically decreasing weights (weight_index=2)
-sidi_map = ds.SIDI_grid[:, :, 2]
-
-# Equal weights
-sidi_equal = ds.SIDI_grid[:, :, 0]
-```
-
----
-
-### 2.6 Using an optimized SIDI
-
-`spatial_maps` always computes SIDI for **all** weighting schemes at a given `K`.
-It has no automatic awareness of an optimization performed beforehand at the
-point-scale level (`set_optimal_SIDI` / `set_optimal_SIDI_seasonal`). There are
-three ways to align the spatial output with a known-optimal configuration,
-depending on your workflow.
-
-**A. You already know the optimal `K` and `weight_index`.**  
-No need to call any `set_optimal_*` method — just pass them directly:
-
-```python
-# Suppose a previous analyze_correlation() found K=8, weight_index=0 as optimal
-ds.spatial_maps(K=8)
+ds.spatial_sidi(K=8)
 ds.plot_spatial(var='SIDI', weight_index=0)
 ```
 
-**B. You called `set_optimal_SIDI(overwrite=True)` on the point-scale object.**  
-`self.SIDI` is now the optimized series, and `self.optimal_k` /
-`self.optimal_weight_index` are stored on the instance — but `spatial_maps`
-does **not** read them automatically (it still defaults to `ds.K`). If you call
-`spatial_maps()` without passing `K` explicitly, a warning reminds you of the
-mismatch:
+**B. Global calibration committed** (`set_optimal_SIDI(..., overwrite=True)`).
+`spatial_sidi()` with no `K` uses `ds.optimal_k`, and `plot_spatial` defaults to
+`ds.optimal_weight_index`:
 
 ```python
-ds.set_optimal_SIDI(optimal_k=8, optimal_weight_index=0, overwrite=True)
-
-ds.spatial_maps()
-# UserWarning: self.optimal_k=8 is set (from set_optimal_SIDI) but spatial_maps
-# is using self.K=24. Pass K=self.optimal_k explicitly if you want spatial
-# consistency.
-
-# To make the spatial grid consistent with the optimized point-scale SIDI:
-ds.spatial_maps(K=ds.optimal_k)
-ds.plot_spatial(var='SIDI', weight_index=ds.optimal_weight_index)
+ds.set_optimal_SIDI(optimal_k=A['best_k_per_weight'], optimal_weight_index=0, overwrite=True)
+ds.spatial_sidi()
+ds.plot_spatial(var='SIDI')
 ```
 
-**C. You called `set_optimal_SIDI_seasonal(overwrite=True)`.**  
-A single global `K` cannot replicate a seasonal mosaic, since each month may use
-a different optimal `K` and weighting scheme. Pass `ds.seasonal_params` instead
-of `K`: the method resolves the correct season-specific `K` from the `timestamp`
-you request.
+**C. Seasonal calibration.** A single global `K` cannot replicate the seasonal SIDI: each
+season has its own K per scheme and its own baseline months. Both routes resolve the
+season from `timestamp`.
+
+*Way 1 — without committing.* Pass the raw `analyze_correlation_seasonal()` output and its
+`agg`; `ds.SIDI` and `ds.seasonal_params` are left untouched:
 
 ```python
-ds.set_optimal_SIDI_seasonal(seasonal_corr, agg='quarter', overwrite=True)
-
-ds.spatial_maps(timestamp=(1, 2022), seasonal_params=ds.seasonal_params)
-# UserWarning: Using seasonal K=10 for season 'winter' (month 1).
-# Plot with weight_index=1 for consistency.
-
-ds.plot_spatial(var='SIDI', weight_index=1)
+S = ds.analyze_correlation_seasonal(streamflow, agg='semiannual')
+ds.spatial_sidi(seasonal_params=S, agg='semiannual', timestamp=(1, 2022))
+ds.plot_spatial(var='SIDI', weight_index=0)
 ```
 
-> **Note**  
-> If both `K` and `seasonal_params` are passed together, `seasonal_params` wins
-> silently — the season-resolved `K` overrides the explicit `K`.
+*Way 2 — commit first.* After `set_optimal_SIDI_seasonal(overwrite=True)`,
+`spatial_sidi()` with no argument detects it and reuses `ds.seasonal_params`; after a
+seasonal calibration `plot_spatial` defaults to `weight_index=0` (equal weights):
+
+```python
+ds.set_optimal_SIDI_seasonal(S, agg='semiannual', overwrite=True)
+ds.spatial_sidi(timestamp=(1, 2022))
+ds.plot_spatial(var='SIDI')
+```
+
+> If both `K` and `seasonal_params` are passed, `seasonal_params` wins.
 
 ---
 
-## 3. `spatial_trends`
+## 3. `spatial_spi`
 
 ### 3.1 Purpose
 
-Computes pixel-wise **deficit/surplus maps** at a target timestamp. For each valid
-grid point, the method computes the SPI-like index at each requested window scale
-and converts it to native units (mm) via the pixel-level reverse-gamma calibration
-(`c2r`), consistent with `deficit_from_spi`. This replaces an earlier linear
-approximation (`std_to_mm`) with the same non-linear, month-specific transform used
-elsewhere in the framework — see the [Changelog](../CHANGELOG.md), v3.6.1.
+For each valid grid point and each requested window W (accumulation scale), computes the
+SPI-like index at the target date and its **native-unit reverse**: the deficit/surplus
+over the last W months, relative to the index = 0 reference, obtained with the exact
+inverse of the pixel's fitted distribution (the same `spi_to_native` used at basin level,
+whatever the `calculation_method`: zero-inflated Gamma, Pearson III, KDE, z-score, or a
+registered custom method). Units are millimetres for the cumulative variables. The windows
+are **not** capped by `K`.
 
-Anomalies with `|SPI| < 0.5` at the target timestamp are set to `0.0`, filtering out
-meteorologically negligible deficits/surpluses, consistent with `plot_cdn_trends`.
-The CDN itself (cumulative sum of SPI-1) is still computed per pixel and stored
-internally, but rolling trend significance is no longer used to gate the output —
-the physical magnitude of the SPI-based anomaly is the sole criterion.
-
----
-
-### 3.2 Method signature
+### 3.2 Signature
 
 ```python
-ds.spatial_trends(
-    windows=None,
-    timestamp=None
+ds.spatial_spi(
+    windows=None,      # list of int (months); default [24, 36, 60, 120]
+    timestamp=None     # default: stored spatial_timestamp, else last month (§4)
 )
 ```
-
-#### Parameters
-
-- `windows` : list of int, optional  
-  Moving window sizes in months.  
-  Default: `[24, 36, 60, 120]`.
-
-- `timestamp` : tuple `(month, year)`, optional  
-  Target date for the output maps.  
-  Default: last available timestamp in `ds.m_cal`.
-
----
 
 ### 3.3 Stored attributes
 
-After running `spatial_trends`, the following attribute is added:
+- **`ds.SPI_grid`** : dict `{window: ndarray (n_rows, n_cols)}` — the SPI-like index.
+- **`ds.reverse_SPI_grid`** : dict `{window: ndarray (n_rows, n_cols)}` — the native-unit
+  deficit/surplus. Real values everywhere the index is defined, **including** inside the
+  near-neutral band: `plot_spatial` greys that band out at draw time, the data are not
+  zeroed. `NaN` only where the index is undefined (record shorter than the window, gaps).
+- **`ds.spatial_timestamp`** : ndarray `(2,)`.
 
-- **`ds.trend_grid`** : dict `{window: ndarray (n_rows, n_cols)}`  
-  mm-equivalent deficit/surplus over each window at the target timestamp, derived
-  from the reverse-gamma transform of the SPI-like index (see §3.1).  
-  Pixels with `|SPI| < 0.5` at the target timestamp are set to `0.0`.
-
-The `spatial_timestamp` attribute is also updated. If it differs from a previously
-stored timestamp, `SIDI_grid` and `SPI_grid` are invalidated — rerun `spatial_maps`
-for consistency.
-
-> **Note**  
-> Every call to `spatial_trends` explicitly discards any previously stored
-> `trend_grid` before recomputing, so rerunning with different `windows` always
-> reflects a clean recalculation rather than a partial update.
-
----
-
-### 3.4 Example usage
+### 3.4 Example
 
 ```python
-# Compute CDN trend maps at the last available timestamp
-ds.spatial_trends(windows=[36, 60, 120])
-
-# Inspect
-print("Available windows:", list(ds.trend_grid.keys()))
-print("Trend 60-month shape:", ds.trend_grid[60].shape)
+ds.spatial_spi(windows=[12, 36, 60, 120])
+print(list(ds.SPI_grid))                 # [12, 36, 60, 120]
+print(ds.reverse_SPI_grid[60].shape)     # (n_rows, n_cols)
 ```
 
 ---
 
-## 4. `plot_spatial`
+## 4. The spatial timestamp
 
-### 4.1 Purpose
+The two methods share one rule, so all the maps on the object always refer to the same
+date:
 
-Visualizes a spatial map of SIDI, SPI, or CDN trends overlaid on the basin shapefile boundary.
-The colormap is automatically centered on zero and uses a discrete drought/surplus scale.
+1. **Which date.** `timestamp=(month, year)` if given; otherwise the stored
+   `ds.spatial_timestamp` (set by any previous `spatial_sidi` / `spatial_spi` call);
+   otherwise the last month of `ds.m_cal`.
+2. **When the date changes**, every product of the *other* method is removed, with a
+   warning: `spatial_sidi` at a new date removes `SPI_grid` and `reverse_SPI_grid`;
+   `spatial_spi` at a new date removes `SIDI_grid` and `spatial_K`. Rerun that method
+   for the new date.
 
-> **Note**  
-> This method requires that `spatial_maps` (for SIDI/SPI) or `spatial_trends` (for CDN)
-> has been run before.
+```python
+ds.spatial_sidi(timestamp=(8, 2003))   # SIDI_grid at Aug 2003
+ds.spatial_spi(windows=[12])           # inherits Aug 2003 — SIDI_grid kept
+ds.spatial_spi(windows=[12], timestamp=(9, 2003))
+# UserWarning: spatial timestamp changed from [8 2003] to [9 2003]: the spatial_sidi()
+# products (SIDI_grid, spatial_K) referred to the old date and have been removed ...
+```
 
 ---
 
-### 4.2 Method signature
+## 5. `plot_spatial`
+
+### 5.1 Signature
 
 ```python
 ds.plot_spatial(
-    var='SIDI',
-    weight_index=2,
-    month_scale=None,
-    ax=None,
-    title=None
+    var='SIDI',          # 'SIDI', 'SPI' or 'reverse_spi'
+    weight_index=None,   # SIDI layer; default as every other SIDI consumer (below)
+    month_scale=None,    # required for 'SPI' / 'reverse_spi': a key of SPI_grid
+    ax=None,             # external axes for multi-panel figures
+    title=None,          # default: index name and date
+    cmap=None,           # default: the library's drought palette (reversed if threshold > 0)
+    neutral_band=0.5     # 'reverse_spi' only: grey out |index| < neutral_band (0/None: off)
 )
 ```
 
-#### Parameters
+- `weight_index` default: the committed `optimal_weight_index` after a global
+  calibration, `0` after a seasonal one, else the construction `weight_index` (2 unless
+  set) — see the [User Guide](user_guide.md) §9.1.3.
+- Labels use the object's index name (SPI, SPETI, SPEI, STI, ...).
+- `var='CDN'` is not accepted: the library does not map the CDN.
 
-- `var` : `'SIDI'`, `'SPI'`, or `'CDN'`, default `'SIDI'`  
-  Which index to display.
+Returns the `matplotlib.axes.Axes`.
 
-- `weight_index` : int, default `2`  
-  Weighting scheme to display when `var='SIDI'`.  
-  Ignored when `var='SPI'` or `var='CDN'`.
-
-- `month_scale` : int, optional  
-  Required when `var='SPI'`: must be one of the keys in `ds.SPI_grid`.  
-  Required when `var='CDN'`: must be one of the keys in `ds.trend_grid`.
-
-- `ax` : `matplotlib.axes.Axes`, optional  
-  External axes for integration in multi-panel figures.  
-  If `None`, a new figure is created.
-
-- `title` : str, optional  
-  Custom title. If `None`, the method auto-generates a title with the index name and timestamp.
-
-#### Returns
-`matplotlib.axes.Axes`
-
----
-
-### 4.3 Example usage
+### 5.2 Examples
 
 ```python
-# Default: SIDI map with weight_index=2
-ds.plot_spatial()
-
-# SPI-12 map
-ds.plot_spatial(var='SPI', month_scale=12)
-
-# CDN trend map (60-month window, in mm)
-ds.plot_spatial(var='CDN', month_scale=60)
-
-# Custom title
+ds.plot_spatial()                                  # SIDI, default layer
+ds.plot_spatial(var='SPI', month_scale=12)         # SPI-12
+ds.plot_spatial(var='reverse_spi', month_scale=60) # deficit/surplus over 60 months
 ds.plot_spatial(var='SIDI', weight_index=0, title='SIDI (equal weights) — August 2003')
 
-# Integration in a multi-panel figure
 import matplotlib.pyplot as plt
-
 fig, axs = plt.subplots(1, 3, figsize=(18, 5))
 ds.plot_spatial(var='SIDI', ax=axs[0])
-ds.plot_spatial(var='SPI', month_scale=3,  ax=axs[1])
+ds.plot_spatial(var='SPI', month_scale=36, ax=axs[1])
 ds.plot_spatial(var='SPI', month_scale=12, ax=axs[2])
 plt.tight_layout()
 ```
 
 ---
 
-## 5. Practical notes
+## 6. Practical notes
 
-- **Compute once per timestamp, visualize many times.**  
-  `spatial_maps` stores results for a single target timestamp. Once computed,
-  you can call `plot_spatial` as many times as you want on different variables, scales
-  or weight schemes without recomputing — as long as you are exploring the same timestamp.
-  To change the target date, run `spatial_maps` again with a new `timestamp`.
-
-- **Baseline consistency.**  
-  The spatial computation uses the same `start_baseline_year` and `end_baseline_year` defined
-  at initialization. For spatial maps to be comparable with the basin-average SIDI,
-  keep the baseline consistent.
-
-- **Computation time.**  
-  The method prints an estimated completion time before starting, based on the number of valid
-  grid points and available CPU cores. On a standard laptop (8 cores), a basin of ~2500 valid
-  grid points at K=36 takes approximately 5–10 minutes.
-
-- **`K` override.**  
-  Passing `K` to `spatial_maps` does not permanently change `ds.K`.
-  The original value is restored after the method completes, leaving the DSO in its original state.
-
-- **Grid points outside the basin.**  
-  All grid points that fall outside the shapefile or contain degenerate series (e.g., constant
-  precipitation, all-NaN) are automatically excluded from computation and set to `np.nan`
-  in the output maps. The number of valid points processed is printed at runtime.
-
-- **Timestamp consistency between `spatial_maps` and `spatial_trends`.**  
-  If you change the timestamp between calls, the library warns you and invalidates the
-  previously stored grids. Always rerun both methods if you need maps and trends at the
-  same timestamp.
+- **Compute once per date, plot many times.** `plot_spatial` reads the stored maps; to
+  change date, rerun the spatial methods (§4).
+- **Baseline consistency.** The pixels use the object's `start_baseline_year` /
+  `end_baseline_year`; keep it consistent with the basin-level analysis.
+- **Computation time.** On a standard laptop (8 cores), ~2500 valid grid points at K=36
+  take approximately 5–10 minutes for `spatial_sidi`.
+- **Degenerate points.** Points with all-NaN or constant series are excluded and stay
+  `np.nan`; the number of valid points and any per-point failure are printed at runtime.

@@ -9,10 +9,11 @@ This file defines the **main base classes** for drought analysis:
 - `BaseDroughtAnalysis`: Parent class with core drought analysis functions.
 - `Precipitation`: Handles precipitation-related calculations.
 - `Streamflow`: Manages streamflow data.
-- `PET`: Computes potential evapotranspiration (PET).
-- `Balance`: Integrates water balance computations.
-- 'Teleindex': a general purpose class base on BaseDroughtAnalysis to handles timeseries of Teleconnections (i.e. timeseries
-not linked to any hydrografic basin (no shapefile required)
+- `Pet`: Handles potential evapotranspiration (PET).
+- `Balance`: Handles the climatic water balance (P - PET).
+- `Temperature`: Handles temperature.
+- `Teleindex`: General-purpose class for time series not linked to any
+  hydrographic basin, e.g. teleconnection indices (no shapefile required).
 
 These classes serve as the **foundation** for the entire library.
 
@@ -32,19 +33,19 @@ import pandas as pd
 from functools import partial
 from scipy import stats
 
-
-
-
-
-
 # --- drought_indices --------------------------------------------------------
 from drought_scan.utils.drought_indices import (
     baseline_indices,
+    effective_weights_at_optimum,
     f_kde,
     f_spei,
     f_spi,
     f_zscore,
+    gamma_cdf_zi,
+    gamma_ppf_zi,
     generate_weights,
+    get_standardization,
+    seasons_from_r2,
     weighted_metrics,
 )
 
@@ -58,7 +59,7 @@ from drought_scan.utils.data_io import (
 
 # --- hydrology --------------------------------------------------------------
 from drought_scan.utils.hydrology import (
-    severe_events_deficits_computation,
+    severe_events_deficits_computation_old,
 )
 
 # --- visualization ----------------------------------------------------------
@@ -69,12 +70,20 @@ from drought_scan.utils.visualization import (
     plot_overview,
     plot_severe_events,
     spi_cmap,
+    _plot3_peak_clusters,
+    _plot_benchmark_ci_box,
 )
 
 # --- statistics -------------------------------------------------------------
 from drought_scan.utils.statistics import (
     find_overlap,
-    # _rolling_trend_analysis,
+    bootstrap_summary_table,
+    _peak_summary,
+    _bootstrap_r2,
+    _print_contamination_table,
+    _print_peak_summary,
+    WEIGHT_LABELS,
+    WEIGHT_COLORS,
 )
 
 
@@ -90,12 +99,15 @@ class BaseDroughtAnalysis:
             K (int): Maximum temporal scale for SPI calculations.
             start_baseline_year (int): Starting year for baseline period.
             end_baseline_year (int): Ending year for baseline period.
-            calculation_method (callable, optional): Function for index calculation. Defaults to f_kde.
+            basin_name (str): Name of the basin/site.
+            calculation_method (callable): Function for index calculation.
             Available methods (in utils.py) are:
                 f_spi:   FOR  POSITIVE & RIGHT-SKEWED DATA (uses a Gamma Function) but works fine also for positive normal distribuited sample
                 f_spei:  FOR REAL VALUES & RIGHT-SKEWED (uses a Pearson III function)
                 f_zscore FOR REAL VALUES NORMAL DISTRIBUTED
-            threshold (float, optional): Threshold for severe events. Defaults to -1.
+            threshold (float): Threshold for severe events.
+            index_name (str, optional): Name of the drought index. Defaults to 'SPI'.
+            day (ndarray, optional): Daily calendar/series, if available. Defaults to None.
         """
         if len(ts) != len(m_cal):
             raise ValueError("The time series `ts` and calendar `m_cal` must have the same length.")
@@ -104,13 +116,15 @@ class BaseDroughtAnalysis:
         if K <= 0:
             raise ValueError("`K` must be a positive integer.")
 
-        if getattr(calculation_method, "requires_positive", False):
+        # Unknown methods fail here, with the list of registered ones.
+        spec = get_standardization(calculation_method)
+        if spec.requires_positive:
             finite = ts[np.isfinite(ts)]
             if finite.size and np.any(finite < 0):
                 frac_neg = np.mean(finite < 0)
                 raise ValueError(
                     f"Negative distribution detected ({frac_neg:.0%} of values < 0). "
-                    f"{calculation_method.__name__} (Gamma) is defined only on positive, "
+                    f"{spec.name} is defined only on positive, "
                     f"right-skewed data. Re-run with calculation_method=f_spei "
                     f"(Pearson III) or calculation_method=f_kde for real-valued "
                     f"variables such as the P-PET balance."
@@ -126,6 +140,10 @@ class BaseDroughtAnalysis:
         self.calculation_method = calculation_method
         self.index_name = index_name
         self.basin_name = basin_name
+        # Every class carries a display default for the weighting scheme, so
+        # _resolve_weight_index never has to cope with the attribute being absent.
+        if getattr(self, 'weight_index', None) is None:
+            self.weight_index = 2
         self.SIDI_name = rf"$\mathrm{{D}}_{{\mathrm{{({self.index_name})}}}}$"
 
         # SPI-related attributes
@@ -137,6 +155,20 @@ class BaseDroughtAnalysis:
     def _area(self):
         if isinstance(self, Teleindex):
             return -1
+        # Every constructor documents `shape=None` as valid (a gauge series needs no
+        # geometry to be standardized), so an absent boundary is a missing value, not
+        # an error: NaN propagates through the area-dependent products - Qcs2Qmm,
+        # _mm_to_cumecs, volume_anomaly_rolling - instead of taking construction down
+        # with an AttributeError on `self.shape.crs`.
+        if getattr(self, 'shape', None) is None:
+            import warnings
+            warnings.warn(
+                f"{type(self).__name__}('{self.basin_name}') was built without a "
+                f"shapefile: area_kmq is NaN, and anything derived from it "
+                f"(mm <-> m3/s conversions, volume anomalies) will be NaN too.",
+                RuntimeWarning, stacklevel=2
+            )
+            return np.nan
         if self.shape.crs is None:
             self.shape = self.shape.set_crs('epsg:4326')
         elif self.shape.crs.to_string() != 'EPSG:4326':
@@ -166,6 +198,7 @@ class BaseDroughtAnalysis:
             matplotlib.axes.Axes (GeoAxes)
         """
         import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
         from cartopy.mpl.gridliner import LONGITUDE_FORMATTER, LATITUDE_FORMATTER
         import matplotlib.pyplot as plt
 
@@ -228,81 +261,6 @@ class BaseDroughtAnalysis:
     # =====================================================================
     # ▸ STANDARD Methods
     # =====================================================================
-    def _compute_spi_old(self, month_scale,fit_params=None):
-        """
-        Calculate SPI for a specific temporal scale, optionally using precomputed gamma parameters.
-
-        Args:
-            month_scale (int): Temporal scale for SPI (e.g., SPI-3, SPI-6).
-            fit_params (dict, optional): Precomputed parameters for the reference month,
-                keyed by month (1-12). Each value is a dict with keys:
-                - 'kde': fitted scipy gaussian_kde object
-                - 'bw_factor': bandwidth factor used in the KDE fit
-                - 'n_fit': number of samples used for fitting
-                - 'fit_domain': string describing the domain of the fit
-                If None, parameters are estimated from scratch.
-
-        Returns:
-            tuple:
-                - ndarray: SPI time series for the given scale, with NaN for undefined values.
-                - ndarray: Coefficients for SPI calculation (12 months x 6 columns).
-        """
-        Spi_ts = np.full_like(self.ts, np.nan, dtype=float)
-
-        method = self.calculation_method
-        base_func = method.func if isinstance(method, partial) else method
-
-        if  base_func in [f_spi, f_spei,f_kde]:
-            c2rspi = np.zeros((12, 4), dtype=float)
-            way = 1
-        elif  base_func == f_zscore:
-            c2rspi = np.zeros((12, 2), dtype=float)
-            way = 2
-
-        for ref_month in range(1, 13):
-            if fit_params is None:
-                indices, spi_values, coeff, params = self.calculation_method(
-                    self.ts, month_scale, ref_month, self.m_cal,
-                    self.start_baseline_year, self.end_baseline_year
-                )
-                # self.fit_params[month_scale - 1, ref_month - 1, :] = params  # (a, loc, scale)
-
-                # Auto-expand fit_params if the requested scale exceeds the original
-                # allocation (K). This happens when _compute_spi is called on-the-fly
-                # for windows > K (e.g. from deficit_from_spi or plot_trends).
-                if month_scale > self.fit_params.shape[0]:
-                    n_extra = month_scale - self.fit_params.shape[0]
-                    n_params = self.fit_params.shape[2]
-                    extra = np.full((n_extra, 12, n_params), np.nan)
-                    self.fit_params = np.concatenate([self.fit_params, extra], axis=0)
-                self.fit_params[month_scale - 1, ref_month - 1, :] = params
-
-
-            else:
-                # USE SAVED PARAMS
-                # _compute_spi acts as a transparent dispatcher: it extracts the
-                # pre-fitted parameters for the current reference month and forwards
-                # them to the calculation_method without inspecting their internal
-                # structure. Type interpretation is fully delegated to each method:
-                #   - f_spi / f_spei : expects a tuple (param1, loc, param2)
-                #   - f_kde          : expects a dict  {'kde': ..., 'bw_factor': ..., ...}
-                #   - f_zscore       : expects a list  [baseline_mean, baseline_std]
-                # This keeps routing logic separate from statistical logic.
-                params = fit_params[ref_month]
-                indices, spi_values, coeff, _ = self.calculation_method(
-                    self.ts, month_scale, ref_month, self.m_cal,
-                    self.start_baseline_year, self.end_baseline_year,
-                    fit_params=params
-                )
-
-
-            if indices is None or spi_values is None or coeff is None:
-                raise ValueError(f"`f_spi` returned invalid results for ref_month={ref_month}.")
-
-            Spi_ts[indices] = spi_values.copy()
-            c2rspi[ref_month - 1, :] = coeff.copy()
-        return Spi_ts,c2rspi
-
     def _compute_spi(self, month_scale, fit_params=None):
         """
         Calculate SPI for a specific temporal scale, optionally using precomputed parameters.
@@ -327,15 +285,8 @@ class BaseDroughtAnalysis:
         """
         Spi_ts = np.full_like(self.ts, np.nan, dtype=float)
 
-        method = self.calculation_method
-        base_func = method.func if isinstance(method, partial) else method
-
-        if base_func in [f_spi, f_spei, f_kde]:
-            c2rspi = np.zeros((12, 4), dtype=float)
-            way = 1
-        elif base_func == f_zscore:
-            c2rspi = np.zeros((12, 2), dtype=float)
-            way = 2
+        spec = get_standardization(self.calculation_method)
+        c2rspi = np.zeros((12, spec.n_c2r), dtype=float)
 
         for ref_month in range(1, 13):
             if fit_params is None:
@@ -345,12 +296,12 @@ class BaseDroughtAnalysis:
                 )
 
                 # --- Store fitted parameters ---
-                if base_func == f_kde:
-                    # KDE returns a dict with a live gaussian_kde object: keep it OUT
-                    # of the numeric fit_params array (np.isnan/float dtype would break).
+                if not spec.numeric_params:
+                    # Opaque params (f_kde's dict): keep them OUT of the numeric
+                    # fit_params array (np.isnan/float dtype would break).
                     self.fit_params_kde[(month_scale, ref_month)] = params
                 else:
-                    # Numeric params (f_spi/f_spei: 3 floats; f_zscore: 2 floats).
+                    # Numeric params, n_fit_params floats per (scale, month).
                     # Auto-expand if the requested scale exceeds the original K
                     # allocation (e.g. from deficit_from_spi or plot_trends).
                     if month_scale > self.fit_params.shape[0]:
@@ -379,48 +330,6 @@ class BaseDroughtAnalysis:
             c2rspi[ref_month - 1, :] = coeff.copy()
         return Spi_ts, c2rspi
 
-    def _calculate_spi_like_set_old(self,fit_params=None):
-        """
-       Compute SPI values for all temporal scales up to K, optionally using precomputed gamma parameters.
-
-       Args:
-        fit_params (dict, optional): Nested dictionary of precomputed fit parameters,
-        structured as {k: {m: params_dict}} where k is the temporal scale (1..K),
-        m is the reference month (1-12), and params_dict contains the KDE fit
-        (see _compute_spi for the expected structure of params_dict).
-        If None, parameters are estimated from scratch at each scale.
-
-       Returns:
-           tuple:
-               - ndarray: SPI values arranged in a 2D array (scale, time).
-               - ndarray: 6 coefficients for each scale and month (K, 12, 6).
-        """
-        # Initialize SPI set and coefficients
-        spiset = np.full((self.K, len(self.ts)), np.nan, dtype=float)
-        method = self.calculation_method
-        base_func = method.func if isinstance(method, partial) else method
-
-        if  base_func in [f_spi, f_spei,f_kde]:
-            c2rspi = np.zeros((self.K, 12, 4), dtype=float)
-            self.fit_params = np.full((self.K, 12, 3), np.nan)  # (shape, loc, scale)
-
-        elif  base_func == f_zscore:
-            c2rspi = np.zeros((self.K, 12, 2), dtype=float)
-            self.fit_params = np.full((self.K, 12, 2), np.nan)  # (shape, loc, scale)
-
-        self.fit_params_kde = {}  #specific store for f_kde: {(scale, month): params_dict}
-
-        # Calculate SPI for each temporal scale
-        for k in range(1, self.K + 1):
-            if fit_params is None:
-                Spi_ts, coeff = self._compute_spi(k)
-            else:
-                params = fit_params[k]
-                Spi_ts, coeff = self._compute_spi(k,fit_params=params)
-            spiset[k - 1, :] = Spi_ts.copy()
-            c2rspi[k - 1, :, :] = coeff.copy()
-        return spiset, c2rspi
-
     def _calculate_spi_like_set(self, fit_params=None):
         """
        Compute SPI values for all temporal scales up to K, optionally using precomputed parameters.
@@ -437,15 +346,11 @@ class BaseDroughtAnalysis:
         """
         # Initialize SPI set and coefficients
         spiset = np.full((self.K, len(self.ts)), np.nan, dtype=float)
-        method = self.calculation_method
-        base_func = method.func if isinstance(method, partial) else method
 
-        if base_func in [f_spi, f_spei, f_kde]:
-            c2rspi = np.zeros((self.K, 12, 4), dtype=float)
-            self.fit_params = np.full((self.K, 12, 3), np.nan)  # (shape, loc, scale)
-        elif base_func == f_zscore:
-            c2rspi = np.zeros((self.K, 12, 2), dtype=float)
-            self.fit_params = np.full((self.K, 12, 2), np.nan)  # (mean, std)
+        # Widths come from the method's registry entry (see get_standardization).
+        spec = get_standardization(self.calculation_method)
+        c2rspi = np.zeros((self.K, 12, spec.n_c2r), dtype=float)
+        self.fit_params = np.full((self.K, 12, spec.n_fit_params), np.nan)
 
         # Opaque store for non-numeric fit params (currently f_kde only).
         # Always allocated → exists for every method (empty when unused), so no
@@ -463,6 +368,46 @@ class BaseDroughtAnalysis:
             c2rspi[k - 1, :, :] = coeff.copy()
         return spiset, c2rspi
 
+    def _get_kde_fit(self, month_scale, ref_month):
+        """
+        Look up the fitted KDE ingredients (xb, h, qq, log_transform) for
+        (month_scale, ref_month), stored by `_compute_spi` in
+        `self.fit_params_kde`. Shared guard for native_to_spi/spi_to_native.
+        """
+        key = (month_scale, ref_month)
+        if key in self.fit_params_kde and self.fit_params_kde[key] is None:
+            raise ValueError(
+                f"No KDE fit exists for scale={month_scale}, month={ref_month}: it was "
+                f"computed, but the baseline held no usable value at that accumulation "
+                f"scale (all NaN, or the record is shorter than the scale)."
+            )
+        fit = self.fit_params_kde.get(key)
+        if fit is None:
+            raise ValueError(
+                f"fit_params_kde not available for scale={month_scale}, "
+                f"month={ref_month}. The SPI-like set for this scale must be "
+                f"computed first (e.g. via _compute_spi or by initializing "
+                f"with a K that covers this scale)."
+            )
+        return fit
+
+    def _fit_for(self, month_scale, ref_month):
+        """
+        The fitted params of (month_scale, ref_month), wherever the method keeps
+        them: the numeric ``fit_params`` array, or the opaque ``fit_params_kde``
+        store for methods whose params are not numeric (f_kde). Shared guard of
+        ``native_to_spi`` / ``spi_to_native``.
+        """
+        if not get_standardization(self.calculation_method).numeric_params:
+            return self._get_kde_fit(month_scale, ref_month)
+        if month_scale > self.fit_params.shape[0] or \
+                np.any(np.isnan(self.fit_params[month_scale - 1, ref_month - 1, :])):
+            raise ValueError(
+                f"fit_params not available for scale={month_scale}, month={ref_month}. "
+                f"Initialize the Drought Scan object with a K that covers this scale."
+            )
+        return self.fit_params[month_scale - 1, ref_month - 1, :]
+
     def native_to_spi(self, value, month_scale, ref_month):
         """
         Convert native-unit value(s) to SPI/SQI/SPEI etc via the fitted distribution stored
@@ -471,8 +416,9 @@ class BaseDroughtAnalysis:
         Analytical counterpart to numerically inverting
         `np.polyval(c2r_index[scale-1, month-1, :], ...)`: uses the exact parameters
         of the fitted distribution (gamma for f_spi, Pearson III for f_spei,
-        mean+std for f_zscore), avoiding the polynomial approximation error of
-        `c2r_index`, which is non-trivial in the distribution tails.
+        mean+std for f_zscore, KDE cumulative for f_kde — see kde_cdf), avoiding
+        the polynomial approximation error of `c2r_index`, which is non-trivial
+        in the distribution tails.
 
         Parameters
         ----------
@@ -492,11 +438,10 @@ class BaseDroughtAnalysis:
 
         Raises
         ------
-        NotImplementedError
-            If the active `calculation_method` is `f_kde`, whose fitted KDE object
-            is not currently stored as numerical parameters in `fit_params`.
         ValueError
-            If `calculation_method` is unrecognised.
+            If the requested (month_scale, ref_month) has not been fitted yet
+            (numerically, for f_spi/f_spei/f_zscore; or in fit_params_kde, for
+            f_kde), or if `calculation_method` is unrecognised.
 
         See Also
         --------
@@ -504,47 +449,8 @@ class BaseDroughtAnalysis:
         c2r_index : Polynomial approximation, retained for backward compatibility
             (deprecated).
         """
-        from functools import partial
-        from scipy.stats import norm, gamma, pearson3
-        from drought_scan.utils.drought_indices import f_spi, f_spei, f_zscore, f_kde
-
-        method = self.calculation_method
-        base_func = method.func if isinstance(method, partial) else method
-
-        # Guard: ensure fit_params has been computed for the requested scale
-        if month_scale > self.fit_params.shape[0] or \
-                np.any(np.isnan(self.fit_params[month_scale - 1, ref_month - 1, :])):
-            raise ValueError(
-                f"fit_params not available for scale={month_scale}, month={ref_month}. "
-                f"Note: this method is not supported with f_kde. "
-                f"Initialize the Drought Scan object with calculation_method=f_spi (or f_spei)."
-            )
-
-        params = self.fit_params[month_scale - 1, ref_month - 1, :]
-
-        if base_func == f_spi:
-            a, loc, scale_param = params
-            p = gamma.cdf(value, a, loc=loc, scale=scale_param)
-            return norm.ppf(p)
-
-        elif base_func == f_spei:
-            c, loc, scale_param = params
-            p = pearson3.cdf(value, c, loc=loc, scale=scale_param)
-            return norm.ppf(p)
-
-        elif base_func == f_zscore:
-            mean, std = params
-            return (value - mean) / std
-
-        elif base_func == f_kde:
-            raise NotImplementedError(
-                "native_to_spi is not yet implemented for f_kde. "
-                "KDE requires storing the fitted gaussian_kde object, "
-                "which is not currently saved as numerical parameters in fit_params."
-            )
-
-        else:
-            raise ValueError(f"Unknown calculation_method: {base_func}")
+        return get_standardization(self.calculation_method).to_index(
+            value, self._fit_for(month_scale, ref_month))
 
     def spi_to_native(self, spi_value, month_scale, ref_month):
         """
@@ -552,8 +458,9 @@ class BaseDroughtAnalysis:
 
         Analytical counterpart to np.polyval(c2r_index[scale-1, month-1, :], spi_value):
         uses the exact parameters of the fitted distribution (gamma for f_spi,
-        Pearson III for f_spei, mean+std for f_zscore), avoiding the polynomial
-        approximation error of c2r_index in the distribution tails.
+        Pearson III for f_spei, mean+std for f_zscore, KDE cumulative for
+        f_kde — see kde_ppf), avoiding the polynomial approximation error of
+        c2r_index in the distribution tails.
 
         Parameters
         ----------
@@ -575,66 +482,37 @@ class BaseDroughtAnalysis:
         native_to_spi : Inverse transform (native → SPI).
         c2r_index : Polynomial approximation, retained for backward compatibility.
         """
-        from functools import partial
-        from scipy.stats import norm, gamma, pearson3
-        from drought_scan.utils.drought_indices import f_spi, f_spei, f_zscore, f_kde
+        return get_standardization(self.calculation_method).to_native(
+            spi_value, self._fit_for(month_scale, ref_month))
 
-        method = self.calculation_method
-        base_func = method.func if isinstance(method, partial) else method
-
-        # Guard: ensure fit_params has been computed for the requested scale
-        if month_scale > self.fit_params.shape[0] or \
-                np.any(np.isnan(self.fit_params[month_scale - 1, ref_month - 1, :])):
-            raise ValueError(
-                f"fit_params not available for scale={month_scale}, month={ref_month}. "
-                f"Note: this method is not supported with f_kde. "
-                f"Initialize the Drought Scan object with calculation_method=f_spi (or f_spei)."
-            )
-        params = self.fit_params[month_scale - 1, ref_month - 1, :]
-
-        if base_func == f_spi:
-            a, loc, scale_param = params
-            p = norm.cdf(spi_value)
-            return gamma.ppf(p, a, loc=loc, scale=scale_param)
-
-        elif base_func == f_spei:
-            c, loc, scale_param = params
-            p = norm.cdf(spi_value)
-            return pearson3.ppf(p, c, loc=loc, scale=scale_param)
-
-        elif base_func == f_zscore:
-            mean, std = params
-            return spi_value * std + mean
-
-        elif base_func == f_kde:
-            raise NotImplementedError(
-                "spi_to_native not yet implemented for f_kde. "
-                "KDE requires storing the fitted gaussian_kde object, "
-                "which is not currently saved as numerical parameters."
-            )
-
-        else:
-            raise ValueError(f"Unknown calculation_method: {base_func}")
-
-    def _spi_like_set_ensemble_mean(self):
+    def _spi_like_set_ensemble_mean(self, K=None):
         """
     Compute the weighted SIDI values using predefined weighting functions.
 
+    Args:
+        K (int or sequence of int, optional): month-scale(s) to aggregate over —
+            a single value for all weighting schemes, or one per scheme. Defaults
+            to self.optimal_k when set (i.e. after set_optimal_SIDI), else self.K.
+
     Returns:
-        ndarray: Weighted SIDI values (time steps x number of implemented weighting function).
+        ndarray: Weighted SIDI values (time steps x number of implemented weighting function),
+        not yet standardized.
 
     """
-        K = self.K if not hasattr(self, 'optimal_k') or self.optimal_k is None else self.optimal_k
-        # print(f'************************************')
-        # print(f'spiset ensamble mean up to SPI-{K}')
-        weights = generate_weights(K)
-        # weights = generate_weights(self.K)
-        sidi = []
-        for j in range(len(self.m_cal)):
-            vec = self.spi_like_set[:K, j]
-            sidi_w = [weighted_metrics(vec, w)[0] for w in weights.T]
-            sidi.append(sidi_w)
-        return np.array(sidi, dtype=float)
+        if K is None:
+            K = getattr(self, 'optimal_k', None)
+            if K is None:
+                K = self.K
+
+        n_scales, T = self.spi_like_set.shape
+        Ks = self._resolve_per_weight_K(K, n_scales)
+
+        sidi = np.empty((T, len(Ks)), dtype=float)
+        for wi, k in enumerate(Ks):
+            w = generate_weights(int(k))[:, wi]
+            for j in range(T):
+                sidi[j, wi] = weighted_metrics(self.spi_like_set[:k, j], w)[0]
+        return sidi
 
     def _calculate_SIDI(self):
         """
@@ -644,29 +522,126 @@ class BaseDroughtAnalysis:
             ndarray: SIDI values (time steps x number of implemented weighting function) standardized to zero mean and unit variance.
 
         """
-        # Get baseline indices and ensemble mean
-        tb1_id, tb2_id = baseline_indices(self.m_cal,self.start_baseline_year,self.end_baseline_year)
-        sidi = self._spi_like_set_ensemble_mean()
-
         # Validate baseline indices
+        tb1_id, tb2_id = baseline_indices(self.m_cal,self.start_baseline_year,self.end_baseline_year)
         if tb1_id >= tb2_id:
             raise ValueError("Invalid baseline indices: start index must be less than or equal to end index.")
 
-        # Standardize the SIDI values
-        baseline_values = sidi[tb1_id:tb2_id + 1, :]
-        baseline_mean = np.nanmean(baseline_values, axis=0)
-        baseline_std = np.nanstd(baseline_values, axis=0)
+        # Uses self.optimal_k when set (after set_optimal_SIDI), else self.K —
+        # resolved inside _spi_like_set_ensemble_mean, which recalculate_SIDI shares.
+        K = getattr(self, 'optimal_k', None)
+        if K is None:
+            K = self.K
+        return self.recalculate_SIDI(K)
 
-        if np.any(baseline_std == 0):
-            raise ValueError("Baseline standard deviation contains zero values, cannot standardize.")
+    def _resolve_weight_index(self, weight_index=None):
+        """
+        Which column of ``self.SIDI`` to read.
 
-        SIDI = (sidi - baseline_mean) / baseline_std
-        return SIDI
+        ``self.SIDI`` is always ``(time, 5)`` with the column being the weighting
+        scheme, so this question has one answer for every consumer (plot_scan,
+        plot_covariates, gap_filling, export_scan_plot_csv, plot_spatial).
+        ``ds_balance`` is the one deliberate exception: it defaults to 0.
+
+        Precedence, most specific first:
+
+        1. ``weight_index`` passed explicitly by the caller;
+        2. seasonal calibration committed (``set_optimal_SIDI_seasonal``): ``0``
+           (equal weights). No scheme is optimal in every season and the
+           per-season ``col_best_weight`` is an argmax (winner's curse), so the
+           default is the simplest scheme, the same as ``ds_balance``'s — it
+           overrides the construction-time preference;
+        3. ``self.optimal_weight_index`` — the scheme a global calibration
+           (``set_optimal_SIDI``) chose and committed, so evidence beats the
+           construction-time preference;
+        4. ``self.weight_index`` — the preference given at construction;
+        5. ``2`` (geometrically decreasing weights).
+
+        Only ``Precipitation``, ``Pet`` and ``Balance`` can ever reach steps 2-3:
+        calibrating a SIDI against a river requires a river, and the other classes
+        are barred by ``_EXCLUDED_FROM_SIDI_OPTIMIZATION``. For ``Temperature`` and
+        ``Teleindex`` this therefore always resolves to their construction default —
+        2 unless set otherwise — i.e. an index describing a lag distributed over the
+        preceding months and decaying fastest towards the present.
+
+        Args:
+            weight_index (int, optional): explicit choice; wins outright.
+
+        Returns:
+            int: a valid column index in 0..4.
+        """
+        n_weights = generate_weights(1).shape[1]
+
+        if weight_index is None and self.calibration_mode == 'seasonal':
+            weight_index = 0
+        if weight_index is None:
+            for attr in ('optimal_weight_index', 'weight_index'):
+                candidate = getattr(self, attr, None)
+                if candidate is not None:
+                    weight_index = candidate
+                    break
+            else:
+                weight_index = 2
+
+        weight_index = int(weight_index)
+        if not 0 <= weight_index < n_weights:
+            raise ValueError(
+                f"weight_index must be in 0..{n_weights - 1}; got {weight_index}."
+            )
+        return weight_index
 
     @property
     def is_seasonal_sidi(self):
         """True if SIDI was overwritten by seasonal optimization."""
-        return hasattr(self, 'seasonal_params')
+        return self.calibration_mode == 'seasonal'
+
+    @property
+    def calibration_mode(self):
+        """
+        Which calibration ``self.SIDI`` currently carries: ``'seasonal'``
+        (``set_optimal_SIDI_seasonal``), ``'global'`` (``set_optimal_SIDI``) or
+        None (the default, un-calibrated SIDI). The two committed states are
+        mutually exclusive: every ``set_*(overwrite=True)`` discards the other
+        one (see ``_clear_calibration``).
+        """
+        if getattr(self, 'seasonal_params', None) is not None:
+            return 'seasonal'
+        if getattr(self, 'optimal_k', None) is not None:
+            return 'global'
+        return None
+
+    def _clear_calibration(self, incoming):
+        """Discard any committed calibration before committing a new one
+        (``incoming``: 'global' or 'seasonal'), so the object never carries the
+        state of two calibrations at once."""
+        previous = self.calibration_mode
+        if previous is not None and previous != incoming:
+            print(f"Note: the previous {previous} SIDI calibration is discarded and "
+                  f"replaced by a {incoming} one.")
+        for attr in ('optimal_k', 'optimal_weight_index', 'seasonal_params'):
+            if attr in self.__dict__:
+                delattr(self, attr)
+
+    def _calibration_note(self):
+        """
+        Print which calibration the SIDI read by the calling method carries —
+        global or seasonal — so that plots, exports and tables are never read
+        without knowing it. Silent when the SIDI is not calibrated.
+        """
+        mode = self.calibration_mode
+        if mode == 'global':
+            w = self._resolve_weight_index()
+            k = self.optimal_k
+            k_txt = (f"K={int(k)}" if np.ndim(k) == 0
+                     else "K per scheme=" + str([int(v) for v in np.ravel(k)]))
+            print(f"Note: SIDI calibrated GLOBALLY (set_optimal_SIDI): {k_txt}; "
+                  f"default column weight_index={w} ({WEIGHT_LABELS[w]}).")
+        elif mode == 'seasonal':
+            sp = self.seasonal_params
+            print(f"Note: SIDI calibrated SEASONALLY (set_optimal_SIDI_seasonal, "
+                  f"agg='{sp.get('agg')}', seasons={list(sp.get('seasons', {}))}): one "
+                  f"column per weighting scheme, each at its own per-season K; default "
+                  f"column weight_index={self._resolve_weight_index()}.")
 
     def recalculate_SIDI(self, K):
         """
@@ -675,45 +650,26 @@ class BaseDroughtAnalysis:
 
         Parameters
         ----------
-        K : int
-          Number of SPI-like scales to use for SIDI recalculation (top-K).
+        K : int or sequence of int
+          Number of SPI-like scales to use for SIDI recalculation (top-K). A single
+          value applies the same scale to every weighting scheme; a sequence assigns
+          one scale per scheme, in the column order of ``generate_weights`` — which is
+          what ``analyze_correlation`` reports as ``best_k_per_weight``, since each
+          scheme peaks at a different K.
 
         Returns
         -------
         np.ndarray
           SIDI array with shape (time, n_weightings).
         """
+        if K is None:
+            raise ValueError("K must be a positive integer, or one per weighting scheme.")
 
-        if K is None or K <= 0:
-            raise ValueError("K must be a positive integer.")
-
-        n_scales, T = self.spi_like_set.shape
-        if K > n_scales:
-            raise ValueError(f"K={K} exceeds available scales ({n_scales}).")
-
-        # weights: shape (K, n_weightings)
-        weights = generate_weights(K)
-        if weights.shape[0] != K:
-            raise RuntimeError("generate_weights(K) returned unexpected shape.")
-
-        # Build SIDI (time x n_weightings)
-        # self.spi_like_set has shape (scales, time). We use the first K rows.
-        sidi_matrix = []
-        for j in range(T):
-            vec = self.spi_like_set[:K, j]
-            sidi_w = [weighted_metrics(vec, w)[0] for w in weights.T]  # one value per weight_index
-            sidi_matrix.append(sidi_w)
-
-        sidi_matrix = np.array(sidi_matrix)  # (time, n_weightings)
+        sidi_matrix = self._spi_like_set_ensemble_mean(K)
 
         # Standardize on the original baseline
         tb1_id, tb2_id = baseline_indices(self.m_cal, self.start_baseline_year, self.end_baseline_year)
-        baseline = sidi_matrix[tb1_id:tb2_id + 1, :]
-        mean = np.nanmean(baseline, axis=0)
-        std = np.nanstd(baseline, axis=0)
-        if np.any(~np.isfinite(std)) or np.any(std == 0):
-            raise ValueError("Zero or non-finite std in baseline; cannot standardize SIDI.")
-        SIDI_new = (sidi_matrix - mean) / std
+        SIDI_new = self._zscore_baseline(sidi_matrix, sidi_matrix[tb1_id:tb2_id + 1, :])
 
         return SIDI_new
 
@@ -763,7 +719,12 @@ class BaseDroughtAnalysis:
 
     def recalculate_SIDI_seasonal(self, seasonal_params, seasons):
         """
-        Recalculate SIDI using season-specific K and weight_index.
+        One 1-D seasonal SIDI series from an explicit (best_k, col_best_weight)
+        per season. Mostly an internal primitive now:
+        ``recalculate_SIDI_seasonal_all_schemes`` calls it once per weighting
+        scheme to build ``self.SIDI`` (time, 5). It no longer feeds a
+        ``SIDI_seasonal_best`` attribute — that concept was removed (see
+        ``recalculate_SIDI_seasonal_all_schemes``).
 
         For each timestep the method identifies the corresponding season and
         applies the season-specific K and weighting function.
@@ -826,43 +787,373 @@ class BaseDroughtAnalysis:
                       f"valid baseline points; skipping standardisation.")
                 continue
 
-            mean = np.nanmean(SIDI_raw[bl])
-            std = np.nanstd(SIDI_raw[bl])
-            if std == 0 or not np.isfinite(std):
-                raise ValueError(
-                    f"Zero or non-finite std in baseline for season "
-                    f"'{season_name}'; cannot standardize SIDI.")
-
-            SIDI[season_mask] = (SIDI_raw[season_mask] - mean) / std
+            SIDI[season_mask] = self._zscore_baseline(
+                SIDI_raw[season_mask], SIDI_raw[bl], context=f" for season '{season_name}'")
 
         return SIDI
-
-    def _reapply_optimization(self):
-        """Re-apply SIDI optimization after spi_like_set recalculation."""
-        if self.is_seasonal_sidi:
-            SIDI_1d = self.recalculate_SIDI_seasonal(
-                self.seasonal_params['config'],
-                self.seasonal_params['seasons']
-            )
-            self.SIDI = np.tile(SIDI_1d[:, np.newaxis], (1, 5))
-        elif hasattr(self, 'optimal_k'):
-            self.set_optimal_SIDI(
-                self.optimal_k, self.optimal_weight_index, overwrite=True
-            )
-
-    # --- Classes that should NOT call analyze_correlation -----------------
-    _EXCLUDED_FROM_CORRELATION = ()  # populated after Streamflow/Temperature/Teleindex are defined
 
     def _check_correlation_eligible(self):
         """Guard: prevent calling correlation methods on response variables."""
         if isinstance(self, self._EXCLUDED_FROM_CORRELATION):
             raise TypeError(
                 f"{type(self).__name__} cannot call analyze_correlation(). "
-                f"This method is for meteorological drivers (Precipitation, Pet, Balance) "
+                f"This method is for the drivers (Precipitation, Pet, Balance) "
                 f"to be correlated against a Streamflow target."
             )
 
-    def analyze_correlation(self, streamflow, plot=True, plot_mode="all"):
+    # --- Classes that should NOT optimise a SIDI against a streamflow -----
+    # Same idiom as _EXCLUDED_FROM_CORRELATION above: a blacklist populated
+    # after the subclasses exist. These three methods used to be duplicated
+    # verbatim in Precipitation AND Balance (39, 66 and 37 identical lines);
+    # they live here once so a fix cannot land in one copy and miss the other.
+    _EXCLUDED_FROM_SIDI_OPTIMIZATION = ()  # populated at the end of the module
+
+    def _check_sidi_optimization_eligible(self):
+        """Guard: only meteorological drivers can calibrate a SIDI on streamflow."""
+        if isinstance(self, self._EXCLUDED_FROM_SIDI_OPTIMIZATION):
+            raise TypeError(
+                f"{type(self).__name__} cannot optimise a SIDI against a streamflow. "
+                f"These methods are for the drivers whose SIDI is calibrated on a "
+                f"Streamflow target (Precipitation, Pet, Balance)."
+            )
+
+    def set_optimal_SIDI(self, optimal_k, optimal_weight_index, overwrite=False):
+        """
+        Recalculate SIDI using the optimal K (obtained via analyze_correlation with Streamflow).
+        Optionally store optimal_k (and optimal_weight_index) on this instance.
+
+        Args:
+            optimal_k (int or sequence of int): optimal K determined by
+                analyze_correlation(streamflow). Pass its ``best_k`` to apply a single
+                scale to every weighting scheme, or its ``best_k_per_weight`` to give
+                each column of SIDI its own optimal scale — each scheme peaks at a
+                different K, so with a single scale only the `optimal_weight_index`
+                column is calibrated at its own optimum.
+            optimal_weight_index (int): specific weight index to track/store (0-based).
+                It marks which column downstream consumers should read; the other
+                columns remain valid in their own right when a per-scheme K is used.
+            overwrite (bool): if True, updates self.SIDI and stores self.optimal_k
+                              and self.optimal_weight_index on the instance.
+
+        Returns:
+            np.ndarray or None: the SIDI array (time x n_weightings) computed with
+            optimal_k if ``overwrite=False``; None if ``overwrite=True`` (the
+            result is committed to ``self.SIDI`` instead) — the same contract as
+            ``set_optimal_SIDI_seasonal``.
+        """
+        self._check_sidi_optimization_eligible()
+        if optimal_k is None:
+            raise ValueError("optimal_k must be a positive integer (or one per weighting scheme) obtained by the SIDI vs SQI1 optimization (use 'analyze_correlation' to estimate it).")
+        # validated here so a bad K fails before any state is touched
+        self._resolve_per_weight_K(optimal_k, self.spi_like_set.shape[0])
+
+        if optimal_weight_index is None or optimal_weight_index < 0 or  optimal_weight_index >= 5:
+            raise ValueError(
+                "optimal_weight_index must be an integer in 0..4 obtained via the SIDI vs SQI1 optimization.")
+        # ---- compute SIDI with the requested K (no side effects yet)
+        SIDI_new = self.recalculate_SIDI(K=optimal_k)
+
+        if overwrite:
+            self._clear_calibration('global')
+            self.SIDI = SIDI_new
+            self.optimal_k = optimal_k
+            self.optimal_weight_index = int(optimal_weight_index)
+            return None
+
+        return SIDI_new
+
+    def recalculate_SIDI_seasonal_all_schemes(self, seasonal_corr, seasons):
+        """
+        Seasonal SIDI for EVERY weighting scheme: one column per scheme, each built
+        with that scheme's own per-season optimal K.
+
+        This is the seasonal SIDI: ``self.SIDI`` after
+        ``set_optimal_SIDI_seasonal``, and what the water-balance tables are
+        built from. It calls ``recalculate_SIDI_seasonal`` once per column, each
+        time forcing that column's scheme with its own per-season K.
+
+        There is no longer a companion "single absolute best (K, weight) per
+        season" series: the scale-cluster analysis shows several schemes are
+        usually statistically indistinguishable, so an argmax-per-season pick is
+        a winner's-curse artefact. Consumers choose a column explicitly
+        (``_resolve_weight_index``: default 0, equal weights).
+
+        This loop used to live outside the class, written twice — in
+        ``ds_balance_all_schemes`` and in ``diagnostics.basin_response`` — because
+        ``set_optimal_SIDI_seasonal`` tiled the 1-D mosaic across all five columns of
+        ``self.SIDI``, leaving the other four schemes' calibration recoverable only
+        from the raw R² surface. It no longer does, so this belongs here.
+
+        Parameters
+        ----------
+        seasonal_corr : dict
+            ``analyze_correlation_seasonal``'s return value. Each season's entry must
+            carry ``R2_matrix`` (K x 5) or ``best_k_per_weight`` (5,) — the per-scheme
+            optima. An entry carrying only the collapsed ``best_k`` falls back to that
+            single K for all five schemes, with a warning.
+        seasons : dict
+            ``{season_label: [month_ints]}``, the mapping used for the correlation.
+
+        Returns
+        -------
+        np.ndarray
+            Shape ``(time, 5)``, column order as in ``generate_weights``. Months whose
+            season is absent from ``seasonal_corr`` are NaN, as in the 1-D variant.
+        """
+        import warnings
+
+        n_weights = generate_weights(1).shape[1]
+        K_range = np.arange(1, self.spi_like_set.shape[0] + 1)
+        _warned_collapsed = False
+
+        out = np.full((len(self.m_cal), n_weights), np.nan, dtype=float)
+        for w in range(n_weights):
+            params_w = {}
+            for name, info in seasonal_corr.items():
+                # analyze_correlation_seasonal(n_boot>0) adds a top-level
+                # "summary" DataFrame alongside the season dicts; skip any
+                # entry that is not a season's own dict.
+                if not isinstance(info, dict):
+                    continue
+                if "best_k_per_weight" in info:
+                    k = int(np.ravel(info["best_k_per_weight"])[w])
+                elif "R2_matrix" in info:
+                    col = np.asarray(info["R2_matrix"], dtype=float)[:, w]
+                    # nanargmax, not argmax: an unscorable season/scale is NaN in the
+                    # surface (see _r2_surface) and argmax would return the first NaN.
+                    if np.all(np.isnan(col)):
+                        continue
+                    k = int(K_range[np.nanargmax(col)])
+                elif "best_k" in info:
+                    # Only the collapsed optimum survives (a hand-built config, or one
+                    # stored before analyze_correlation_seasonal reported per-scheme
+                    # optima): every scheme then shares this season's overall-best K.
+                    # The columns still differ — different weighting schemes at the same
+                    # K — exactly as in the non-seasonal set_optimal_SIDI(scalar K, w).
+                    k = int(info["best_k"])
+                    if not _warned_collapsed:
+                        warnings.warn(
+                            "recalculate_SIDI_seasonal_all_schemes: seasonal config "
+                            "carries no per-scheme optimal K ('best_k_per_weight' or "
+                            "'R2_matrix'); every weighting scheme falls back to the "
+                            "season's overall-best K. Re-run analyze_correlation_seasonal "
+                            "to give each scheme its own scale.",
+                            RuntimeWarning, stacklevel=2
+                        )
+                        _warned_collapsed = True
+                else:
+                    raise ValueError(
+                        f"Season '{name}' carries no 'best_k_per_weight', 'R2_matrix' "
+                        f"or 'best_k', so no optimal K can be recovered. Pass "
+                        f"analyze_correlation_seasonal's own return value."
+                    )
+                params_w[name] = {"best_k": k, "col_best_weight": w}
+
+            if params_w:
+                out[:, w] = self.recalculate_SIDI_seasonal(params_w, seasons)
+
+        return out
+
+    def set_optimal_SIDI_seasonal(self, seasonal_corr, agg='quarter',
+                                  seasons=None, overwrite=False):
+        """
+        Seasonal SIDI from the output of ``analyze_correlation_seasonal``: one
+        column per weighting scheme, each built with THAT scheme's own optimal K
+        in every season (``best_k_per_weight``, else the argmax of the season's
+        ``R2_matrix`` column), then standardised per season on the baseline.
+        See ``recalculate_SIDI_seasonal_all_schemes``.
+
+        Args:
+            seasonal_corr (dict): Output of ``analyze_correlation_seasonal()``.
+                Each season entry must carry ``best_k_per_weight`` or
+                ``R2_matrix`` (a bare ``best_k`` is accepted with a warning: every
+                scheme then shares the season's overall-best K).
+            agg (str): Aggregation scheme — **must match** the one used in
+                ``analyze_correlation_seasonal()``.
+                Options: 'quarter', 'semiannual', 'four-monthly', 'monthly', 'custom'.
+            seasons (dict, optional): Required when ``agg='custom'``.
+                ``{season_name: [month_ints]}``.
+            overwrite (bool): If True, sets ``self.SIDI`` to the ``(time, 5)``
+                per-scheme seasonal array and stores ``self.seasonal_params``
+                (``agg``, ``seasons``, per-season ``config``).
+
+        Returns:
+            np.ndarray or None: the ``(time, 5)`` per-scheme seasonal SIDI if
+            ``overwrite=False``; None if ``overwrite=True`` (committed to
+            ``self.SIDI`` instead) — the same contract as ``set_optimal_SIDI``.
+
+        Note:
+            There is no single "best (K, weight) per season" series: several
+            schemes are usually statistically indistinguishable, so collapsing
+            the surface to one argmax cell per season is a winner's-curse
+            artefact. Downstream consumers pick a column of ``self.SIDI``
+            explicitly (see ``_resolve_weight_index``), defaulting to 0
+            (equal weights).
+        """
+        self._check_sidi_optimization_eligible()
+        if seasons is not None:
+            agg = 'custom'
+
+        seasons_dict = self._build_seasons_dict(agg, seasons)
+
+        # Validate coverage
+        missing = [s for s in seasons_dict if s not in seasonal_corr]
+        if missing:
+            print(f"Warning: seasons {missing} not found in seasonal_corr; "
+                  f"corresponding months will be NaN in SIDI.")
+
+        SIDI_all_schemes = self.recalculate_SIDI_seasonal_all_schemes(
+            seasonal_corr, seasons_dict)
+
+        if overwrite:
+            self._clear_calibration('seasonal')
+            # self.SIDI keeps its one and only meaning: (time, 5), column = weighting
+            # scheme, each column that scheme's own series at its own per-season K.
+            self.SIDI = SIDI_all_schemes
+            print("Note: SIDI overwritten with the seasonal optimization — one column "
+                  "per weighting scheme, each at its own per-season K. Pick a column "
+                  "with weight_index (default 0, equal weights); there is no single 'best' series.")
+            self.seasonal_params = {
+                'agg': agg,
+                'seasons': seasons_dict,
+                'config': {
+                    name: {'best_k': v['best_k'],
+                           'col_best_weight': v['col_best_weight'],
+                           # Carried through when analyze_correlation_seasonal computed
+                           # it, so each weighting scheme keeps its own per-season K.
+                           **({'best_k_per_weight': v['best_k_per_weight']}
+                              if 'best_k_per_weight' in v else {})}
+                    for name, v in seasonal_corr.items()
+                    if name in seasons_dict
+                }
+            }
+
+        else:
+            return SIDI_all_schemes
+
+    def plot_covariates(self, streamflow, year_ext=None, split_plot=False,
+                        weight_index=None, ax=None):
+        """
+        Plot the covariate relationship between the optimized SIDI and a Streamflow-based index.
+
+        Parameters
+        ----------
+        streamflow : BaseDroughtAnalysis or Streamflow
+            Streamflow object providing SQI1 or similar indices.
+        year_ext : tuple of int, optional
+            (start_year, end_year) to restrict the x-axis.
+        split_plot : bool, optional
+            If True, produces separate figures for each panel. Default False.
+        weight_index : int or 'all', optional
+            Which column of ``self.SIDI`` (0..4) to plot. The seasonal
+            optimization keeps one column per weighting scheme and picks no
+            single "best" one, so the choice is the caller's: passed explicitly
+            here, else (see ``_resolve_weight_index``) 0 (equal weights) after a seasonal calibration, the committed
+            ``optimal_weight_index`` after a global one, else the construction
+            default, else 2.
+            Pass ``'all'`` to
+            overlay all five SIDI schemes against SQI1 (one colour each; a 2x3
+            grid of SIDI-vs-SQI1 grey monthly points with per-season median /
+            5th-95th pct errorbars binned by integer SQI1 interval; and a single
+            line chart of the median |SQI1 - SIDI| per SQI1 class, one line per
+            scheme, to spot a scheme that fails on one class). The delta panel
+            is skipped in that mode. See ``_resolve_weight_index``. In that
+            overlay the shaded bands mark the months the observed streamflow
+            was itself in drought (SQI1 < ``streamflow.threshold``, -1 by
+            default) — a record, on the same axis as the optimized SIDI, of
+            when the basin actually ran dry.
+        ax : matplotlib.axes.Axes, optional
+            Only valid together with ``weight_index='all'``: draws the
+            5-scheme time-series overlay into this caller-owned axis instead
+            of its own figure (nothing is shown, and the 'all' mode's other
+            two figures are skipped). Use it to embed that panel into a
+            composite figure you build yourself, e.g. one row per basin in a
+            loop over ``plt.subplots(n_basins, 1)``.
+
+        Raises
+        ------
+        TypeError
+            If streamflow is not a BaseDroughtAnalysis instance, or if the
+            Precipitation object has not been optimized.
+        """
+        self._check_sidi_optimization_eligible()
+        if not isinstance(streamflow, BaseDroughtAnalysis):
+            raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
+
+        if self.calibration_mode is None:
+            raise TypeError(
+                "The Precipitation object must be optimized with "
+                "'set_optimal_SIDI()' or 'set_optimal_SIDI_seasonal()' OVERWRITE=True "
+                "before calling this function."
+            )
+
+        # The seasonal SIDI keeps one column per weighting scheme, so the column
+        # is chosen here: 'all' overlays every scheme, otherwise explicit
+        # weight_index wins, else the default of _resolve_weight_index.
+        if not (isinstance(weight_index, str) and weight_index.lower() == 'all'):
+            weight_index = self._resolve_weight_index(weight_index)
+        self._calibration_note()
+
+        plot__covariates(self, streamflow=streamflow, weight_index=weight_index,
+                         year_ext=year_ext, split_plot=split_plot, ax=ax)
+
+    @staticmethod
+    def _r2_surface(spi_sub, y_sub, K_range, min_valid=1):
+        """
+        R^2 of the SIDI against a target series, for every (K, weighting scheme) pair.
+
+        The single implementation behind `analyze_correlation`,
+        `analyze_correlation_seasonal` and `analyze_correlation_seasonal_rolling`,
+        which each carried their own copy of this loop — the last two byte-for-byte
+        identical, the first differing only in lacking the sample-size guard.
+
+        No standardization is applied to the weighted mean before correlating.
+        The three copies each did `(sidi - nanmean(sidi)) / nanstd(sidi)` on the
+        overlap window, which looked like the library's standardization but was a
+        different one: `_zscore_baseline` (the real one, used by
+        `_calculate_SIDI` / `recalculate_SIDI`) references the BASELINE, not the
+        overlap. It made no difference to the result — Pearson's r is invariant
+        under any positive affine rescaling of either variable, verified to 1e-16
+        over 200 randomised trials — so rather than repair three copies of a
+        standardization that cannot affect the answer, the step is dropped. What
+        gets standardized, and against what, is then decided in exactly one place:
+        `_zscore_baseline`.
+
+        Args:
+            spi_sub (ndarray): SPI-like set (n_scales, n_times), already sliced to
+                the period being scored.
+            y_sub (ndarray): target series (n_times,), e.g. SQI-1.
+            K_range (ndarray): month-scales to score, 1-indexed.
+            min_valid (int): a cell is scored only where more than this many
+                timesteps are finite in both series; NaN otherwise. Callers that
+                subset by season pass 10; the whole-period caller passes 1, the
+                minimum `pearsonr` needs. NaN cells are why every consumer must
+                read this surface with `np.nanmax`/`np.nanargmax`.
+
+        Returns:
+            ndarray: R^2 surface, shape (len(K_range), n_weights).
+        """
+        n_weights = generate_weights(1).shape[1]
+        MatCorr = np.full((len(K_range), n_weights), np.nan)
+        finite_y = np.isfinite(y_sub)
+
+        for ki, k in enumerate(K_range):
+            k = int(k)
+            W = generate_weights(k)
+            sidis = np.array([
+                [weighted_metrics(spi_sub[:k, j], w)[0] for w in W.T]
+                for j in range(spi_sub.shape[1])
+            ])
+            for w in range(W.shape[1]):
+                valid = finite_y & np.isfinite(sidis[:, w])
+                if np.sum(valid) > min_valid:
+                    r = stats.pearsonr(sidis[valid, w], y_sub[valid])[0]
+                    MatCorr[ki, w] = r ** 2
+        return MatCorr
+
+    def analyze_correlation(self, streamflow, plot=True, plot_mode="all",
+                            n_boot=0, block_length=None, ci=(2.5, 97.5),
+                            circular=True, random_state=None):
         """
         Analyze correlations between this object's SIDI and a streamflow target
         (SQI₁) for different weighting schemes and K (month-scale) values.
@@ -874,23 +1165,71 @@ class BaseDroughtAnalysis:
         streamflow : Streamflow (or any BaseDroughtAnalysis)
             Instance carrying the streamflow-based SPI-like indices.
         plot : bool, default True
-            Whether to generate diagnostic plots.
+            Whether to generate diagnostic plots, in this order:
+              1. ``plot_scan`` at the best (K, weight) pair;
+              2. scatter of that SIDI vs SQI1 (coloured as per ``plot_mode``);
+              3. R²(K) curves, one per weighting scheme (``WEIGHT_COLORS``), with
+                 the bootstrap percentile band underneath when ``n_boot > 0``;
+              4. ``n_boot > 0`` only: per-scheme peak with its CI cross and the
+                 scale clusters (``_plot3_peak_clusters``);
+              5. effective weights of every scheme at its own optimal K
+                 (``effective_weights_at_optimum``).
         plot_mode : {'all', 'seasonal', 'monthly'}, default 'all'
             Scatter-plot coloring mode.
+        n_boot : int, default 0
+            If > 0, run a paired block bootstrap of the whole SPI/SQI/SIDI/R²
+            pipeline and attach a confidence band to the R² surface. 0 keeps the
+            method's behaviour and return value exactly as before.
+        block_length : int, optional
+            Block length L (months) for the bootstrap. Default ``max(24, 2*K)``.
+            Larger L means less cross-junction contamination but fewer distinct
+            replicas (coarser band) — see the ``boot_meta`` table.
+        ci : (float, float), default (2.5, 97.5)
+            Lower/upper percentiles of the band.
+        circular : bool, default True
+            Wrap bootstrap blocks around the series end.
+        random_state : int or None
+            Seed for reproducibility.
+
+        Prints the best (K, weight) pair and, for every scheme, its optimal K,
+        its R² there and the mean age of its effective weights.
 
         Returns
         -------
         dict
-            - "best_k" (int): Optimal month-scale (K).
+            - "best_k" (int): Optimal month-scale (K) of the best (K, weight) pair.
             - "col_best_weight" (int): Index of the best weighting function.
             - "max_correlation" (float): Maximum R² value achieved.
             - "spi_corr" (ndarray): Sorted single-scale SPI vs SQI₁ R² values.
+            - "best_k_per_weight" (ndarray, shape (5,)): optimal K of *each*
+              weighting scheme — every scheme peaks at a different K. Pass this to
+              ``set_optimal_SIDI`` to give each column of SIDI its own scale.
+            - "max_correlation_per_weight" (ndarray, shape (5,)): the R² reached by
+              each scheme at its own optimal K.
+            - "R2_matrix" (ndarray, shape (K, 5)): the full R² surface, i.e. the
+              score of every (K, weight) combination (same key as each season's
+              entry in ``analyze_correlation_seasonal``).
+            When ``n_boot > 0`` also:
+            - "R2_boot" (ndarray, shape (n_boot, K, 5)): every replica's surface.
+            - "R2_ci" (ndarray, shape (2, K, 5)): the [lo, hi] percentile band.
+            - "boot_meta" (dict): block_length, n_blocks, ``contaminated_fraction``
+              (K,) and ``eff_n_per_scale`` (K,) — the share of timesteps whose
+              k-month accumulation crosses a block join and is NaN-masked, and the
+              N that survives. This grows with K: the band at large K rests on
+              fewer effective points and should be read with that in mind.
+            - "summary_raw" (dict): the raw ``_peak_summary`` result
+              (``peak_by_family``, ``clusters``).
+            - "summary" (DataFrame): one row per weighting scheme. Columns:
+              ``season, family, peak_K, peak_K_CI, peak_R2, peak_R2_CI,
+              mean_age, not_distinguishable_from`` — see
+              ``utils.statistics.bootstrap_summary_table``.
         """
         self._check_correlation_eligible()
 
-        wlabel = ['equal weights (ew)', 'linearly decreasing weights (ldw)',
-                  'logarithmically decreasing weights (lgdw)', 'linearly increasing weights (liw)',
-                  'logarithmically increasing weights (lgiw)']
+        wlabel = [f"{desc} ({code})" for desc, code in zip(
+            ("equal weights", "linearly decreasing weights",
+             "geometrically decreasing weights", "linearly increasing weights",
+             "geometrically increasing weights"), WEIGHT_LABELS)]
 
         if not isinstance(streamflow, BaseDroughtAnalysis):
             raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
@@ -904,24 +1243,9 @@ class BaseDroughtAnalysis:
         spi_like_set = self.spi_like_set[:, self_indices]
 
         K_range = np.arange(1, self.K + 1)
-        MatCorr = []
 
         print("Starting correlation analysis...")
-        for k in K_range:
-            W = generate_weights(k)
-            sidis = []
-            for doy in range(len(spi_like_set[0])):
-                vec = spi_like_set[:k, doy]
-                sidis.append([weighted_metrics(vec, w)[0] for w in W.T])
-            sidis = np.array(sidis)
-
-            rr = []
-            for w in range(len(W.T)):
-                SIDI = (sidis[:, w] - np.nanmean(sidis[:, w])) / np.nanstd(sidis[:, w])
-                valid_mask = np.isfinite(y) & np.isfinite(SIDI)
-                r = stats.pearsonr(SIDI[valid_mask], y[valid_mask])[0]
-                rr.append(r ** 2)
-            MatCorr.append(rr)
+        MatCorr = self._r2_surface(spi_like_set, y, K_range)
 
         # single SPI-k vs SQI-1 correlation
         rr_spi = []
@@ -933,34 +1257,37 @@ class BaseDroughtAnalysis:
         ii = np.argsort(rr_spi)[::-1]
         R2_spi = np.array([np.arange(1, self.K + 1)[ii], rr_spi[ii]]).T
 
-        MatCorr = np.array(MatCorr)
-        max_corr = np.max(MatCorr)
-        best_k, best_weight = np.unravel_index(np.argmax(MatCorr), MatCorr.shape)
+        # nanmax/nanargmax, not max/argmax: _r2_surface leaves a cell NaN where too
+        # few timesteps overlap, and np.argmax would return the position of the first
+        # NaN — silently reporting it as the optimum.
+        if np.all(np.isnan(MatCorr)):
+            raise ValueError(
+                "No (K, weighting scheme) pair could be scored: the two series never "
+                "overlap on enough finite timesteps."
+            )
+        max_corr = np.nanmax(MatCorr)
+        best_k, best_weight = np.unravel_index(np.nanargmax(MatCorr), MatCorr.shape)
 
         print(f"Best correlation: R2  = {max_corr:.3f} (K={K_range[best_k]}, Weight={wlabel[best_weight]})")
 
+        # --- optional block-bootstrap confidence band -------------------------
+        MatCorr_boot = MatCorr_ci = boot_meta = summary_raw = None
+        if n_boot and n_boot > 0:
+            MatCorr_boot, MatCorr_ci, boot_meta = _bootstrap_r2(
+                self, streamflow, self_indices, streamflow_indices,
+                n_boot, block_length, ci, circular, random_state)
+            _print_contamination_table(boot_meta, K_range)
+            summary_raw = _peak_summary(MatCorr, MatCorr_boot, ci=ci)
+
         W = generate_weights(K_range[best_k])
-        sidi = []
-        for doy in range(len(spi_like_set[0])):
-            vec = spi_like_set[:K_range[best_k], doy]
-            sidi.append(weighted_metrics(vec, W[:, best_weight])[0])
-        sidi = np.array(sidi)
-        SIDI = (sidi - np.nanmean(sidi)) / np.nanstd(sidi)
 
         # --- plots ----------------------------------------------------------------
         if plot:
-            plt.figure(figsize=(10, 5))
-            for w in range(len(W.T)):
-                plt.plot(MatCorr[:, w], label=wlabel[w], linewidth=2)
-            plt.grid()
-            plt.legend(loc=3)
-            plt.xticks(np.arange(len(K_range)), K_range)
-            plt.ylabel(r"$R^2$", fontweight="bold", fontsize=12)
-            plt.xlabel("Month-scale (K)", fontweight="bold", fontsize=12)
-            plt.title(f"Correlation Analysis: {self.SIDI_name}  vs.  {streamflow.index_name}1",
-                      fontsize=14, fontweight="bold")
-            plt.tight_layout()
-            plt.show(block=False)
+            # The series plotted is the one set_optimal_SIDI would commit:
+            # recalculate_SIDI standardizes on the BASELINE via _zscore_baseline.
+            # Rescaling on the overlap instead put the scatter's x-axis on a different
+            # reference from self.SIDI.
+            SIDI = self.recalculate_SIDI(K=int(K_range[best_k]))[self_indices, best_weight]
 
             # basic scan plot
             self.plot_scan(optimal_k=K_range[best_k], weight_index=best_weight)
@@ -976,17 +1303,25 @@ class BaseDroughtAnalysis:
                 m2summer = np.isin(streamflow.m_cal[streamflow_indices, 0], g1)
                 f = np.isfinite(SIDI[m1summer]) & np.isfinite(y[m2summer])
                 rho, pval = stats.pearsonr(SIDI[m1summer][f], y[m2summer][f])
-                rho = 0 if pval > 0.5 else rho
+                # Report the verdict, not a fake zero. A non-significant correlation
+                # used to be forced to rho = 0 and printed as "R2 = 0.0", which reads
+                # as "no relationship" when what was meant is "not distinguishable
+                # from zero" - a different statement, and one that depends on n (at
+                # n=10, r=0.6 gives p=0.066 and would have been shown as 0.0, hiding
+                # 36% of explained variance). The threshold is now the library's own
+                # `pval < 0.05`, as used by spi_sqi_corr; it read 0.5 here, at which
+                # level the null is rejected half the time under pure noise.
+                r2_lbl = 'n.s.' if pval >= 0.05 else f'{rho ** 2:.2f}'
                 plt.plot(SIDI[m1summer], y[m2summer], 'o', color='tab:olive', alpha=0.4,
-                         label=f'Apr-Oct; $R^2$ = {np.round(rho ** 2, 2)}')
+                         label=f'Apr-Oct; $R^2$ = {r2_lbl}')
                 # winter
                 m1winter = np.isin(self.m_cal[self_indices, 0], g2)
                 m2winter = np.isin(streamflow.m_cal[streamflow_indices, 0], g2)
                 f = np.isfinite(SIDI[m1winter]) & np.isfinite(y[m2winter])
                 rho, pval = stats.pearsonr(SIDI[m1winter][f], y[m2winter][f])
-                rho = 0 if pval > 0.5 else rho
+                r2_lbl = 'n.s.' if pval >= 0.05 else f'{rho ** 2:.2f}'  # see above
                 plt.plot(SIDI[m1winter], y[m2winter], 'o', color='tab:blue', alpha=0.4,
-                         label=f'Nov-Mar; $R^2$ = {np.round(rho ** 2, 2)}')
+                         label=f'Nov-Mar; $R^2$ = {r2_lbl}')
             elif plot_mode == 'monthly':
                 if cmc is not None:
                     c = plt.get_cmap(cmc.romaO, 12)
@@ -999,22 +1334,204 @@ class BaseDroughtAnalysis:
 
             plt.plot(np.arange(-3, 4), np.arange(-3, 4), '--', color='grey')
             plt.grid()
-            plt.ylabel(f"{streamflow.index_name}1 ", fontweight="bold", fontsize=12)
-            plt.xlabel(f"{self.SIDI_name}", fontweight="bold", fontsize=12)
+            plt.ylabel(f"{streamflow.index_name}1 ", fontsize=14)
+            plt.xlabel(f"{self.SIDI_name}", fontsize=14)
             plt.title(f"{self.SIDI_name} vs.  {streamflow.index_name}1 . K={best_k} - "
                       f"weighting function n. {best_weight}; $R^2$ = {max_corr:.2f}",
-                      fontsize=14, fontweight="bold")
+                      fontsize=16)
             plt.legend(fontsize=12)
             plt.tight_layout()
             plt.show(block=False)
 
-        return {"best_k": K_range[best_k], "col_best_weight": best_weight,
-                "max_correlation": max_corr, 'spi_corr': R2_spi}
+            # --- R²(k) curves: one line per weighting scheme with WEIGHT_COLORS,
+            #     CI band underneath when bootstrap was run.
+            plt.figure(figsize=(10, 5))
+            xk = np.arange(len(K_range))
+            for w in range(len(W.T)):
+                color = WEIGHT_COLORS[w]
+                plt.plot(xk, MatCorr[:, w], label=wlabel[w], linewidth=2, color=color)
+                if MatCorr_ci is not None:
+                    plt.fill_between(xk, MatCorr_ci[0, :, w], MatCorr_ci[1, :, w],
+                                    color=color, alpha=0.15, linewidth=0)
+            plt.grid()
+            plt.legend(loc=3)
+            plt.xticks(np.arange(len(K_range)), K_range)
+            plt.ylabel(r"$R^2$", fontsize=14)
+            plt.xlabel("Month-scale (K)", fontsize=14)
+            plt.title(f"Correlation Analysis: {self.SIDI_name}  vs.  {streamflow.index_name}1",
+                      fontsize=16)
+            plt.tight_layout()
+            plt.show(block=False)
 
-    def analyze_correlation_seasonal(self, streamflow, agg='quarter', plot=True, seasons=None):
+            if summary_raw is not None:
+                _plot3_peak_clusters(
+                    plt.figure(figsize=(10, 6)).gca(), MatCorr, K_range, summary_raw,
+                    title=f"{self.basin_name} — {self.SIDI_name} vs. "
+                          f"{streamflow.index_name}1 — per-scheme peak (cross = 95% CI) "
+                          f"and scale clusters")
+                plt.tight_layout()
+                plt.show(block=False)
+
+        # Each weighting scheme peaks at its own K: MatCorr already scores every
+        # (K, weight) pair, so the per-scheme optimum is just the argmax of each
+        # column. Reported alongside the global best so that set_optimal_SIDI can
+        # give every column of SIDI its own scale (see recalculate_SIDI).
+        best_k_per_weight = K_range[np.nanargmax(MatCorr, axis=0)]
+        max_corr_per_weight = np.nanmax(MatCorr, axis=0)
+
+        ew_data = effective_weights_at_optimum(best_k_per_weight, plot=False)
+        print("Best K per weighting scheme:")
+        for w, (kw, rw) in enumerate(zip(best_k_per_weight, max_corr_per_weight)):
+            age = ew_data[WEIGHT_LABELS[w]]["mean_age"]
+            print(f"   {wlabel[w]:<40s} K={kw:<3d} R2={rw:.3f}  mean_age={age:.1f}m")
+
+        if plot:
+            fig_ew, ax_ew = plt.subplots(figsize=(7, 4.5))
+            effective_weights_at_optimum(
+                best_k_per_weight, plot=True, ax=ax_ew,
+                title=f"Effective weights at optimum K — "
+                      f"{self.SIDI_name} vs. {streamflow.index_name}1")
+            plt.tight_layout()
+            plt.show(block=False)
+
+        result = {"best_k": K_range[best_k], "col_best_weight": best_weight,
+                  "max_correlation": max_corr, 'spi_corr': R2_spi,
+                  "best_k_per_weight": best_k_per_weight,
+                  "max_correlation_per_weight": max_corr_per_weight,
+                  "R2_matrix": MatCorr}
+        if MatCorr_ci is not None:
+            result["R2_boot"] = MatCorr_boot
+            result["R2_ci"] = MatCorr_ci
+            result["boot_meta"] = boot_meta
+            # summary_raw: the _peak_summary dict (peak_by_family + clusters);
+            # "summary": the scale-cluster DataFrame from it. Consumers that need
+            # the crosses/boxes (e.g. diagnostics) read summary_raw and do NOT
+            # recompute _peak_summary.
+            result["summary_raw"] = summary_raw
+            result["summary"] = bootstrap_summary_table(
+                {"whole period": {"R2_matrix": MatCorr, "R2_boot": MatCorr_boot,
+                                  "summary": summary_raw}}, ci=ci)
+            _print_peak_summary(summary_raw)
+        return result
+
+    def analyze_correlation_lagged(self, streamflow, lag=1, plot=True, plot_mode="all"):
+        """
+        ``analyze_correlation`` with a time lag: R² between this object's SIDI
+        ``lag`` months BEFORE and SQI1, for every (K, weighting scheme) pair,
+
+            R2_matrix[K-1, w] = corr²( SIDI_{K,w}(t - lag), SQI1(t) )
+
+        Pairs are matched through the calendar (``_lagged_pairs``), so ``lag`` is
+        exactly ``lag`` calendar months. ``lag=0`` reproduces
+        ``analyze_correlation``'s ``R2_matrix`` exactly. The question it answers:
+        does a SIDI that closed ``lag`` months earlier still explain the
+        streamflow — i.e. how much predictive lead time the index offers.
+
+        Applicable to: Precipitation, Pet, Balance.
+
+        Parameters
+        ----------
+        streamflow : Streamflow (or any BaseDroughtAnalysis)
+            Object carrying SQI1 (``spi_like_set[0]``).
+        lag : int, default 1
+            Lead of the SIDI over SQI1, in months (>= 0).
+        plot : bool, default True
+            R²(K) curves, one per weighting scheme, and the scatter of the best
+            lagged SIDI vs SQI1.
+        plot_mode : {'all', 'monthly'}, default 'all'
+            Scatter colouring ('monthly': by the calendar month of SQI1).
+
+        Returns
+        -------
+        dict
+            "lag", "best_k", "col_best_weight", "max_correlation",
+            "best_k_per_weight", "max_correlation_per_weight",
+            "R2_matrix" (K, 5) — same keys as ``analyze_correlation``.
+        """
+        self._check_correlation_eligible()
+        if not isinstance(streamflow, BaseDroughtAnalysis):
+            raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
+        lag = int(lag)
+        if lag < 0:
+            raise ValueError("lag must be >= 0 (months by which the SIDI leads SQI1).")
+
+        si, fj = self._lagged_pairs(streamflow, lag)
+        if si.size == 0:
+            raise ValueError(f"No (t - {lag}, t) pairs overlap between the two objects.")
+        y = streamflow.spi_like_set[0, fj]
+        K_range = np.arange(1, self.K + 1)
+        wlabel = list(WEIGHT_LABELS)
+
+        R2 = self._r2_surface(self.spi_like_set[:, si], y, K_range)
+        if np.all(np.isnan(R2)):
+            raise ValueError("No (K, weighting scheme) pair could be scored at this lag.")
+        bk, bw = np.unravel_index(np.nanargmax(R2), R2.shape)
+        best_k_per_weight = K_range[np.nanargmax(R2, axis=0)]
+        max_corr_per_weight = np.nanmax(R2, axis=0)
+        print(f"lag {lag}: best R2 = {R2[bk, bw]:.3f} (K={K_range[bk]}, Weight={wlabel[bw]})")
+        for w in range(len(wlabel)):
+            print(f"   {wlabel[w]:<6s} K={best_k_per_weight[w]:<3d} R2={max_corr_per_weight[w]:.3f}")
+
+        if plot:
+            plt.figure(figsize=(10, 5))
+            for w in range(len(wlabel)):
+                plt.plot(K_range, R2[:, w], lw=2, color=WEIGHT_COLORS[w], label=wlabel[w])
+            plt.grid()
+            plt.legend(loc=3)
+            plt.xticks(K_range)
+            plt.ylabel(r"$R^2$", fontsize=14)
+            plt.xlabel("Month-scale (K)", fontsize=14)
+            plt.title(f"{self.basin_name} — {self.SIDI_name}(t-{lag}) vs. "
+                      f"{streamflow.index_name}1(t)", fontsize=14)
+            plt.tight_layout()
+            plt.show(block=False)
+
+            # the series set_optimal_SIDI would commit (baseline-standardized), shifted
+            x = self.recalculate_SIDI(K=int(K_range[bk]))[si, bw]
+            plt.figure(figsize=(7, 7))
+            if plot_mode == 'monthly':
+                cmap = cmc.romaO if cmc is not None else plt.get_cmap('twilight_shifted', 12)
+                months = streamflow.m_cal[fj, 0]
+                for m in range(1, 13):
+                    f = months == m
+                    plt.plot(x[f], y[f], 'o', color=cmap(m / 12), label=f'month {m}')
+                plt.legend(fontsize=9)
+            else:
+                plt.plot(x, y, 'ok', markerfacecolor='yellow')
+            plt.plot(np.arange(-3, 4), np.arange(-3, 4), '--', color='grey')
+            plt.grid()
+            plt.xlabel(f"{self.SIDI_name} (t-{lag})", fontsize=14)
+            plt.ylabel(f"{streamflow.index_name}1 (t)", fontsize=14)
+            plt.title(f"K={K_range[bk]}, {wlabel[bw]}; $R^2$={R2[bk, bw]:.2f}", fontsize=14)
+            plt.tight_layout()
+            plt.show(block=False)
+
+        return {"lag": lag, "best_k": int(K_range[bk]), "col_best_weight": int(bw),
+                "max_correlation": float(R2[bk, bw]),
+                "best_k_per_weight": best_k_per_weight,
+                "max_correlation_per_weight": max_corr_per_weight,
+                "R2_matrix": R2}
+
+    def analyze_correlation_seasonal(self, streamflow, agg='quarter', plot=True, seasons=None,
+                                     n_boot=0, block_length=None, ci=(2.5, 97.5),
+                                     circular=True, random_state=None):
         """
         Perform seasonal correlation analysis between this object's SIDI and a
         streamflow target (SQI₁) for different weighting schemes and K values.
+
+        ``n_boot``/``block_length``/``ci``/``circular``/``random_state``: see
+        ``analyze_correlation``. With ``n_boot > 0`` a single set of block-bootstrap
+        replicas of the full pipeline is built on the continuous overlap and then
+        sliced by season, so each season's dict gains ``"R2_boot"`` (n_boot, K, 5),
+        ``"R2_ci"`` (2, K, 5), ``"boot_meta"`` and ``"summary"`` (the raw
+        ``_peak_summary`` dict for that season); the returned dict also gains a
+        top-level ``"summary"`` — one row per (season, weighting scheme): its
+        peak K and peak R², each with its bootstrap CI, plus
+        ``not_distinguishable_from`` naming the other schemes whose peak K and
+        peak R² CIs mutually overlap with this one's (the same schemes drawn
+        with a shared marker in the response-surface figure, Fig. 3). See
+        ``utils.statistics.bootstrap_summary_table``.
+        ``n_boot=0`` leaves the return value unchanged.
 
         Applicable to: Precipitation, Pet, Balance.
 
@@ -1025,19 +1542,29 @@ class BaseDroughtAnalysis:
         agg : {'quarter', 'semiannual', 'four-monthly', 'monthly', 'custom'}, default 'quarter'
             Temporal aggregation scheme.
         plot : bool, default True
-            Whether to generate diagnostic plots.
+            Whether to generate diagnostic plots. With ``agg='monthly'``: a bar
+            chart of the max R² per month. Otherwise, one panel per season in
+            each figure: the SIDI-vs-SQI1 scatter of the seasonal mosaic; with
+            ``n_boot > 0`` the per-scheme peak/CI-cross/scale-cluster figure; the
+            effective weights of every scheme at its own per-season optimal K.
         seasons : dict, optional
             Custom month mapping when ``agg='custom'``.
 
         Returns
         -------
         dict
-            Per-season dictionary with keys:
-            ``best_k``, ``col_best_weight``, ``max_correlation``, ``R2_matrix``, ``sample number``.
+            ``{season_name: {...}}`` with, per season:
+            ``best_k``, ``col_best_weight``, ``max_correlation``,
+            ``best_k_per_weight`` (5,), ``R2_matrix`` (K, 5), ``sample_number``;
+            with ``n_boot > 0`` also ``R2_boot``, ``R2_ci``, ``boot_meta`` and
+            ``summary`` (that season's raw ``_peak_summary`` dict). With
+            ``n_boot > 0`` the returned dict ALSO carries a top-level key
+            ``"summary"`` (a DataFrame, not a season) — iterate seasons with
+            ``isinstance(value, dict)`` or over your ``seasons`` mapping.
         """
         self._check_correlation_eligible()
 
-        wlabel = ['EW', 'Lin. DW', 'Log. DW', 'Lin. IW', 'Log. IW']
+        wlabel = list(WEIGHT_LABELS)
 
         if seasons is not None:
             agg = 'custom'
@@ -1056,28 +1583,6 @@ class BaseDroughtAnalysis:
         months_overlap = np.array([m[0] for m in m_cal_overlap], dtype=int)
 
         K_range = np.arange(1, self.K + 1)
-
-        def _compute_corr(y_sub, spi_sub):
-            """Compute the R² correlation matrix for all K and weighting functions."""
-            MatCorr = []
-            for k in K_range:
-                W = generate_weights(k)
-                sidis = []
-                for doy in range(spi_sub.shape[1]):
-                    vec = spi_sub[:k, doy]
-                    sidis.append([weighted_metrics(vec, w)[0] for w in W.T])
-                sidis = np.array(sidis)
-                rr = []
-                for w in range(W.shape[1]):
-                    SIDI = (sidis[:, w] - np.nanmean(sidis[:, w])) / np.nanstd(sidis[:, w])
-                    valid_mask = np.isfinite(y_sub) & np.isfinite(SIDI)
-                    if np.sum(valid_mask) > 10:
-                        r = stats.pearsonr(SIDI[valid_mask], y_sub[valid_mask])[0]
-                        rr.append(r ** 2)
-                    else:
-                        rr.append(np.nan)
-                MatCorr.append(rr)
-            return np.array(MatCorr)
 
         # --- Season definitions ---
         seasons = self._build_seasons_dict(agg, seasons)
@@ -1114,20 +1619,45 @@ class BaseDroughtAnalysis:
             idx = np.isin(months_overlap, mlist)
             if np.count_nonzero(idx) <= 10:
                 continue
-            M = _compute_corr(y[idx], spi_like_set[:, idx])
+            M = self._r2_surface(spi_like_set[:, idx], y[idx], K_range, min_valid=10)
             max_corr = np.nanmax(M)
             bk, bw = np.unravel_index(np.nanargmax(M), M.shape)
             print(f" Season {name}: best R²={max_corr:.3f} (K={K_range[bk]}, Weight={wlabel[bw]})")
+            best_k_per_weight = K_range[np.nanargmax(M, axis=0)]
             MatCorr[name] = {
                 "best_k": int(K_range[bk]),
                 "col_best_weight": int(bw),
+                # Each weighting scheme peaks at its own K within the season — the
+                # per-scheme optimum is just the argmax of each column of the surface.
+                "best_k_per_weight": best_k_per_weight,
                 "max_correlation": float(max_corr),
                 "R2_matrix": M,
-                "sample number": np.count_nonzero(idx),
+                "sample_number": int(np.count_nonzero(idx)),
             }
+            ew_s = effective_weights_at_optimum(best_k_per_weight, plot=False)
+            print(f"   Best K per scheme (mean_age = barycenter of effective weight):")
+            for wi, lab in enumerate(wlabel):
+                rw = float(np.nanmax(M[:, wi]))
+                age = ew_s[lab]["mean_age"]
+                print(f"      {lab:<40s} K={int(best_k_per_weight[wi]):<3d} "
+                      f"R2={rw:.3f}  mean_age={age:.1f}m")
+
+        # --- optional block-bootstrap confidence band (one replica set,
+        #     built on the continuous overlap, then sliced per season) ---------
+        if n_boot and n_boot > 0:
+            boot_by_season, ci_by_season, boot_meta = _bootstrap_r2(
+                self, streamflow, self_indices, streamflow_indices,
+                n_boot, block_length, ci, circular, random_state, seasons=seasons)
+            _print_contamination_table(boot_meta, K_range)
+            for name in MatCorr:
+                MatCorr[name]["R2_boot"] = boot_by_season[name]
+                MatCorr[name]["R2_ci"] = ci_by_season[name]
+                MatCorr[name]["boot_meta"] = boot_meta
+                MatCorr[name]["summary"] = _peak_summary(
+                    MatCorr[name]["R2_matrix"], boot_by_season[name], ci=ci)
 
         # --- Plot 1: R² vs K ---
-        if agg == 'monthly':
+        if plot and agg == 'monthly':
             import calendar
             months = list(calendar.month_abbr[1:])
             r2max = np.array([MatCorr.get(m, {}).get('max_correlation', np.nan)
@@ -1143,309 +1673,108 @@ class BaseDroughtAnalysis:
             plt.legend()
             plt.tight_layout()
             plt.show(block=False)
-        else:
-            if plot:
-                fig, ax = plt.subplots(figsize=figsize1, nrows=nrows, ncols=ncols)
-                ax = ax.ravel()
-                for i, name in enumerate(MatCorr.keys()):
-                    mat = MatCorr[name]['R2_matrix']
-                    for w in range(mat.shape[1]):
-                        ax[i].plot(mat[:, w], label=wlabel[w], linewidth=2)
-                    ax[i].grid()
-                    ax[i].set_xticks(np.arange(0, len(K_range), 3))
-                    ax[i].set_xticklabels(K_range[0:-1:3])
-                    ax[i].tick_params(axis='x', labelsize=14)
-                    ax[i].tick_params(axis='y', labelsize=14)
-                    ax[i].set_ylabel(r"$R^2$", fontweight="bold", fontsize=16)
-                    ax[i].set_xlabel("Month-scale (K)", fontweight="bold", fontsize=16)
-                    ax[i].set_title(name, fontweight="bold", fontsize=16)
-                    if i == 0:
-                        ax[i].legend(loc=3)
-                fig.suptitle(
-                    f"{self.basin_name} - Correlation Analysis: "
-                    f"{self.SIDI_name} vs. {streamflow.index_name}1",
-                    fontsize=16, fontweight="bold")
-                plt.tight_layout()
-                plt.show(block=False)
-
-                # --- Plot 2: Scatter plots ---
-                if len(seasons) > 5:
-                    if cmc is not None:
-                        c = plt.get_cmap(cmc.romaO, len(seasons))
-                    else:
-                        c = plt.get_cmap('twilight_shifted', len(seasons))
+        elif plot:
+            # --- Plot 1: Scatter plots ---
+            if len(seasons) > 5:
+                if cmc is not None:
+                    c = plt.get_cmap(cmc.romaO, len(seasons))
                 else:
-                    c = ['tab:olive', 'tab:brown', 'tab:orange', 'tab:cyan', 'tab:purple']
+                    c = plt.get_cmap('twilight_shifted', len(seasons))
+            else:
+                c = ['tab:olive', 'tab:brown', 'tab:orange', 'tab:cyan', 'tab:purple']
 
-                fig, ax = plt.subplots(figsize=figsize2, nrows=nrows, ncols=ncols)
-                ax = ax.ravel()
-                for i, (season, vals) in enumerate(MatCorr.items()):
-                    best_k = vals['best_k']
-                    best_weight = vals['col_best_weight']
-                    W = generate_weights(best_k)
-                    sidi = []
-                    for doy in range(spi_like_set.shape[1]):
-                        vec = spi_like_set[:best_k, doy]
-                        sidi.append(weighted_metrics(vec, W[:, best_weight])[0])
-                    sidi = np.array(sidi)
-                    SIDI = (sidi - np.nanmean(sidi)) / np.nanstd(sidi)
+            fig, ax = plt.subplots(figsize=figsize2, nrows=nrows, ncols=ncols)
+            ax = ax.ravel()
+            # The mosaic set_optimal_SIDI_seasonal would commit: each month built
+            # with its own season's (K, weight), then standardized PER SEASON on the
+            # baseline. Rescaling on the whole overlap instead mixed the seasons back
+            # together in the very step the seasonal SIDI exists to keep apart.
+            SIDI_full = self.recalculate_SIDI_seasonal(MatCorr, seasons)[self_indices]
+            for i, (season, vals) in enumerate(MatCorr.items()):
+                best_k = vals['best_k']
+                best_weight = vals['col_best_weight']
+                SIDI = SIDI_full
 
-                    idx = np.isin(months_overlap, seasons[season])
-                    valid = np.isfinite(SIDI[idx]) & np.isfinite(y[idx])
-                    if np.count_nonzero(valid) > 10:
-                        r, _ = stats.pearsonr(SIDI[idx][valid], y[idx][valid])
-                        r2 = r ** 2
-                    else:
-                        r2 = np.nan
+                idx = np.isin(months_overlap, seasons[season])
+                valid = np.isfinite(SIDI[idx]) & np.isfinite(y[idx])
+                if np.count_nonzero(valid) > 10:
+                    r, _ = stats.pearsonr(SIDI[idx][valid], y[idx][valid])
+                    r2 = r ** 2
+                else:
+                    r2 = np.nan
 
-                    ax[i].plot(SIDI[idx], y[idx], 'o', color=c[i], alpha=0.4,
-                               label=f'$R^2$ = {np.round(r2, 2)} \n K ={best_k}; {wlabel[best_weight]}')
-                    ax[i].plot(np.arange(-3, 4), np.arange(-3, 4), '--', color='grey')
-                    ax[i].tick_params(axis='x', labelsize=14)
-                    ax[i].tick_params(axis='y', labelsize=14)
-                    ax[i].grid()
-                    ax[i].set_title(season, fontweight="bold", fontsize=16)
-                    ax[i].set_ylabel(f"{streamflow.index_name}1", fontweight="bold", fontsize=16)
-                    ax[i].set_xlabel(f"{self.SIDI_name}", fontweight="bold", fontsize=16)
-                    ax[i].legend(fontsize=12)
-
-                fig.suptitle(
-                    f"{self.basin_name} - {self.SIDI_name} vs. {streamflow.index_name}1 "
-                    f"— Best seasonal configurations",
-                    fontsize=14, fontweight="bold")
-                if i < ncols * nrows - 1:
-                    fig.delaxes(ax[-1])
-                plt.tight_layout()
-                plt.show(block=False)
-
-        return MatCorr
-
-    # Da aggiungere alla stessa classe di analyze_correlation_seasonal.
-    # Richiede in aggiunta: from matplotlib.lines import Line2D
-
-    # Da aggiungere alla stessa classe di analyze_correlation_seasonal.
-    # Richiede in aggiunta:
-    #   from matplotlib.lines import Line2D
-    #   import matplotlib.colors as mcolors
-
-    def analyze_correlation_seasonal_rolling(self, streamflow, agg='quarter', seasons=None,
-                                             window_length=30, step=10, min_coverage=20,
-                                             plot=True):
-        """
-        Versione a finestra mobile di analyze_correlation_seasonal: ripete l'analisi
-        R^2(K) per stagione su finestre successive di `window_length` anni, shiftate
-        di `step` anni, per esplorare la stabilità/non-stazionarietà nel tempo della
-        relazione SIDI-streamflow. Replica SOLO il Plot 1 (curve R^2 vs K), non gli
-        scatter plot.
-
-        ATTENZIONE: le finestre si sovrappongono (di window_length - step anni) e
-        NON sono campioni indipendenti. Va interpretata come analisi di sensibilità/
-        non-stazionarietà, non come repliche statistiche indipendenti tra finestre.
-
-        Applicable to: Precipitation, Pet, Balance.
-
-        Parameters
-        ----------
-        streamflow : Streamflow (or any BaseDroughtAnalysis)
-        agg : {'quarter', 'semiannual', 'four-monthly', 'custom'}, default 'quarter'
-            'monthly' non è supportato in questa versione.
-        seasons : dict, optional
-            Mapping mese->stagione custom, se agg='custom'.
-        window_length : int, default 30
-            Lunghezza nominale della finestra in anni.
-        step : int, default 10
-            Passo di avanzamento tra finestre consecutive, in anni.
-        min_coverage : int, default 20
-            Copertura minima (anni) richiesta per includere e continuare a generare
-            finestre; l'iterazione si ferma alla prima finestra sotto soglia.
-        plot : bool, default True
-
-        Returns
-        -------
-        dict
-            {window_label: {season_name: {best_k, col_best_weight, max_correlation,
-                                           R2_matrix, sample number}}}
-        """
-        self._check_correlation_eligible()
-        import matplotlib.colors as mcolors
-
-        if agg == 'monthly':
-            raise ValueError("agg='monthly' non supportato in versione rolling "
-                             "(usa analyze_correlation_seasonal per il bar chart mensile).")
-
-        wlabel = ['EW', 'Lin. DW', 'Log. DW', 'Lin. IW', 'Log. IW']
-
-        # Colore base per schema = stesso color cycle di default usato da
-        # analyze_correlation_seasonal (garantisce coerenza cromatica col plot originale,
-        # invece di una palette scelta a mano che può non corrispondere).
-        scheme_colors = plt.rcParams['axes.prop_cycle'].by_key()['color'][:len(wlabel)]
-
-        def _shade(base_color, frac):
-            """Interpola tra bianco (frac->0, finestra vecchia) e base_color
-            (frac=1, finestra più recente = stesso colore del plot originale)."""
-            base_rgb = np.array(mcolors.to_rgb(base_color))
-            white = np.array([1.0, 1.0, 1.0])
-            return tuple(white + frac * (base_rgb - white))
-
-        if seasons is not None:
-            agg = 'custom'
-
-        if not isinstance(streamflow, BaseDroughtAnalysis):
-            raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
-
-        # --- Overlap temporale completo ---
-        self_indices, streamflow_indices = find_overlap(self.m_cal, streamflow.m_cal)
-        if len(self_indices) == 0 or len(streamflow_indices) == 0:
-            raise ValueError("No overlapping data found between the two objects.")
-
-        y_full = streamflow.spi_like_set[0, streamflow_indices]
-        spi_like_full = self.spi_like_set[:, self_indices]
-        m_cal_overlap = np.array([self.m_cal[i] for i in self_indices])
-        months_overlap = np.array([m[0] for m in m_cal_overlap], dtype=int)
-        years_overlap = np.array([m[1] for m in m_cal_overlap], dtype=int)
-
-        K_range = np.arange(1, self.K + 1)
-
-        def _compute_corr(y_sub, spi_sub):
-            MatCorr = []
-            for k in K_range:
-                W = generate_weights(k)
-                sidis = []
-                for doy in range(spi_sub.shape[1]):
-                    vec = spi_sub[:k, doy]
-                    sidis.append([weighted_metrics(vec, w)[0] for w in W.T])
-                sidis = np.array(sidis)
-                rr = []
-                for w in range(W.shape[1]):
-                    SIDI = (sidis[:, w] - np.nanmean(sidis[:, w])) / np.nanstd(sidis[:, w])
-                    valid_mask = np.isfinite(y_sub) & np.isfinite(SIDI)
-                    if np.sum(valid_mask) > 10:
-                        r = stats.pearsonr(SIDI[valid_mask], y_sub[valid_mask])[0]
-                        rr.append(r ** 2)
-                    else:
-                        rr.append(np.nan)
-                MatCorr.append(rr)
-            return np.array(MatCorr)
-
-        # --- Definizione stagioni ---
-        seasons = self._build_seasons_dict(agg, seasons)
-        all_months = [m for lst in seasons.values() for m in lst]
-        unique = set(all_months)
-        missing = [m for m in range(1, 13) if m not in unique]
-        duplicates = [m for m in unique if all_months.count(m) > 1]
-        if missing:
-            print("Alert: missing month(s):", missing)
-        if duplicates:
-            print("Alert: duplicate month(s):", duplicates)
-
-        # --- Generazione finestre mobili ---
-        start_year = int(years_overlap.min())
-        end_year = int(years_overlap.max())
-
-        windows = []
-        ws = start_year
-        while ws <= end_year:
-            we = ws + window_length - 1
-            we_clip = min(we, end_year)
-            coverage = we_clip - ws + 1
-            if coverage < min_coverage:
-                break
-            windows.append((ws, we_clip, f"{ws}-{we}"))
-            ws += step
-
-        if not windows:
-            raise ValueError("Nessuna finestra soddisfa la copertura minima richiesta "
-                             f"({min_coverage} anni).")
-
-        n_win = len(windows)
-        print(f"Finestre mobili generate: {[w[2] for w in windows]}")
-
-        # --- Layout figura (stessa regola dell'originale, senza ramo monthly) ---
-        n_seasons = len(seasons)
-        layout_map = {1: (1, 1), 2: (1, 2), 3: (1, 3), 4: (2, 2), 5: (2, 3), 6: (2, 3)}
-        nrows, ncols = layout_map.get(n_seasons, (2, 3))
-        if agg == 'custom':
-            wid = np.round(5 * ncols, 1)
-            h = np.round(5 * nrows, 1) + 0.5
-            figsize1 = (wid + 3, h)
-        else:
-            figsize1 = {2: (14, 5), 3: (16, 6), 4: (14, 10)}.get(n_seasons, (14, 10))
-
-        # --- Calcolo correlazioni per finestra e stagione ---
-        print("Starting rolling seasonal correlation analysis...")
-        results = {}
-        for ws, we_clip, wlabel_win in windows:
-            year_mask = (years_overlap >= ws) & (years_overlap <= we_clip)
-            MatCorr = {}
-            for name, mlist in seasons.items():
-                idx = year_mask & np.isin(months_overlap, mlist)
-                if np.count_nonzero(idx) <= 10:
-                    continue
-                M = _compute_corr(y_full[idx], spi_like_full[:, idx])
-                max_corr = np.nanmax(M)
-                bk, bw = np.unravel_index(np.nanargmax(M), M.shape)
-                MatCorr[name] = {
-                    "best_k": int(K_range[bk]),
-                    "col_best_weight": int(bw),
-                    "max_correlation": float(max_corr),
-                    "R2_matrix": M,
-                    "sample number": np.count_nonzero(idx),
-                }
-            results[wlabel_win] = MatCorr
-            summary = ", ".join(f"{s}: R2max={v['max_correlation']:.2f}" for s, v in MatCorr.items())
-            print(f" Finestra {wlabel_win}: {summary}")
-
-        # --- Plot: R^2 vs K, una linea per (finestra, schema), gradiente colore ---
-        if plot:
-            fig, ax = plt.subplots(figsize=figsize1, nrows=nrows, ncols=ncols)
-            ax = np.atleast_1d(ax).ravel()
-
-            shades = np.linspace(0.3, 1.0, n_win)  # chiaro (vecchia) -> colore pieno (finestra più recente)
-            season_names = list(seasons.keys())
-            x_end = len(K_range) - 1
-            ref_scheme = 0  # schema usato come ancora per l'etichetta del periodo (EW)
-
-            for i, name in enumerate(season_names):
-                for wi, (ws, we_clip, wlabel_win) in enumerate(windows):
-                    if name not in results[wlabel_win]:
-                        continue
-                    mat = results[wlabel_win][name]['R2_matrix']
-                    for w in range(mat.shape[1]):
-                        color = _shade(scheme_colors[w], shades[wi])
-                        ax[i].plot(mat[:, w], color=color, linewidth=1.6, alpha=0.9)
-                    # etichetta testuale del periodo, ancorata alla fine della curva di riferimento
-                    y_end = mat[-1, ref_scheme]
-                    ax[i].annotate(wlabel_win, xy=(x_end, y_end), xytext=(6, 0),
-                                   textcoords='offset points', fontsize=7,
-                                   color=_shade(scheme_colors[ref_scheme], shades[wi]),
-                                   va='center', ha='left')
-                ax[i].set_xlim(-0.5, x_end + 3.5)  # spazio a destra per le etichette
-                ax[i].grid()
-                ax[i].set_xticks(np.arange(0, len(K_range), 3))
-                ax[i].set_xticklabels(K_range[0:-1:3])
+                ax[i].plot(SIDI[idx], y[idx], 'o', color=c[i], alpha=0.4,
+                           label=f'$R^2$ = {np.round(r2, 2)} \n K ={best_k}; {wlabel[best_weight]}')
+                ax[i].plot(np.arange(-3, 4), np.arange(-3, 4), '--', color='grey')
                 ax[i].tick_params(axis='x', labelsize=14)
                 ax[i].tick_params(axis='y', labelsize=14)
-                ax[i].set_ylabel(r"$R^2$", fontweight="bold", fontsize=16)
-                ax[i].set_xlabel("Month-scale (K)", fontweight="bold", fontsize=16)
-                ax[i].set_title(name, fontweight="bold", fontsize=16)
-
-            # legenda compatta: una entry per schema di pesatura, colore pieno (= finestra più recente)
-            handles = [Line2D([0], [0], color=scheme_colors[w], lw=2, label=wlabel[w])
-                       for w in range(len(wlabel))]
-            ax[0].legend(handles=handles, loc=3, fontsize=10)
-
-            for j in range(len(season_names), len(ax)):
-                fig.delaxes(ax[j])
+                ax[i].grid()
+                ax[i].set_title(season, fontsize=18)
+                ax[i].set_ylabel(f"{streamflow.index_name}1", fontsize=18)
+                ax[i].set_xlabel(f"{self.SIDI_name}", fontsize=18)
+                ax[i].legend(fontsize=12)
 
             fig.suptitle(
-                f"{self.basin_name} - Rolling seasonal correlation: "
-                f"{self.SIDI_name} vs. {streamflow.index_name}1",
-                fontsize=16, fontweight="bold")
-
+                f"{self.basin_name} - {self.SIDI_name} vs. {streamflow.index_name}1 "
+                f"— Best seasonal configurations",
+                fontsize=16)
+            if i < ncols * nrows - 1:
+                fig.delaxes(ax[-1])
             plt.tight_layout()
             plt.show(block=False)
 
-        return results
+            # --- Peak-cluster figure with cross CI: bootstrap only -----------
+            seas3 = [s for s in MatCorr if isinstance(MatCorr[s], dict)
+                     and MatCorr[s].get("summary") is not None]
+            if seas3:
+                f1, ax1 = plt.subplots(nrows=nrows, ncols=ncols,
+                                       figsize=figsize1, squeeze=False)
+                ax1 = ax1.ravel()
+                for i, name in enumerate(seas3):
+                    _plot3_peak_clusters(ax1[i], MatCorr[name]["R2_matrix"],
+                                         K_range, MatCorr[name]["summary"],
+                                         title=name, legend=(i == 0))
+                for j in range(len(seas3), len(ax1)):
+                    f1.delaxes(ax1[j])
+                f1.suptitle(
+                    f"{self.basin_name} — {self.SIDI_name} vs. "
+                    f"{streamflow.index_name}1 — per-scheme peak (cross = 95% CI) "
+                    f"and scale clusters",
+                    fontsize=14)
+                f1.tight_layout()
+                plt.show(block=False)
+
+            # --- Effective weights figure: same nrows/ncols as scatter --------
+            seas_valid = list(MatCorr.keys())
+            n_s = len(seas_valid)
+            fig_ew, axs_ew = plt.subplots(nrows=nrows, ncols=ncols,
+                                          figsize=figsize2, sharey=True,
+                                          squeeze=False)
+            axs_ew_flat = axs_ew.ravel()
+            for idx_s, s in enumerate(seas_valid):
+                effective_weights_at_optimum(
+                    MatCorr[s]["best_k_per_weight"], plot=True,
+                    ax=axs_ew_flat[idx_s], title=s,
+                    n_lags=int(max(MatCorr[s]["best_k_per_weight"])) + 2)
+            for j in range(n_s, nrows * ncols):
+                fig_ew.delaxes(axs_ew_flat[j])
+            fig_ew.suptitle(
+                f"{self.basin_name} — Effective weights at optimum K "
+                f"({self.SIDI_name} vs. {streamflow.index_name}1)",
+                fontsize=14)
+            plt.tight_layout()
+            plt.show(block=False)
+
+        # Overall cluster table (one row per season x K cluster x R2 sub-cluster).
+        # Added last so the per-season plot loops above never iterate over it.
+        # Bootstrap only.
+        if n_boot and n_boot > 0 and any("R2_boot" in v for v in MatCorr.values()):
+            MatCorr["summary"] = bootstrap_summary_table(MatCorr, ci=ci)
+            for name, vals in MatCorr.items():
+                if isinstance(vals, dict) and vals.get("summary") is not None:
+                    _print_peak_summary(vals["summary"], label=str(name))
+
+        return MatCorr
 
     def spi_sqi_corr(self, streamflow, plot=True):
         """
@@ -1473,96 +1802,624 @@ class BaseDroughtAnalysis:
         R2 : ndarray, shape (12, K)
             Determination coefficients. Rows = calendar months (Jan=0…Dec=11),
             columns = scales (k=1…K).
+        seasons : dict[str, list[int]]
+            Suggested season grouping derived from R2 (see
+            utils.drought_indices.seasons_from_r2 for the merge rule), in the
+            exact shape ``analyze_correlation_seasonal(seasons=...)`` expects.
+            Also printed to console on every call.
         """
         self._check_correlation_eligible()
+        R2 = self._monthwise_r2(streamflow, lags=[0])[:, :, 0]
 
-        # --- 1. Temporal overlap ---
-        self_indices, streamflow_indices = find_overlap(self.m_cal, streamflow.m_cal)
-        if len(self_indices) == 0 or len(streamflow_indices) == 0:
-            raise ValueError("No overlapping data found.")
+        # --- Suggested season grouping from optimal k per month ---
+        # See utils.drought_indices.seasons_from_r2 for the merge rule.
+        suggested_seasons = seasons_from_r2(R2)
+        print("Suggested season grouping (from optimal accumulation scale per month):")
+        for label, months in suggested_seasons.items():
+            print(f"  {label}: {months}")
 
-        # --- 2. Extract overlapping indices ---
-        sqi1 = streamflow.spi_like_set[0, streamflow_indices]
-        spi_like_set = self.spi_like_set[:, self_indices]
-        m_cal = self.m_cal[self_indices]
-
-        # --- 3. Compute R²(month, k) ---
-        R2 = []
-        Ki = np.arange(self.K)
-
-        for m in range(1, 13):
-            r2_row = []
-            ii = np.where(m_cal[:, 0] == m)[0]
-            y = sqi1[ii]
-
-            for K in Ki:
-                x = spi_like_set[K][ii]
-                mask = np.isfinite(x) & np.isfinite(y)
-
-                if mask.sum() < 3:
-                    r2_row.append(0)
-                    continue
-
-                rho, pval = stats.pearsonr(x[mask], y[mask])
-                r2_val = np.round(rho ** 2, 2) if pval < 0.05 else 0
-                r2_row.append(r2_val)
-
-            R2.append(r2_row)
-
-        R2 = np.array(R2)
-
-        # --- 4. Plot with month wrapping ---
         if plot:
-            # Extend matrix: pad Nov-Dec before Jan and Jan-Feb after Dec
-            extension = np.vstack((R2[-2:, :], R2))
-            mat = np.vstack((extension, R2[0:2, :]))
-            mat = np.flipud(mat)
-            x_months = np.concatenate((np.arange(11, 13), np.arange(1, 13), np.arange(1, 3)))
+            self._plot_monthwise_r2(
+                R2, f"{self.basin_name} — {self.index_name}$_k$ vs "
+                    f"{streamflow.index_name}$_1$  ($R^2$)")
 
-            plt.figure(figsize=(10, 4))
-            levels = np.arange(0.05, 1.15, 0.1)
-            centers = (levels[:-1] + levels[1:]) / 2
+        return R2, suggested_seasons
 
-            y_idx = np.arange(len(x_months))
-            X, Y = np.meshgrid(np.arange(1, self.K + 1), y_idx)
+    def _lagged_pairs(self, streamflow, lag):
+        """
+        Index pairs ``(si, fj)`` such that ``self.m_cal[si]`` is exactly ``lag``
+        calendar months BEFORE ``streamflow.m_cal[fj]`` (lag=0: the plain temporal
+        overlap). Matched through the calendar, not by array position, so gaps or
+        different start dates never misalign the two series.
+        """
+        def _key(m_cal):
+            return m_cal[:, 1].astype(int) * 12 + (m_cal[:, 0].astype(int) - 1)
 
-            cf = plt.contourf(X, Y, mat, cmap='pink_r', levels=levels)
+        self_pos = {k: i for i, k in enumerate(_key(self.m_cal))}
+        pairs = [(self_pos[kk - lag], j) for j, kk in enumerate(_key(streamflow.m_cal))
+                 if (kk - lag) in self_pos]
+        if not pairs:
+            return np.array([], dtype=int), np.array([], dtype=int)
+        si, fj = zip(*pairs)
+        return np.asarray(si, dtype=int), np.asarray(fj, dtype=int)
 
-            plt.xticks(np.arange(1, self.K + 1))
-            plt.yticks(y_idx,
-                       np.flipud(['Nov', 'Dec', 'Jan.', 'Feb.', 'Mar.', 'Apr.',
-                                  'May', 'Jun.', 'Jul.', 'Aug.', 'Sep.', 'Oct.',
-                                  'Nov.', 'Dec.', 'Jan.', 'Feb.']))
+    def _monthwise_r2(self, streamflow, lags):
+        """
+        R²(month, k, lag) between this object's index at scale k, ``lag`` months
+        BEFORE, and SQI1: for every calendar month m of the TARGET,
 
-            # Fade out the padded rows
-            plt.axhspan(13.5, 15, facecolor='white', alpha=0.45, zorder=10)
-            plt.axhspan(0, 1.5, facecolor='white', alpha=0.45, zorder=10)
-            plt.axhline(y=1.5, color='dimgray', linewidth=0.7)
-            plt.axhline(y=13.5, color='dimgray', linewidth=0.7)
+            R2[m-1, k-1, l] = corr²( SPI_k(t - lags[l]), SQI1(t) )   over t with month(t) = m
 
-            plt.xlabel('month scale (K)')
-            plt.title(f"{self.basin_name} — {self.index_name}$_k$ vs {streamflow.index_name}$_1$  ($R^2$)",
-                      fontsize=12, fontweight='bold')
-            # plt.title(f"{self.basin_name} — {self.index_name}ₖ vs {streamflow.index_name}₁  (R²)",
-            #           fontsize=12, fontweight='bold')
+        computed on the timesteps where both are available. Pairs are matched
+        through the calendar (not by array position), so a lag of L months is
+        exactly L calendar months. Non-significant correlations (p >= 0.05) and
+        cells with fewer than 3 valid pairs are 0, values are rounded to 2
+        decimals — the convention of ``spi_sqi_corr``, which is ``lags=[0]``.
 
-            cbar = plt.colorbar(cf, ticks=centers)
-            cbar.ax.set_yticklabels([f"{c:.2f}" for c in centers])
-            cbar.set_label(r"$R^2$", rotation=0, labelpad=12, fontsize=12)
+        Returns
+        -------
+        ndarray, shape (12, K, len(lags))
+        """
+        sf_month = streamflow.m_cal[:, 0].astype(int)
+        sqi1 = streamflow.spi_like_set[0]
 
-            plt.gca().set_yticks(np.arange(1.5, 14, 1), minor=True)
-            plt.grid(axis='y', which='minor', linestyle='--', alpha=0.7)
-            plt.gca().tick_params(axis='y', length=0)
-
-            plt.tight_layout()
-
+        n_scales = self.spi_like_set.shape[0]
+        R2 = np.zeros((12, n_scales, len(lags)))
+        any_overlap = False
+        for li, lag in enumerate(lags):
+            si, fj = self._lagged_pairs(streamflow, lag)
+            if si.size == 0:
+                continue
+            any_overlap = True
+            for m in range(1, 13):
+                sel = sf_month[fj] == m
+                y = sqi1[fj[sel]]
+                for k in range(n_scales):
+                    x = self.spi_like_set[k, si[sel]]
+                    mask = np.isfinite(x) & np.isfinite(y)
+                    if mask.sum() < 3:
+                        continue
+                    rho, pval = stats.pearsonr(x[mask], y[mask])
+                    R2[m - 1, k, li] = np.round(rho ** 2, 2) if pval < 0.05 else 0
+        if not any_overlap:
+            raise ValueError("No overlapping data found between the two objects.")
         return R2
 
+    def _plot_monthwise_r2(self, R2, title):
+        """Contourf heatmap of a (12, K) R²(month, k) matrix, with Nov-Dec padded
+        before January and Jan-Feb after December for visual continuity."""
+        K = R2.shape[1]
+        mat = np.flipud(np.vstack((R2[-2:, :], R2, R2[0:2, :])))
+        y_idx = np.arange(16)
+
+        plt.figure(figsize=(10, 4))
+        levels = np.arange(0.05, 1.15, 0.1)
+        centers = (levels[:-1] + levels[1:]) / 2
+        X, Y = np.meshgrid(np.arange(1, K + 1), y_idx)
+        cf = plt.contourf(X, Y, mat, cmap='pink_r', levels=levels)
+
+        plt.xticks(np.arange(1, K + 1))
+        plt.yticks(y_idx, np.flipud(['Nov', 'Dec', 'Jan.', 'Feb.', 'Mar.', 'Apr.',
+                                     'May', 'Jun.', 'Jul.', 'Aug.', 'Sep.', 'Oct.',
+                                     'Nov.', 'Dec.', 'Jan.', 'Feb.']))
+        # fade out the padded rows
+        plt.axhspan(13.5, 15, facecolor='white', alpha=0.45, zorder=10)
+        plt.axhspan(0, 1.5, facecolor='white', alpha=0.45, zorder=10)
+        plt.axhline(y=1.5, color='dimgray', linewidth=0.7)
+        plt.axhline(y=13.5, color='dimgray', linewidth=0.7)
+
+        plt.xlabel('month scale (K)')
+        plt.title(title, fontsize=12, fontweight='bold')
+        cbar = plt.colorbar(cf, ticks=centers)
+        cbar.ax.set_yticklabels([f"{c:.2f}" for c in centers])
+        cbar.set_label(r"$R^2$", rotation=0, labelpad=12, fontsize=12)
+        plt.gca().set_yticks(np.arange(1.5, 14, 1), minor=True)
+        plt.grid(axis='y', which='minor', linestyle='--', alpha=0.7)
+        plt.gca().tick_params(axis='y', length=0)
+        plt.tight_layout()
+
+    def spi_sqi_corr_lagged(self, streamflow, max_lag=24, lag=0, plot=True):
+        """
+        ``spi_sqi_corr`` with a time lag: month-wise R² between this object's
+        index at scale k, ``l`` months BEFORE, and SQI1, for every lag
+        l = 0..max_lag.
+
+            R2[m-1, k-1, l] = corr²( SPI_k(t - l), SQI1(t) )   over t with month(t) = m
+
+        The calendar month m is the month of the TARGET (SQI1). Since SPI_k(t-l)
+        integrates the months t-l-k+1 .. t-l, the lag shifts the END of the
+        accumulation window back in time: it tests whether a window that closed
+        l months earlier explains the streamflow of month m better than one
+        closing in month m itself. ``lag=0`` reproduces ``spi_sqi_corr`` exactly.
+        Same significance gate (p < 0.05, else 0) and rounding.
+
+        Applicable to: Precipitation, Pet, Balance.
+
+        Parameters
+        ----------
+        streamflow : BaseDroughtAnalysis
+            Object carrying SQI1 (``spi_like_set[0]``).
+        max_lag : int, default 24
+            Largest lag (months) evaluated; lags 0..max_lag.
+        lag : int, default 0
+            The lag drawn in the heatmap when ``plot=True`` (0..max_lag).
+        plot : bool, default True
+
+        Returns
+        -------
+        R2 : ndarray, shape (12, K, max_lag + 1)
+            ``R2[:, :, l]`` is the (12, K) matrix at lag l.
+        """
+        self._check_correlation_eligible()
+        if not 0 <= lag <= max_lag:
+            raise ValueError(f"lag must be in [0, {max_lag}], got {lag}.")
+
+        R2 = self._monthwise_r2(streamflow, lags=list(range(max_lag + 1)))
+
+        if plot:
+            title = (f"{self.basin_name} — {self.index_name}$_k$ vs "
+                     f"{streamflow.index_name}$_1$  ($R^2$)")
+            if lag > 0:
+                title += f"  (lag = {lag} months)"
+            self._plot_monthwise_r2(R2[:, :, lag], title)
+        return R2
+
+    def spi_sqi_corr_curves(self, streamflow, ax=None):
+        """
+        Line-plot companion to ``spi_sqi_corr``: one curve per calendar month
+        of R²(SQI1, self.index_name at scale k), k = 1…K, instead of a single
+        contourf heatmap of the same R2(month, k) matrix.
+
+        Reuses ``spi_sqi_corr(streamflow, plot=False)`` for the computation
+        (same Pearson R², same p<0.05 significance gate — a non-significant
+        cell is 0), so the two are always in sync; this method only changes
+        how it is drawn: 12 curves of R² vs scale, easier to read than the
+        heatmap when the smooth progression across scales matters more than
+        the month-vs-scale surface at a glance.
+
+        Applicable to: Precipitation, Pet, Balance.
+
+        Parameters
+        ----------
+        streamflow : BaseDroughtAnalysis
+            Object carrying streamflow-based SPI-like indices
+            (``spi_like_set[0]`` = SQI1).
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw into. A new figure/axes is created if None.
+
+        Returns
+        -------
+        R2 : dict[int, ndarray]
+            Keyed by calendar month (1=Jan, ..., 12=Dec) - the m_cal month
+            convention used throughout the library. Each value is the R² vs
+            scale curve for that month, shape (K,), same numbers as row
+            ``m - 1`` of ``spi_sqi_corr``'s R2 matrix.
+        """
+        import calendar
+
+        R2_mat, _ = self.spi_sqi_corr(streamflow, plot=False)
+        K_range = np.arange(1, self.K + 1)
+        months = list(calendar.month_abbr[1:])   # Jan..Dec
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(9, 5))
+        else:
+            fig = ax.figure
+
+        colors = plt.cm.hsv(np.linspace(0, 1, 12, endpoint=False))
+        for m in range(12):
+            ax.plot(K_range, R2_mat[m, :], marker='o', ms=3, lw=1.5,
+                    color=colors[m], label=months[m])
+
+        ax.set_xticks(K_range)
+        ax.set_xticklabels([f"{self.index_name}{k}" for k in K_range], rotation=90)
+        ax.set_ylabel(r"$R^2$", fontweight="bold")
+        ax.set_title(f"{self.basin_name} — {self.index_name}$_k$ vs "
+                     f"{streamflow.index_name}$_1$  ($R^2$ by calendar month)",
+                     fontsize=12, fontweight='bold')
+        ax.grid(alpha=0.3)
+        ax.legend(ncol=3, fontsize=8)
+        fig.tight_layout()
+
+        # 1-indexed by calendar month (m_cal convention), not the 0-based
+        # row index of the R2 matrix.
+        return {m: R2_mat[m - 1, :] for m in range(1, 13)}
+
     # =====================================================================
+    # ▸ CDN, normals and deficits
     # =====================================================================
-    # BENCHMARKING D(SPI) | SIDI
+    def _calculate_CDN(self):
+        """
+        Compute the Cumulative Deviation from Normal (CDN).
+
+        CDN is the cumulative sum of SPI-1 starting from the baseline period.
+        It tracks the long-term memory of standardized anomalies.
+
+        Returns:
+            ndarray: CDN values (same length as self.ts). Values before the
+            baseline start are set to zero.
+        """
+        # Get baseline indices and ensemble mean
+        tb1_id, tb2_id = baseline_indices(self.m_cal,self.start_baseline_year,self.end_baseline_year)
+        return self._cdn_from_spi1(self.spi_like_set[0], tb1_id)
+
+    def normal_values(self):
+        """
+          Compute the "normal" values of the  climatology  using the inverse function of the SPI-like index.
+
+          This method calculates the "normal" values for the variable of interest based on the
+          exact inverse of the SPI-like index at scale 1 (SPI_like_index_1 == 0), via
+          `spi_to_native` (the fitted distribution's ppf, not the polynomial `c2r_index`
+          approximation). Each timestep gets the normal of its own calendar month, read
+          from `self.m_cal` — so the result is aligned with `self.ts` whatever month the
+          series starts on.
+
+          Returns
+          -------
+          numpy.ndarray
+              An array of "normal" values corresponding to the timeseries length (`self.ts`),
+              aligned month-by-month with it.
+
+
+          """
+        return self._monthly_normals()[self.m_cal[:, 0].astype(int) - 1]
+
+    def deficit_from_spi(self, window, spi=None):
+        """
+        Estimate the cumulative water deficit/surplus over a moving window,
+        derived from the SPI-like index at the matching accumulation scale.
+
+        Rather than summing raw monthly anomalies (which, for precipitation, are
+        bounded below by zero and unbounded above, producing a systematic positive
+        skew), this method maps the anomaly through the SPI-like space. The SPI-like
+        index at scale `window` is converted back to native cumulative units via the
+        exact inverse of the fitted distribution (`spi_to_native`), and the
+        deficit/surplus is taken relative to the SPI=0 reference (which, by
+        construction, coincides with `normal_values()`).
+
+        The resulting deficit is expressed in physical units and reflects the
+        statistical rarity of the accumulated anomaly. Note that, for methods whose
+        inverse transform is non-linear (gamma for f_spi, Pearson III for f_spei,
+        KDE for f_kde), the deficit in native units remains physically asymmetric
+        even though the SPI itself is symmetric; this asymmetry is intentional and
+        reflects the real bounded nature of the variable. For f_zscore the inverse
+        is linear, so the deficit is symmetric in native units too.
+
+        Parameters
+        ----------
+        window : int
+            Accumulation scale in months, equal to the moving-window length.
+        spi : ndarray, optional
+            Pre-computed SPI-like series at scale `window`. If None, it is retrieved
+            from `self.spi_like_set` when `window <= self.K`, or computed on the fly
+            via `_compute_spi(month_scale=window)` otherwise.
+
+        Returns
+        -------
+        deficit : ndarray, shape (n,)
+            Cumulative deficit (negative) or surplus (positive) over the preceding
+            `window` months, in native cumulative units: millimetres for
+            Precipitation, cubic metres (total volume) for Streamflow. For Streamflow,
+            the cumulative sum of monthly mean discharges (m^3/s) returned by the
+            calibration is converted to total volume by multiplying by the average
+            number of seconds per month. Entries are NaN wherever the SPI-like index
+            is undefined (the first `window-1` months, or any gaps propagated from
+            missing values in the input series).
+
+        Notes
+        -----
+        - The SPI=0 reference equals `normal_values()` by construction, so this deficit
+          is consistent with the rest of the framework's climatological baseline.
+        - For scales exceeding `self.K`, the SPI fit reuses the same baseline period
+          (`start_baseline_year`, `end_baseline_year`) as initialisation. At long
+          scales the number of independent samples per reference month is small, so
+          the gamma fit should be interpreted with care.
+        """
+
+        from drought_scan.core import Streamflow
+
+        n = len(self.ts)
+        months = self.m_cal[:, 0].astype(int)
+
+        if spi is None:
+            if window <= self.K:
+                spi = self.spi_like_set[window - 1, :]
+            else:
+                spi, _ = self._compute_spi(month_scale=window)
+
+        # Grouped by calendar month (not per-timestep): spi_to_native accepts a
+        # single ref_month per call, and for f_kde each call rebuilds an
+        # interpolation grid, so batching all timesteps of the same month into
+        # one call avoids rebuilding it once per timestep.
+        deficit = np.full(n, np.nan)
+        for m in range(1, 13):
+            idx = np.where((months == m) & ~np.isnan(spi))[0]
+            if idx.size == 0:
+                continue
+            native_vals = self.spi_to_native(spi[idx], window, m)
+            normal_val = self.spi_to_native(0.0, window, m)
+            deficit[idx] = np.asarray(native_vals) - normal_val
+
+        # Streamflow: the deficit is in cumulated m³/s (sum of `window` monthly means).
+        # Convert to total volume (m³) by multiplying by the mean seconds per month,
+        # taken over the months actually inside the window ending at each timestep
+        # (not a fixed 12-month mean): the same calendar convention as
+        # volume_anomaly_rolling, which this method is compared against. The mean,
+        # not the sum, is used because the deficit is
+        # una somma di portate medie mensili: distribuendolo uniformemente sui `window`
+        # mesi, il volume è deficit * (secondi totali / window).
+        if isinstance(self, Streamflow):
+            seconds_per_month = np.array(
+                [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]) * 86400.0
+            secs = seconds_per_month[months - 1]
+            win_mean_secs = np.full(n, np.nan)
+            win_mean_secs[window - 1:] = np.convolve(
+                secs, np.ones(window) / window, mode='valid')
+            deficit = deficit * win_mean_secs
+
+        return deficit
+
+    def find_trends(self, windows=None, neutral_band=0.5, window=None, var=None):
+        """
+        The numbers behind `plot_trends()`: the water deficit/surplus over one or
+        more moving windows, in native units, obtained from the reverse SPI.
+
+        For each window W this is exactly what `plot_cdn_trends` draws as bars: the
+        SPI-like index at accumulation scale W, mapped back to native cumulative
+        units through the fitted distribution (`deficit_from_spi`, i.e. the exact
+        `spi_to_native` inverse) relative to the SPI=0 reference, then blanked
+        wherever |SPI_W| < `neutral_band` so that only anomalies outside the
+        near-neutral band carry a magnitude. Same convention `plot_spatial`
+        applies to its maps via its own `neutral_band`.
+
+        Note: this method used to run a rolling OLS regression over `self.CDN`;
+        regression p-values on a cumulative sum are spurious by construction, so
+        it now returns exactly what the figure draws. For a significance test of
+        a sustained wet/dry phase use `utils.statistics._rolling_phase_test`,
+        which tests the mean of SPI-1 over a window against zero.
+
+        Parameters
+        ----------
+        windows : int or sequence of int, optional
+            Accumulation scale(s) in months, each equal to its own moving-window
+            length. Defaults to `self.K`. Scales beyond `self.K` are fitted on the
+            fly by `_compute_spi`.
+        neutral_band : float, default 0.5
+            Half-width, in SPI units, of the near-neutral band zeroed out of
+            `anomaly_masked`. Pass 0 to keep every value.
+        window : int, optional
+            Deprecated alias for a single `windows` value.
+        var : ignored
+            Deprecated. The old signature accepted an arbitrary external series;
+            the reverse SPI is defined only against THIS object's fitted
+            distributions, so there is nothing meaningful to compute for a
+            foreign array. Passing it raises.
+
+        Returns
+        -------
+        dict
+            ``{W: {"spi", "anomaly", "anomaly_masked", "unit"}}``, one entry per
+            requested window, every array aligned with `self.ts`. `anomaly` is the
+            full reverse-SPI series; `anomaly_masked` is the same with the neutral
+            band zeroed - the bars. Units are millimetres for Precipitation
+            (and the other cumulative drivers) and millimetre-equivalent
+            ("mm-eq") for Streamflow: the total volume returned by
+            `deficit_from_spi` (m³) divided by the basin area, i.e.
+            m³ / (area_kmq · 1e6 m²) · 1000. `unit` says which.
+        """
+
+        if var is not None:
+            raise TypeError(
+                "find_trends(var=...) is no longer supported: the reverse SPI is "
+                "defined against this object's own fitted distributions, so an "
+                "external series has no deficit to report. Build a DroughtScan "
+                "object around that series instead, or use "
+                "utils.statistics._rolling_phase_test for a level test."
+            )
+        if window is not None:
+            import warnings
+            warnings.warn(
+                "find_trends(window=...) is deprecated; use windows=... .",
+                DeprecationWarning, stacklevel=2
+            )
+            if windows is None:
+                windows = window
+
+        if windows is None:
+            windows = self.K
+        ws = [int(w) for w in np.atleast_1d(windows).ravel()]
+        if any(w < 1 for w in ws):
+            raise ValueError("windows must be positive month-scales.")
+
+        unit = 'mm-eq' if isinstance(self, Streamflow) else "mm"
+        results = {}
+        for w in ws:
+            if w <= self.K:
+                spi_w = self.spi_like_set[w - 1, :]
+            else:
+                spi_w, _ = self._compute_spi(month_scale=w)
+            anomaly = self.deficit_from_spi(window=w, spi=spi_w)
+            if isinstance(self, Streamflow):
+                # m³ (deficit_from_spi) -> mm-equivalent over the basin area
+                anomaly = anomaly / (self.area_kmq * 1e6) * 1000
+
+            masked = anomaly.copy()
+            if neutral_band:
+                with np.errstate(invalid="ignore"):
+                    masked[(spi_w > -neutral_band) & (spi_w < neutral_band)] = 0
+            results[w] = {"spi": spi_w, "anomaly": anomaly,
+                          "anomaly_masked": masked, "unit": unit}
+        return results
+
+    def volume_anomaly_rolling(self, window):
+        """
+        Compute the observed cumulative water deficit/surplus over a moving window
+        by direct summation of monthly anomalies.
+
+        For each time step, the anomaly of every month within the preceding `window`
+        months is summed, where the monthly anomaly is the difference between the
+        observed value and its climatological normal (`normal_values()`, i.e. the
+        SPI=0 reference). This yields the actual physical water balance over the
+        window, without any statistical transformation.
+
+        This is the direct, observation-based counterpart to `deficit_from_spi`:
+        `volume_anomaly_rolling` measures how many real cubic metres / millimetres
+        were missing or in excess (the quantity relevant for water-balance and
+        reservoir-management purposes), whereas `deficit_from_spi` measures the
+        statistical rarity of the accumulated anomaly. The two are strongly
+        correlated but diverge at extremes; for precipitation the raw sum is
+        physically asymmetric (bounded below by zero, unbounded above). This method
+        is useful as a sanity check and as a complementary metric to the SPI-based
+        estimate.
+
+        Parameters
+        ----------
+        window : int
+            Moving-window length in months.
+
+        Returns
+        -------
+        anomaly : ndarray, shape (n,)
+            Cumulative deficit (negative) or surplus (positive) over the preceding
+            `window` months. Units are millimetres for Precipitation. For Streamflow,
+            each monthly mean discharge anomaly (m^3/s) is multiplied by the number of
+            seconds in its calendar month before summation, so the result is a total
+            volume in cubic metres. Entries are NaN for the first `window-1` months;
+            gaps from missing values in the input series propagate into the sum.
+
+        Notes
+        -----
+        - The reference (`normal_values()`) equals the SPI=0 native value by
+          construction, ensuring consistency with `deficit_from_spi` and the rest of
+          the framework's baseline.
+        - Unlike `deficit_from_spi`, no SPI fit is involved, so this method is robust
+          at any window length but does not correct the bounded-variable asymmetry.
+        """
+        n = len(self.ts)
+        months = self.m_cal[:, 0].astype(int)
+        normal = self.normal_values()
+
+        anomaly = np.full(n, np.nan)
+
+        if isinstance(self, Streamflow):
+            DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+            seconds = np.array([DAYS_IN_MONTH[m - 1] * 86400 for m in months])
+            delta_per_month = (self.ts - normal) * seconds  # m³/month
+        else:  # Precipitation
+            delta_per_month = self.ts - normal  # mm/month
+
+        for i in range(window - 1, n):
+            anomaly[i] = np.sum(delta_per_month[i - window + 1: i + 1])
+
+        return anomaly
+    # =====================================================================
+    # other
+    # =====================================================================
+    def export_scan_plot_csv(self, weight_index=None, optimal_k=None, name=None, out_dir="exports"):
+        """
+        Exports the minimum data needed in CSV format to replicate the plot_scan in another workspace.
+
+        Args:
+            weight_index (int, optional): SIDI column to export. Default: resolved by
+                ``_resolve_weight_index`` (0 after a seasonal calibration, the committed
+                one after a global calibration, else the construction default),
+                like every other SIDI consumer.
+            optimal_k (int, optional): if specified, calculates a new SIDI with optimal K
+            name (str, optional): name of the basin for filename
+            out_dir (str): directory to save the exported data
+        """
+        os.makedirs(out_dir, exist_ok=True)
+        weight_index = self._resolve_weight_index(weight_index)
+
+        # time series needed
+        df_mcal = pd.DataFrame(self.m_cal, columns=["month", "year"])
+        df_cdn = pd.DataFrame({"CDN": self.CDN})
+        spi_df = pd.DataFrame(self.spi_like_set)
+
+        # SIDI:
+        if optimal_k is not None:
+            weights = generate_weights(int(optimal_k))
+            sidis = []
+            for j in range(len(self.m_cal)):
+                vec = self.spi_like_set[0:optimal_k, j]
+                sidis.append([weighted_metrics(vec, weights[:, weight_index])[0]])
+            sidi_vec = np.squeeze(np.array(sidis))
+        else:
+            self._calibration_note()
+            sidi_vec = self.SIDI[:, weight_index]
+
+        df_sidi = pd.DataFrame({"SIDI": sidi_vec})
+
+        # general metadata
+        metadata = {
+            "index_name": self.index_name,
+            "K": self.K,
+            "threshold": float(self.threshold),
+            "weight_index": int(weight_index),
+            "optimal_k": int(optimal_k) if optimal_k is not None else self.K,
+            "start_baseline_year": int(self.start_baseline_year),
+            "end_baseline_year": int(self.end_baseline_year)
+        }
+
+        if hasattr(self, "shape"):
+            metadata["area_kmq"] = self.area_kmq
+        else:
+            metadata["area_kmq"] = np.nan
+        # Save
+        prefix = name.replace(" ", "_") if name else "DS_export"
+        df_mcal.to_csv(os.path.join(out_dir, f"{prefix}_m_cal_{self.index_name}.csv"), index=False)
+        df_cdn.to_csv(os.path.join(out_dir, f"{prefix}_cdn_{self.index_name}.csv"), index=False)
+        spi_df.to_csv(os.path.join(out_dir, f"{prefix}_heatmap_{self.index_name}.csv"), index=False, header=False)
+        df_sidi.to_csv(os.path.join(out_dir, f"{prefix}_sidi_{self.index_name}.csv"), index=False)
+
+        with open(os.path.join(out_dir, f"{prefix}_meta_{self.index_name}.json"), "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        print(f"Data exported successfully in {out_dir}/ with prefix '{prefix}'")
+
+    def _savedsplot(self):
+
+        k = self.K if getattr(self, 'optimal_k', None) is None else self.optimal_k
+        if np.ndim(k) > 0:   # per-weight K: keep the filename readable
+            k = "-".join(str(int(v)) for v in np.ravel(k))
+        w = self._resolve_weight_index()
+        baseline = self.start_baseline_year, self.end_baseline_year
+        print(f"saving plot in {os.getcwd()}")
+
+        # check the number of plots:
+        figs = plt.get_fignums()
+        if len(figs) == 1:
+            # --- singola figura ---
+            fname = f"DS_{self.basin_name}_k{k}_w{w}_baseline{baseline}.png"
+            plt.figure(figs[0]).savefig(
+                fname, dpi=300, facecolor='w', edgecolor='w',
+                bbox_inches='tight', pad_inches=0.1, metadata=None
+            )
+            print(f"  -> saved {fname}")
+
+        elif len(figs) == 3:
+            # --- three single figures ---
+            fnames = [
+                f"CDN_{self.basin_name}_baseline{baseline}.png",
+                f"HeatMap_{self.basin_name}_baseline{baseline}.png",
+                f"SIDI_{self.basin_name}_k{k}_w{w}_baseline{baseline}.png"
+            ]
+            for fig_num, fname in zip(figs, fnames):
+                plt.figure(fig_num).savefig(
+                    fname, dpi=300, facecolor='w', edgecolor='w',
+                    bbox_inches='tight', pad_inches=0.1, metadata=None
+                )
+                print(f"  -> saved {fname}")
+
+        else:
+            print(f"Warning: unexpected number of plots ({len(figs)}). No files saved.")
+
+    # =====================================================================
+    # ▸ BENCHMARKS for D(SPI)
+    # =====================================================================
     def benchmark_convolution(self, streamflow, var=None, Kmax=None, plot=True,
-                              agg=None, seasons=None):
+                              agg=None, seasons=None, n_boot=0, block_length=None,
+                              ci=(2.5, 97.5), circular=True, random_state=None):
         """
         Unified linear convolution benchmark via OLS (Benchmark A and B).
 
@@ -1611,6 +2468,22 @@ class BaseDroughtAnalysis:
             Custom month mapping when ``agg='custom'`` or when passing a dict
             directly (sets agg='custom' automatically). If None and agg is None,
             no seasonal split is performed.
+        n_boot : int, default 0
+            If > 0, attach a block-bootstrap confidence interval to the point
+            estimate, using the SAME paired year-aligned moving-block resampling
+            of the raw (P, Q) overlap as ``analyze_correlation``'s bootstrap
+            (``utils.statistics._bootstrap_r2``): ``n_boot`` synthetic records
+            are drawn in whole-year blocks, the whole benchmark is re-fitted on
+            each, and percentiles are taken. CI is reported for the SCALARS only
+            — ``optimal_K``, ``R2_adj`` at that K, and R²/RMSE/KGE — never for the
+            kernel ordinates h(j) or the OLS rescaling coefficients.
+        block_length : int, optional
+            Block length in months. Default ``max(24, 2 * self.K)`` (rounded to a
+            whole number of years, min 2). Pass e.g. 72 for 6-year blocks.
+        ci : tuple, default (2.5, 97.5)
+            Percentile pair for the interval.
+        circular, random_state
+            As in ``analyze_correlation``.
 
         Returns
         -------
@@ -1622,9 +2495,13 @@ class BaseDroughtAnalysis:
                 'beta'            : np.ndarray, shape (optimal_K + 1,)
                 'condition_number': float
                 'metrics'         : dict
+                'ci'      : dict {name: (lo, hi)}   (only if n_boot > 0)
+                'boot'    : dict {name: ndarray (n_boot,)}   (only if n_boot > 0)
+                'boot_meta' : dict (block length, contamination table)  (n_boot > 0)
         Else:
             dict keyed by season name, each value being the same dict as above,
-            with an additional key 'sample_number'.
+            with an additional key 'sample_number' (and per-season 'ci'/'boot'/
+            'boot_meta' when n_boot > 0).
 
         Notes
         -----
@@ -1693,97 +2570,12 @@ class BaseDroughtAnalysis:
         K_range = np.arange(1, Kmax + 1)
         n = len(driver)
 
-        def _monotonic_plateau(x):
-            """
-            Returns the index of the last element in the initial monotonic
-            increasing sequence of x. Used to identify the plateau of R²_adj
-            vs K, stopping before overfitting or numerical noise takes over.
-            """
-            last = 0
-            for i in range(1, len(x)):
-                if np.isfinite(x[i]) and x[i] >= x[i - 1]:
-                    last = i
-                else:
-                    break
-            return last
-
         def _run_benchmark(driver_sub, target_sub, season_mask=None):
-            """OLS convolution for a given data subset. Returns the full result dict."""
-            MatCorr = []
-            for K in K_range:
-                rows, y_rows = [], []
-                for t in range(K - 1, len(driver_sub)):
-                    if season_mask is not None and not season_mask[t]:
-                        continue
-                    if np.isnan(target_sub[t]):
-                        continue
-                    lag_vec = driver_sub[t - K + 1:t + 1][::-1]
-                    if np.any(np.isnan(lag_vec)):
-                        continue
-                    rows.append(lag_vec)
-                    y_rows.append(target_sub[t])
-
-                if len(rows) < K + 2:
-                    MatCorr.append(np.nan)
-                    continue
-
-                X = np.column_stack([np.array(rows), np.ones(len(rows))])
-                y_v = np.array(y_rows)
-                beta, _, _, _ = np.linalg.lstsq(X, y_v, rcond=None)
-                y_hat = X @ beta
-                ss_res = np.sum((y_v - y_hat) ** 2)
-                ss_tot = np.sum((y_v - y_v.mean()) ** 2)
-                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-                n_v, p = len(y_v), K
-                MatCorr.append(1 - (1 - r2) * (n_v - 1) / (n_v - p - 1))
-
-            MatCorr = np.array(MatCorr)
-
-            # === FIX: plateau-based selection instead of global argmax ===
-            # Aligns `result['optimal_K']` with the K shown by the plot,
-            # and stabilises beta against multicollinearity at large K.
-            plateau_idx = _monotonic_plateau(MatCorr)
-            best_K = int(K_range[plateau_idx])
-            # =============================================================
-
-            rows, y_rows, t_idx = [], [], []
-            for t in range(best_K - 1, len(driver_sub)):
-                if season_mask is not None and not season_mask[t]:
-                    continue
-                if np.isnan(target_sub[t]):
-                    continue
-                lag_vec = driver_sub[t - best_K + 1:t + 1][::-1]
-                if np.any(np.isnan(lag_vec)):
-                    continue
-                rows.append(lag_vec)
-                y_rows.append(target_sub[t])
-                t_idx.append(t)
-
-            X_opt = np.column_stack([np.array(rows), np.ones(len(rows))])
-            y_opt = np.array(y_rows)
-            beta_opt, _, _, sv = np.linalg.lstsq(X_opt, y_opt, rcond=None)
-            cond_num = float(np.max(sv) / np.min(sv[sv > 0])) if len(sv) > 0 else np.nan
-
-            if cond_num > 30:
-                import warnings
-                warnings.warn(
-                    f"benchmark_convolution (var='{var}'): condition number = {cond_num:.1f} > 30. "
-                    f"Multicollinearity at K={best_K} — beta coefficients may be unstable.",
-                    UserWarning
-                )
-
-            # Compute complementary skill metrics at optimal K
-            y_pred_opt = X_opt @ beta_opt
-            metrics = self._eval_metrics(y_opt, y_pred_opt)
-
-            return {
-                'R2_adj': MatCorr,
-                'optimal_K': best_K,
-                'K_range': K_range,
-                'beta': beta_opt,
-                'condition_number': cond_num,
-                'metrics': metrics,
-            }
+            """OLS convolution for a given data subset (thin wrapper over the
+            lifted static core, kept for readability of the two call sites below)."""
+            return self._ols_convolution_fit(
+                driver_sub, target_sub, K_range, season_mask=season_mask,
+                label=f"benchmark_convolution (var='{var}')")
 
         # ---------------------------------------------------------------
         # CASE 1: no seasonal split — original behaviour
@@ -1791,6 +2583,13 @@ class BaseDroughtAnalysis:
         if agg is None:
             print("Starting correlation analysis...")
             result = _run_benchmark(driver, target)
+
+            if n_boot > 0:
+                self._attach_benchmark_ci(
+                    'conv_P' if var == 'P' else 'conv_SPI', streamflow,
+                    self_indices, streamflow_indices, Kmax, result, None, None,
+                    n_boot=n_boot, block_length=block_length, ci=ci,
+                    circular=circular, random_state=random_state)
 
             if plot:
                 best_K = result['optimal_K']
@@ -1800,6 +2599,9 @@ class BaseDroughtAnalysis:
                 fig, axes = plt.subplots(1, 2, figsize=(10, 3))
                 axes[0].plot(K_range, MatCorr, 'k-o', lw=2)
                 axes[0].axvline(best_K, color='r', ls='--', label=f'optimal K={best_K}')
+                if result.get('ci'):
+                    _plot_benchmark_ci_box(axes[0], result['ci'], best_K,
+                                           MatCorr[best_K - 1])
                 axes[0].set_xlabel('K (lag months)')
                 axes[0].set_ylabel('R²_adj')
                 axes[0].set_title(title_A)
@@ -1846,6 +2648,13 @@ class BaseDroughtAnalysis:
                   f"(K={res['optimal_K']})")
             results[name] = res
 
+        if n_boot > 0 and results:
+            self._attach_benchmark_ci(
+                'conv_P' if var == 'P' else 'conv_SPI', streamflow,
+                self_indices, streamflow_indices, Kmax, results, agg, seasons_dict,
+                n_boot=n_boot, block_length=block_length, ci=ci,
+                circular=circular, random_state=random_state)
+
         if plot:
             n_seasons = len(results)
             if n_seasons == 0:
@@ -1863,6 +2672,9 @@ class BaseDroughtAnalysis:
 
                 axes[i, 0].plot(K_range, MatCorr, 'k-o', lw=2)
                 axes[i, 0].axvline(best_K, color='r', ls='--', label=f'optimal K={best_K}')
+                if res.get('ci'):
+                    _plot_benchmark_ci_box(axes[i, 0], res['ci'], best_K,
+                                           MatCorr[best_K - 1])
                 axes[i, 0].set_xlabel('K (lag months)')
                 axes[i, 0].set_ylabel('R²_adj')
                 axes[i, 0].set_title(f'{title_A} — {season}')
@@ -1883,7 +2695,8 @@ class BaseDroughtAnalysis:
         return results
 
     def Dspi_free(self, streamflow, Kmax=None, plot=True,
-                  agg=None, seasons=None):
+                  agg=None, seasons=None, n_boot=0, block_length=None,
+                  ci=(2.5, 97.5), circular=True, random_state=None):
         """
         Benchmark B-multi: Linear convolution of standardized anomalies via OLS.
 
@@ -1929,6 +2742,10 @@ class BaseDroughtAnalysis:
             Custom month mapping when ``agg='custom'`` or when passing a dict
             directly (sets agg='custom' automatically). If None and agg is None,
             no seasonal split is performed.
+        n_boot, block_length, ci, circular, random_state
+            Block-bootstrap CI, same procedure and semantics as in
+            ``benchmark_convolution`` (scalars only: ``optimal_K``, ``R2_adj``
+            at that K, R²/RMSE/KGE — not the OLS weights h(k)).
 
         Returns
         -------
@@ -1940,15 +2757,17 @@ class BaseDroughtAnalysis:
                 'beta'            : np.ndarray, shape (optimal_K + 1,)
                 'condition_number': float
                 'metrics'         : dict
+                'ci' / 'boot' / 'boot_meta' : only if n_boot > 0
         Else:
             dict keyed by season name, each value being the same dict as above,
-            with an additional key 'sample_number'.
+            with an additional key 'sample_number' (and per-season 'ci'/'boot'/
+            'boot_meta' when n_boot > 0).
 
         Notes
         -----
         - Requires temporal overlap between self.m_cal and streamflow.m_cal.
         - NaN values in either SQI1 or any SPI_k are excluded row-wise.
-        - Kmax is capped at min(self.K, streamflow.spi_like_set.shape[0]).
+        - Kmax is capped at min(Kmax, self.spi_like_set.shape[0], streamflow.spi_like_set.shape[0]).
         - `optimal_K` selection follows the plateau criterion (first end of
           monotonic-increasing sequence in R²_adj), not the global maximum.
 
@@ -1981,97 +2800,11 @@ class BaseDroughtAnalysis:
 
         K_range = np.arange(1, Kmax + 1)
 
-        def _monotonic_plateau(x):
-            """
-            Returns the index of the last element in the initial monotonic
-            increasing sequence of x. Used to identify the plateau of R²_adj
-            vs K, stopping before overfitting or numerical noise takes over.
-            """
-            last = 0
-            for i in range(1, len(x)):
-                if np.isfinite(x[i]) and x[i] >= x[i - 1]:
-                    last = i
-                else:
-                    break
-            return last
-
         def _run_dspi_free(SPIset_sub, SQI1_sub, season_mask=None):
-            """OLS multi-scale regression for a given data subset.
-            Returns the full result dict. Same logic as the all-data case;
-            `season_mask` restricts the rows entering the OLS fit."""
-            MatCorr = []
-
-            for K in K_range:
-                # predictors: [SPI_1(t), SPI_2(t), ..., SPI_K(t)]
-                X_block = SPIset_sub[0:K, :].T  # shape (n, K)
-
-                valid = ~np.isnan(SQI1_sub)
-                for k in range(K):
-                    valid &= ~np.isnan(SPIset_sub[k, :])
-                if season_mask is not None:
-                    valid &= season_mask
-
-                if valid.sum() < K + 2:
-                    MatCorr.append(np.nan)
-                    continue
-
-                X = np.column_stack([X_block[valid], np.ones(valid.sum())])
-                y = SQI1_sub[valid]
-
-                beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-                y_hat = X @ beta
-                ss_res = np.sum((y - y_hat) ** 2)
-                ss_tot = np.sum((y - y.mean()) ** 2)
-                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-                n_v, p = valid.sum(), K
-                MatCorr.append(1 - (1 - r2) * (n_v - 1) / (n_v - p - 1))
-
-            MatCorr = np.array(MatCorr)
-            if np.all(np.isnan(MatCorr)):
-                return None
-
-            # === FIX: plateau-based selection instead of global argmax ===
-            # Take the end of the initial monotonic-increasing run as optimal K.
-            # This avoids distant peaks driven by overfitting/numerical noise
-            # at large K, where condition_number explodes and beta becomes
-            # unstable but R²_adj may still spuriously creep up.
-            plateau_idx = _monotonic_plateau(MatCorr)
-            best_K = int(K_range[plateau_idx])
-            # =============================================================
-
-            # Recompute at optimal K
-            X_block_opt = SPIset_sub[0:best_K, :].T
-            valid_opt = ~np.isnan(SQI1_sub)
-            for k in range(best_K):
-                valid_opt &= ~np.isnan(SPIset_sub[k, :])
-            if season_mask is not None:
-                valid_opt &= season_mask
-
-            X_opt = np.column_stack([X_block_opt[valid_opt], np.ones(valid_opt.sum())])
-            y_opt = SQI1_sub[valid_opt]
-            beta_opt, _, _, sv = np.linalg.lstsq(X_opt, y_opt, rcond=None)
-            cond_num = float(np.max(sv) / np.min(sv[sv > 0])) if len(sv) > 0 else np.nan
-
-            if cond_num > 30:
-                import warnings
-                warnings.warn(
-                    f"Dspi_free: condition number = {cond_num:.1f} > 30. "
-                    f"SPI scales are structurally correlated — "
-                    f"beta coefficients unstable at K={best_K}.",
-                    UserWarning
-                )
-
-            y_pred_opt = X_opt @ beta_opt
-            metrics = self._eval_metrics(y_opt, y_pred_opt)
-
-            return {
-                'R2_adj': MatCorr,
-                'optimal_K': best_K,
-                'K_range': K_range,
-                'beta': beta_opt,
-                'condition_number': cond_num,
-                'metrics': metrics,
-            }
+            """OLS multi-scale regression for a given data subset (thin wrapper
+            over the lifted static core)."""
+            return self._dspi_free_fit(SPIset_sub, SQI1_sub, K_range,
+                                       season_mask=season_mask)
 
         # ---------------------------------------------------------------
         # CASE 1: no seasonal split
@@ -2079,6 +2812,13 @@ class BaseDroughtAnalysis:
         if agg is None:
             print("Starting correlation analysis...")
             result = _run_dspi_free(SPIset, SQI1)
+
+            if n_boot > 0 and result is not None:
+                self._attach_benchmark_ci(
+                    'dspi_free', streamflow, self_indices, streamflow_indices,
+                    Kmax, result, None, None,
+                    n_boot=n_boot, block_length=block_length, ci=ci,
+                    circular=circular, random_state=random_state)
 
             if plot and result is not None:
                 MatCorr = result['R2_adj']
@@ -2088,6 +2828,9 @@ class BaseDroughtAnalysis:
                 fig, axes = plt.subplots(1, 2, figsize=(10, 3))
                 axes[0].plot(K_range, MatCorr, 'k-o', lw=2)
                 axes[0].axvline(best_K, color='r', ls='--', label=f'optimal K={best_K}')
+                if result.get('ci'):
+                    _plot_benchmark_ci_box(axes[0], result['ci'], best_K,
+                                           MatCorr[best_K - 1])
                 axes[0].set_xlabel('K (number of SPI scales)')
                 axes[0].set_ylabel('R²_adj')
                 axes[0].set_title('Dspi_free — SPI multi-scale OLS')
@@ -2138,6 +2881,13 @@ class BaseDroughtAnalysis:
                   f"(K={res['optimal_K']})")
             results[name] = res
 
+        if n_boot > 0 and results:
+            self._attach_benchmark_ci(
+                'dspi_free', streamflow, self_indices, streamflow_indices,
+                Kmax, results, agg, seasons_dict,
+                n_boot=n_boot, block_length=block_length, ci=ci,
+                circular=circular, random_state=random_state)
+
         if plot:
             n_seasons = len(results)
             if n_seasons == 0:
@@ -2155,6 +2905,9 @@ class BaseDroughtAnalysis:
 
                 axes[i, 0].plot(K_range, MatCorr, 'k-o', lw=2)
                 axes[i, 0].axvline(best_K, color='r', ls='--', label=f'optimal K={best_K}')
+                if res.get('ci'):
+                    _plot_benchmark_ci_box(axes[i, 0], res['ci'], best_K,
+                                           MatCorr[best_K - 1])
                 axes[i, 0].set_xlabel('K (number of SPI scales)')
                 axes[i, 0].set_ylabel('R²_adj')
                 axes[i, 0].set_title(f'Dspi_free — SPI multi-scale OLS — {season}')
@@ -2174,10 +2927,7 @@ class BaseDroughtAnalysis:
 
         return results
 
-        #--------------------------------------------------------------------------------
-    # HELPER: Nash-IUH kernel  (parametric, 2 free params)
-
-    # HELPER: linear convolution R²
+    # --- benchmark helpers: skill metrics, lag convolution, kernels ---------
     @staticmethod
     def _eval_metrics(y_obs: np.ndarray, y_sim: np.ndarray) -> dict:
         """
@@ -2187,7 +2937,10 @@ class BaseDroughtAnalysis:
         Returns
         -------
         dict with keys:
-            'R2'        : coefficient of determination (Pearson, squared)
+            'R2'        : squared Pearson correlation between obs and sim — the
+                          same R² definition used everywhere else in the library
+                          (``_r2_surface``, ``_convolve_r2``, the benchmark fits),
+                          so every reported R² is directly comparable.
             'RMSE'      : root mean square error
             'MAE'       : mean absolute error
             'KGE'       : Kling–Gupta efficiency (Gupta et al., 2009)
@@ -2213,25 +2966,25 @@ class BaseDroughtAnalysis:
         o = y_obs[mask]
         s = y_sim[mask]
 
-        # R² (squared Pearson, == 1 - SS_res/SS_tot for unbiased linear fit)
-        ss_res = np.sum((o - s) ** 2)
-        ss_tot = np.sum((o - o.mean()) ** 2)
-        r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-
         rmse = np.sqrt(np.mean((o - s) ** 2))
         mae = np.mean(np.abs(o - s))
         bias = float(s.mean() - o.mean())
 
-        # KGE (Gupta et al. 2009): 1 - sqrt((r-1)^2 + (alpha-1)^2 + (beta-1)^2)
         if o.std() > 0 and s.std() > 0:
             r = np.corrcoef(o, s)[0, 1]
+            # R² = squared Pearson correlation (see Returns). Not NSE
+            # (1 - SS_res/SS_tot): NSE also penalises scale/offset mismatches,
+            # which an un-rescaled D(SPI) would pay and an OLS-rescaled
+            # benchmark would not, making the two incomparable.
+            r2 = r ** 2
+            # KGE (Gupta et al. 2009): 1 - sqrt((r-1)^2 + (alpha-1)^2 + (beta-1)^2).
+            # For standardized series obs.mean() ~ 0, so the ratio beta is
+            # unstable: the additive bias formulation is used instead.
             alpha = s.std() / o.std()
-            beta = s.mean() / o.mean() if abs(o.mean()) > 1e-9 else np.nan
-            # for standardized series obs.mean() ~ 0 → beta is unstable;
-            # use additive bias formulation instead
-            beta_add = (s.mean() - o.mean())  # already standardized scale
+            beta_add = (s.mean() - o.mean())
             kge = 1 - np.sqrt((r - 1) ** 2 + (alpha - 1) ** 2 + beta_add ** 2)
         else:
+            r2 = np.nan
             kge = np.nan
 
         # Drought-event metrics (threshold -1 on standardized scale)
@@ -2258,19 +3011,45 @@ class BaseDroughtAnalysis:
         }
 
     @staticmethod
+    def _lag_convolve(driver, kernel, junction_dist=None):
+        """
+        Causal lag convolution shared by every kernel benchmark, for the fit AND
+        for its plot (so the two can never describe different models):
+
+            y_hat(t) = Σ_{i=0}^{L-1} kernel[i] · driver(t - i)
+
+        ``kernel[0]`` multiplies the contemporaneous value driver(t). In the
+        paper's notation (Eq. 7) kernel[i] = h(j = i + 1), i.e. lag index j = 1
+        carries driver(t - j + 1) = driver(t).
+
+        The first L-1 timesteps (incomplete window) are NaN; NaNs in ``driver``
+        propagate to every window containing them (all kernel weights are > 0).
+        ``junction_dist`` (block bootstrap only): timesteps whose window
+        straddles a block join (``junction_dist < L - 1``) are NaN as well.
+        """
+        n = len(driver)
+        L = len(kernel)
+        y_hat = np.convolve(np.asarray(driver, float), kernel, mode='full')[:n]
+        y_hat[:L - 1] = np.nan
+        if junction_dist is not None:
+            y_hat[np.asarray(junction_dist)[:n] < L - 1] = np.nan
+        return y_hat
+
+    @staticmethod
     def _convolve_r2(driver: np.ndarray, target: np.ndarray,
-                     kernel: np.ndarray, season_mask: np.ndarray = None) -> float:
+                     kernel: np.ndarray, season_mask: np.ndarray = None,
+                     junction_dist: np.ndarray = None) -> float:
         """
         Convolve driver with kernel, fit intercept via OLS, return R².
         NaN rows are excluded.
+
+        junction_dist : ndarray, optional
+            Months since the last block start, one per timestep (see the block
+            bootstrap in utils.statistics). When given, a timestep whose K-month
+            convolution window straddles a block join (``junction_dist < K - 1``)
+            is left NaN, so it drops out of the fit. None in normal (non-boot) use.
         """
-        n = len(driver)
-        K = len(kernel)
-        y_hat = np.full(n, np.nan)
-        for t in range(K - 1, n):
-            # the weighted sum of past rainfall:
-            # sum ( kernel x last K monhts of precipitation) == scalar product with np.dot
-            y_hat[t] = np.dot(kernel, driver[t - K + 1: t + 1][::-1])
+        y_hat = BaseDroughtAnalysis._lag_convolve(driver, kernel, junction_dist)
 
         # apply seasonal mask AFTER convolution on full series
         if season_mask is not None:
@@ -2280,84 +3059,473 @@ class BaseDroughtAnalysis:
         mask = np.isfinite(target) & np.isfinite(y_hat)
         if mask.sum() < 5:
             return np.nan
-        # fit a moel where X is the weighted sum of last precipitation + intercept
-        X = np.column_stack([y_hat[mask], np.ones(mask.sum())])
-        y = target[mask]
-        beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-        # y - (X @ beta) == observed-simulated == residuals!
-        # (X * beta).sum(axis=1) == X @ beta  # True
-        sim = X @ beta
-        ss_res = np.sum((y - sim) ** 2) # sum of squares
-        ss_tot = np.sum((y - y.mean()) ** 2)
-        rsquare = float(1 - ss_res / ss_tot) if ss_tot > 0 else np.nan
-        return rsquare
+        r = np.corrcoef(y_hat[mask], target[mask])[0, 1]
+        return float(r ** 2)
 
     @staticmethod
     def _nash_kernel(n: float, k: float, K: int) -> np.ndarray:
         """
-        Discrete Nash IUH kernel (Gamma pdf sampled at lags 1..L).
-        The result is a weightingh scheme woth bell-shape
+        Discrete Nash-type kernel (Benchmark C, paper Eq. 6): the Gamma pdf
+        sampled at the integer lag indices j = 1..K and normalised to sum to 1,
+
+            h(j; n, τ) = j^(n-1) exp(-j/τ) / (τ^n Γ(n)),   j = 1, ..., K
+
+        h[0] (j = 1) multiplies the contemporaneous anomaly SPI1(t), h[j-1]
+        multiplies SPI1(t - j + 1) — see ``_lag_convolve`` (paper Eq. 7). For
+        n <= 1 the kernel decreases monotonically; for n > 1 it is bell-shaped
+        with continuous mode j* = (n-1)·τ, i.e. a delay of j* - 1 months.
 
         Parameters
         ----------
         n : float   shape parameter  (> 0)
-        k : float   scale parameter  (months, > 0)
+        k : float   scale parameter τ (months, > 0)
         K : int     kernel length (months)
 
         Returns
         -------
         h : ndarray, shape (K,), sums to 1
+
+        Notes
+        -----
+        τ→0 limit (very small τ ≈ 0.001): the Gamma pdf evaluated at j = 1..K
+        underflows to zero everywhere, so ``h.sum() == 0``. The correct τ→0
+        limit concentrates all mass on j = 1 (the contemporaneous month, no
+        memory), NOT on uniform weights, so the fallback sets ``h[0] = 1``.
+        Without this guard the optimiser could land on uniform weights (1/K
+        each) precisely where it should find a delta at j = 1.
         """
         from scipy.stats import gamma as gamma_dist
         t = np.arange(1, K + 1, dtype=float)
         h = gamma_dist.pdf(t, a=n, scale=k)
         s = h.sum()
-        # /s serves to nornalize thw weights!
-        return h / s if s > 0 else np.ones(K) / K
+        if np.isfinite(s) and s > 0:
+            return h / s
+        # τ→0 limit: all mass on the contemporaneous month (j = 1), not uniform
+        h = np.zeros(K); h[0] = 1.0
+        return h
+
+    # =====================================================================
+    # ▸ Benchmark numeric cores (lifted out of the public methods)
+    # ---------------------------------------------------------------------
+    # Each public benchmark (benchmark_convolution, Dspi_free, benchmark_nash,
+    # benchmark_ihacres) used to carry its fit as a nested closure over `self`.
+    # They are static now so the block-bootstrap workers in
+    # utils.statistics._bootstrap_benchmark can call them on a synthetic
+    # (P, Q) replica without pickling the whole DroughtScan object. The public
+    # methods call these for the point estimate too — same code, one copy.
+    # =====================================================================
+    @staticmethod
+    def _monotonic_plateau(x):
+        """Index of the last element of the initial monotonic-increasing run
+        of x — the end of the R²_adj(K) plateau, before overfitting/numerical
+        noise takes over at large K."""
+        last = 0
+        for i in range(1, len(x)):
+            if np.isfinite(x[i]) and x[i] >= x[i - 1]:
+                last = i
+            else:
+                break
+        return last
+
+    @staticmethod
+    def _ols_convolution_fit(driver, target, K_range, season_mask=None,
+                             junction_dist=None, verbose=True,
+                             label="benchmark_convolution"):
+        """OLS lag-convolution benchmark (A: raw P, or B: SPI1) for one data
+        subset. Returns the result dict (R2_adj curve, plateau optimal_K, beta,
+        condition_number, metrics), or None if every K is unscorable.
+
+        `junction_dist` (block-bootstrap only): drop timesteps whose K-month lag
+        window crosses a block join."""
+        MatCorr = []
+        for K in K_range:
+            rows, y_rows = [], []
+            for t in range(K - 1, len(driver)):
+                if season_mask is not None and not season_mask[t]:
+                    continue
+                if junction_dist is not None and junction_dist[t] < K - 1:
+                    continue
+                if np.isnan(target[t]):
+                    continue
+                lag_vec = driver[t - K + 1:t + 1][::-1]
+                if np.any(np.isnan(lag_vec)):
+                    continue
+                rows.append(lag_vec)
+                y_rows.append(target[t])
+
+            if len(rows) < K + 2:
+                MatCorr.append(np.nan)
+                continue
+
+            X = np.column_stack([np.array(rows), np.ones(len(rows))])
+            y_v = np.array(y_rows)
+            beta, _, _, _ = np.linalg.lstsq(X, y_v, rcond=None)
+            y_hat = X @ beta
+            ss_res = np.sum((y_v - y_hat) ** 2)
+            ss_tot = np.sum((y_v - y_v.mean()) ** 2)
+            r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+            n_v, p = len(y_v), K
+            MatCorr.append(1 - (1 - r2) * (n_v - 1) / (n_v - p - 1))
+
+        MatCorr = np.array(MatCorr)
+        if np.all(np.isnan(MatCorr)):
+            return None
+
+        plateau_idx = BaseDroughtAnalysis._monotonic_plateau(MatCorr)
+        best_K = int(K_range[plateau_idx])
+
+        rows, y_rows = [], []
+        for t in range(best_K - 1, len(driver)):
+            if season_mask is not None and not season_mask[t]:
+                continue
+            if junction_dist is not None and junction_dist[t] < best_K - 1:
+                continue
+            if np.isnan(target[t]):
+                continue
+            lag_vec = driver[t - best_K + 1:t + 1][::-1]
+            if np.any(np.isnan(lag_vec)):
+                continue
+            rows.append(lag_vec)
+            y_rows.append(target[t])
+
+        X_opt = np.column_stack([np.array(rows), np.ones(len(rows))])
+        y_opt = np.array(y_rows)
+        beta_opt, _, _, sv = np.linalg.lstsq(X_opt, y_opt, rcond=None)
+        cond_num = float(np.max(sv) / np.min(sv[sv > 0])) if len(sv) > 0 else np.nan
+
+        if cond_num > 30 and verbose:
+            import warnings
+            warnings.warn(
+                f"{label}: condition number = {cond_num:.1f} > 30. "
+                f"Multicollinearity at K={best_K} — beta coefficients may be unstable.",
+                UserWarning
+            )
+
+        metrics = BaseDroughtAnalysis._eval_metrics(y_opt, X_opt @ beta_opt)
+        return {
+            'R2_adj': MatCorr,
+            'optimal_K': best_K,
+            'K_range': K_range,
+            'beta': beta_opt,
+            'condition_number': cond_num,
+            'metrics': metrics,
+        }
+
+    @staticmethod
+    def _dspi_free_fit(spi_set, sqi1, K_range, season_mask=None, verbose=True):
+        """Multi-scale (no-lag) OLS: SQI1(t) ~ Σ h(k)·SPI_k(t). One data subset.
+        Returns the result dict or None if every K is unscorable. `spi_set` is
+        (>=max(K_range), T); in the bootstrap it is already junction-masked."""
+        MatCorr = []
+        for K in K_range:
+            X_block = spi_set[0:K, :].T
+            valid = ~np.isnan(sqi1)
+            for k in range(K):
+                valid &= ~np.isnan(spi_set[k, :])
+            if season_mask is not None:
+                valid &= season_mask
+            if valid.sum() < K + 2:
+                MatCorr.append(np.nan)
+                continue
+            X = np.column_stack([X_block[valid], np.ones(valid.sum())])
+            y = sqi1[valid]
+            beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+            y_hat = X @ beta
+            ss_res = np.sum((y - y_hat) ** 2)
+            ss_tot = np.sum((y - y.mean()) ** 2)
+            r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+            n_v, p = valid.sum(), K
+            MatCorr.append(1 - (1 - r2) * (n_v - 1) / (n_v - p - 1))
+
+        MatCorr = np.array(MatCorr)
+        if np.all(np.isnan(MatCorr)):
+            return None
+
+        best_K = int(K_range[BaseDroughtAnalysis._monotonic_plateau(MatCorr)])
+        X_block_opt = spi_set[0:best_K, :].T
+        valid_opt = ~np.isnan(sqi1)
+        for k in range(best_K):
+            valid_opt &= ~np.isnan(spi_set[k, :])
+        if season_mask is not None:
+            valid_opt &= season_mask
+        X_opt = np.column_stack([X_block_opt[valid_opt], np.ones(valid_opt.sum())])
+        y_opt = sqi1[valid_opt]
+        beta_opt, _, _, sv = np.linalg.lstsq(X_opt, y_opt, rcond=None)
+        cond_num = float(np.max(sv) / np.min(sv[sv > 0])) if len(sv) > 0 else np.nan
+        if cond_num > 30 and verbose:
+            import warnings
+            warnings.warn(
+                f"Dspi_free: condition number = {cond_num:.1f} > 30. "
+                f"SPI scales are structurally correlated — beta unstable at K={best_K}.",
+                UserWarning
+            )
+        metrics = BaseDroughtAnalysis._eval_metrics(y_opt, X_opt @ beta_opt)
+        return {
+            'R2_adj': MatCorr,
+            'optimal_K': best_K,
+            'K_range': K_range,
+            'beta': beta_opt,
+            'condition_number': cond_num,
+            'metrics': metrics,
+        }
+
+    # Admissible ranges of the Nash-type kernel (paper, Benchmark C): solutions
+    # outside 0 < n <= 20 and 0 < τ <= 36 months score R² = -1 (penalised
+    # objective, no box constraints), forcing the simplex back inside.
+    _NASH_N_MAX = 20.0
+    _NASH_TAU_MAX = 36.0
+
+    @staticmethod
+    def _nash_fit(driver, target, K, season_mask=None, junction_dist=None,
+                  l_step=1, verbose=True):
+        """Benchmark C: jointly optimise (n, τ) by unconstrained Nelder-Mead,
+        restarted from the fixed 3 x 3 grid n0, τ0 in {1, 2, 4}, for every kernel
+        length L in ``range(2, K + 1, l_step)``; keep the best (L, n, τ) by R²
+        (squared Pearson, see ``_convolve_r2``). Outside 0 < n <= 20 and
+        0 < τ <= 36 the objective returns R² = -1. Returns the result dict;
+        all-NaN params if nothing was feasible. `l_step > 1` thins the L search
+        (block-bootstrap speed-up)."""
+        from scipy.optimize import minimize
+
+        N_MAX = BaseDroughtAnalysis._NASH_N_MAX
+        TAU_MAX = BaseDroughtAnalysis._NASH_TAU_MAX
+
+        best = {'R2': -np.inf, 'L': None, 'n': None, 'k': None}
+        for L in range(2, K + 1, l_step):
+            def neg_r2(params, _L=L):
+                n_, k_ = params
+                if n_ <= 0 or k_ <= 0 or n_ > N_MAX or k_ > TAU_MAX:
+                    return 1.0                       # R² = -1: infeasible
+                h = BaseDroughtAnalysis._nash_kernel(n_, k_, _L)
+                r2 = BaseDroughtAnalysis._convolve_r2(
+                    driver, target, h, season_mask=season_mask,
+                    junction_dist=junction_dist)
+                return -r2 if np.isfinite(r2) else 1.0
+
+            for n0 in [1.0, 2.0, 4.0]:
+                for k0 in [1.0, 2.0, 4.0]:
+                    res = minimize(neg_r2, x0=[n0, k0], method='Nelder-Mead',
+                                   options={'xatol': 1e-4, 'fatol': 1e-4,
+                                            'maxiter': 2000})
+                    r2 = -res.fun
+                    if r2 > best['R2']:
+                        best.update({'R2': r2, 'L': L,
+                                     'n': res.x[0], 'k': res.x[1]})
+
+        if best['L'] is None:
+            return {'optimal_K': None, 'optimal_n': np.nan, 'optimal_k': np.nan,
+                    'R2': np.nan, 'kernel': np.array([]),
+                    'metrics': BaseDroughtAnalysis._eval_metrics(
+                        np.array([np.nan]), np.array([np.nan]))}
+
+        kernel = BaseDroughtAnalysis._nash_kernel(best['n'], best['k'], best['L'])
+        if verbose:
+            print(f"  Nash kernel: R²={best['R2']:.3f}  L={best['L']}  "
+                  f"n={best['n']:.2f}   τ={best['k']:.2f}")
+
+        y_hat = BaseDroughtAnalysis._lag_convolve(driver, kernel, junction_dist)
+        metrics = BaseDroughtAnalysis._rescaled_metrics(y_hat, target, season_mask)
+
+        return {
+            'optimal_K': best['L'],
+            'optimal_n': best['n'],
+            'optimal_k': best['k'],
+            'R2': best['R2'],
+            'kernel': kernel,
+            'metrics': metrics,
+        }
+
+    @staticmethod
+    def _rescaled_metrics(y_hat, target, season_mask=None):
+        """Skill metrics of a kernel simulation after the single global OLS
+        rescaling (slope + intercept) that the R² objective implicitly allows.
+        The seasonal mask is applied AFTER the convolution on the full series."""
+        if season_mask is not None:
+            y_hat, target = y_hat[season_mask], target[season_mask]
+        mv = np.isfinite(y_hat) & np.isfinite(target)
+        sim = np.full_like(y_hat, np.nan, dtype=float)
+        if mv.sum() >= 2:
+            X = np.column_stack([y_hat[mv], np.ones(mv.sum())])
+            b, _, _, _ = np.linalg.lstsq(X, target[mv], rcond=None)
+            sim[mv] = X @ b
+        return BaseDroughtAnalysis._eval_metrics(target, sim)
+
+    @staticmethod
+    def _exp_kernel(tau, L):
+        """Single linear reservoir (Nash kernel with n = 1), normalised to sum
+        to 1: h[i] = exp(-i/τ) / Σ exp(-m/τ), i = 0..L-1. h[0] — the largest
+        weight — multiplies the contemporaneous driver (see ``_lag_convolve``)."""
+        j = np.arange(L, dtype=float)
+        h = np.exp(-j / tau)
+        return h / h.sum()
+
+    @staticmethod
+    def _ihacres_simulate(driver, tau_f, tau_s, alpha, L, junction_dist=None):
+        """Two-reservoir routing: alpha · (h_fast * driver) + (1-alpha) · (h_slow * driver).
+        One convolution with the mixed kernel — identical to mixing the two
+        convolved series, since the convolution is linear."""
+        h = (alpha * BaseDroughtAnalysis._exp_kernel(tau_f, L)
+             + (1 - alpha) * BaseDroughtAnalysis._exp_kernel(tau_s, L))
+        return BaseDroughtAnalysis._lag_convolve(driver, h, junction_dist)
+
+    @staticmethod
+    def _ihacres_fit(driver, target, K, season_mask=None, junction_dist=None,
+                     l_step=1, verbose=True):
+        """IHACRES two-reservoir routing: optimise (τ_fast, τ_slow, α) by
+        L-BFGS-B under physical bounds, for every L in ``range(2, K + 1, l_step)``;
+        keep the best (L, τ_fast, τ_slow, α) by R² (squared Pearson, the same
+        definition as every other benchmark). Returns the result dict; all-NaN
+        params if nothing was feasible."""
+        from scipy.optimize import minimize
+
+        best = {'R2': -np.inf, 'K': None,
+                'tau_f': None, 'tau_s': None, 'alpha': None}
+        TAU_F_MIN, TAU_F_MAX = 0.5, 6.0
+        TAU_S_MIN = 2.0
+        ALPHA_MIN, ALPHA_MAX = 0.05, 0.95
+        DELTA_MIN = 1.0
+
+        for L_ in range(2, K + 1, l_step):
+            def neg_r2(params, _L=L_):
+                tau_f, tau_s, alpha = params
+                if tau_s - tau_f < DELTA_MIN:
+                    return 1.0 + (DELTA_MIN - (tau_s - tau_f))
+                Q_sim = BaseDroughtAnalysis._ihacres_simulate(
+                    driver, tau_f, tau_s, alpha, _L, junction_dist)
+                if season_mask is not None:
+                    Q_sim, tgt_loc = Q_sim[season_mask], target[season_mask]
+                else:
+                    tgt_loc = target
+                mask = np.isfinite(tgt_loc) & np.isfinite(Q_sim)
+                if mask.sum() < 5:
+                    return 1.0
+                r = np.corrcoef(Q_sim[mask], tgt_loc[mask])[0, 1]
+                return -(r ** 2) if np.isfinite(r) else 1.0
+
+            bounds = [(TAU_F_MIN, TAU_F_MAX), (TAU_S_MIN, 2.0 * K),
+                      (ALPHA_MIN, ALPHA_MAX)]
+            for tf0, ts0, a0 in [(1.0, 4.0, 0.7), (2.0, 8.0, 0.5), (2.0, 12.0, 0.3)]:
+                tf0_c = np.clip(tf0, TAU_F_MIN, TAU_F_MAX)
+                ts0_c = np.clip(ts0, max(TAU_S_MIN, tf0_c + DELTA_MIN), 2.0 * K)
+                a0_c = np.clip(a0, ALPHA_MIN, ALPHA_MAX)
+                res = minimize(neg_r2, x0=[tf0_c, ts0_c, a0_c], method='L-BFGS-B',
+                               bounds=bounds, options={'ftol': 1e-6, 'maxiter': 300})
+                r2 = -res.fun
+                if r2 > best['R2']:
+                    best.update({'R2': r2, 'K': L_, 'tau_f': res.x[0],
+                                 'tau_s': res.x[1], 'alpha': res.x[2]})
+
+        if best['K'] is None:
+            return {'optimal_K': None, 'optimal_tau_f': np.nan,
+                    'optimal_tau_s': np.nan, 'optimal_alpha': np.nan,
+                    'R2': np.nan, 'kernel_fast': np.array([]),
+                    'kernel_slow': np.array([]),
+                    'metrics': BaseDroughtAnalysis._eval_metrics(
+                        np.array([np.nan]), np.array([np.nan]))}
+
+        L_ = best['K']
+        h_f = BaseDroughtAnalysis._exp_kernel(best['tau_f'], L_)
+        h_s = BaseDroughtAnalysis._exp_kernel(best['tau_s'], L_)
+        if verbose:
+            print(f"  IHACRES: R²={best['R2']:.3f}  K={L_}  "
+                  f"τ_fast={best['tau_f']:.2f}  τ_slow={best['tau_s']:.2f}  "
+                  f"α={best['alpha']:.2f}")
+
+        Q_sim = BaseDroughtAnalysis._ihacres_simulate(
+            driver, best['tau_f'], best['tau_s'], best['alpha'], L_, junction_dist)
+        metrics = BaseDroughtAnalysis._rescaled_metrics(Q_sim, target, season_mask)
+
+        return {
+            'optimal_K': L_,
+            'optimal_tau_f': best['tau_f'],
+            'optimal_tau_s': best['tau_s'],
+            'optimal_alpha': best['alpha'],
+            'R2': best['R2'],
+            'kernel_fast': h_f,
+            'kernel_slow': h_s,
+            'metrics': metrics,
+        }
+
+    def _attach_benchmark_ci(self, kind, streamflow, self_indices, streamflow_indices,
+                             bench_K, result, agg, seasons_dict, *, n_boot,
+                             block_length, ci, circular, random_state, l_step=1,
+                             driver_var='P', target_var='SQI'):
+        """Run the paired year-aligned block-bootstrap for one benchmark and
+        attach ``'ci'`` / ``'boot'`` / ``'boot_meta'`` in place.
+
+        ``kind`` selects which fit the workers re-run per replica: 'conv_P',
+        'conv_SPI', 'dspi_free', 'nash', 'ihacres'. ``result`` is the point
+        estimate: a single dict when ``agg is None``, else the ``{season: dict}``
+        mapping (each season entry gets its own CI). Only scalar quantities get
+        an interval — never the kernel ordinates or the OLS rescaling betas.
+        ``l_step`` thins the kernel-length search inside 'nash'/'ihacres'
+        replicas (speed-up; ignored by the OLS benchmarks). ``driver_var`` /
+        ``target_var`` : only read for ``kind='nash'`` / ``'ihacres'`` — must match what the
+        point estimate itself was fit on ('P'/'SPI' driver, 'Q'/'SQI' target),
+        so the bootstrap replicas re-fit the same model."""
+        from drought_scan.utils.statistics import (
+            _bootstrap_benchmark, _print_contamination_table)
+
+        season_months = seasons_dict if agg is not None else None
+        boot, boot_ci, meta = _bootstrap_benchmark(
+            self, streamflow, self_indices, streamflow_indices,
+            kind, bench_K, n_boot, block_length, ci, circular, random_state,
+            seasons=season_months, l_step=l_step,
+            driver_var=driver_var, target_var=target_var)
+        _print_contamination_table(meta, np.arange(1, self.K + 1))
+
+        if agg is None:
+            result['boot'] = boot
+            result['ci'] = boot_ci
+            result['boot_meta'] = meta
+        else:
+            for name, sdict in result.items():
+                if name in boot:
+                    sdict['boot'] = boot[name]
+                    sdict['ci'] = boot_ci[name]
+                    sdict['boot_meta'] = meta
+        return result
 
     # --------------------------------------------------------------------------------
     # METHOD 1 — benchmark_nash
     def benchmark_nash(self, streamflow, K=None, plot=True,
-                       agg=None, seasons=None):
+                       agg=None, seasons=None, n_boot=0, block_length=None,
+                       ci=(2.5, 97.5), circular=True, random_state=None,
+                       boot_l_step=3, driver_var='SPI', target_var='SQI'):
         """
-        This method predicts the standardized streamflow anomaly SQI_1(t) from raw precipitation P(t-j)
-        via a parametric kernel. Standardization of the target makes R² directly comparable to D(SPI).
-        The kernel shape retains its physical interpretation;
-        amplitude is absorbed by the OLS intercept and slope during fitting.
+        Benchmark C: SQI1 approximated as a linear convolution of standardized
+        monthly precipitation anomalies (SPI1) with a two-parameter Gamma-shaped
+        kernel (shape n, scale τ) evaluated at integer lags:
 
-        Nash IUH benchmark: parametric convolution with a Gamma kernel.
+            h(j; n, τ) = j^(n-1) exp(-j/τ) / (τ^n Γ(n)),     j = 1, ..., L
+            SQI1_hat(t) = Σ_{j=1}^{L} h(j; n, τ) · SPI1(t - j + 1)
 
-        Idea: The discharge at time t is the weighted sum of past precipitation, where the weights form a lagged bell-shaped curve—recent
-        rainfall matters little (the basin must "fill"), rainfall from a few months ago matters more,
-        and rainfall from a long time ago matters little (memory runs out) >> GAMMA SHAPE!
-        Nash proposed modeling this curve with a discrete Gamma distribution, characterized by two physical parameters:
+        The kernel is normalised to sum to one over the L lags retained; the R²
+        objective (squared Pearson) implicitly allows one global affine
+        rescaling of SQI1_hat. j = 1 carries the contemporaneous anomaly
+        SPI1(t), so a continuous mode j* = (n-1)·τ (n > 1) means a delay of
+        j* - 1 months; for n <= 1 the kernel is monotonically decreasing.
 
-        n — bell-shaped (small n = fast and asymmetric response; large n = slow and symmetric response)
-        k — time scale in months (larger k = longer memory)
-
-        Streamflow is modelled as:
-
-            SQI1(t) = intercept + Σ_{j=0}^{L-1} h(j; n, k) · P(t-j)
-
-        where h is the discrete Nash IUH (Gamma pdf), and the two shape
-        parameters (n, k) plus the kernel length L are jointly optimised
-        to maximise R² against observed monthly streamflow.
-
-
+        The Gamma shape is borrowed from the Nash (1957) instantaneous unit
+        hydrograph, but by default it is applied to standardized anomalies
+        rather than to effective rainfall, so that Benchmark C shares driver and
+        target with Benchmark B and D(SPI). ``driver_var='P'`` /
+        ``target_var='Q'`` switch either side back to the raw physical series
+        (the classical Nash IUH reading).
 
         Optimisation strategy
         ---------------------
-        For each L in [2, ..., K], scipy.optimize.minimize (Nelder-Mead)
-        is run from multiple starting points to find the global optimum
-        in (n, k). The best (K, n, k) triplet is retained.
-
-        This is the standard implementation of the Nash (1957) IUH for
-        monthly data: only P (raw precipitation) and Q are required.
+        (n, τ) and L are optimised jointly to maximise R². For each candidate
+        L in [2, ..., K] an unconstrained Nelder-Mead search is restarted from
+        the fixed 3 x 3 grid n0, τ0 in {1, 2, 4} months and the best of the nine
+        runs is kept. Admissible ranges are enforced by penalising the
+        objective, not by box constraints: solutions outside 0 < n <= 20 and
+        0 < τ <= 36 months score R² = -1.
 
         Parameters
         ----------
         streamflow : BaseDroughtAnalysis
-            Streamflow object with .ts and .m_cal attributes.
+            Streamflow object with .ts, .spi_like_set and .m_cal attributes.
         K : int, optional
             Maximum kernel length (months) to test. Defaults to self.K.
         plot : bool, default True
@@ -2366,165 +3534,100 @@ class BaseDroughtAnalysis:
             Seasonal aggregation scheme (same API as benchmark_convolution).
         seasons : dict, optional
             Custom season dict (sets agg='custom').
+        driver_var : {'SPI', 'P'}, default 'SPI'
+            'SPI' (default): drive on ``self.spi_like_set[0]`` (SPI1) - the
+            Gamma kernel is fit to standardized anomalies, consistent with
+            D(SPI)/Benchmark B. 'P': drive on raw ``self.ts`` instead - the
+            classical Nash IUH on physical rainfall; the kernel shape then
+            keeps its literal "unit hydrograph" reading, at the cost of no
+            longer being on the same footing as D(SPI)'s R².
+        target_var : {'SQI', 'Q'}, default 'SQI'
+            'SQI' (default): predict ``streamflow.spi_like_set[0]`` (SQI1),
+            so R² is directly comparable to D(SPI)'s. 'Q': predict raw
+            ``streamflow.ts`` instead - closer to the textbook Nash IUH, but
+            R² is then on the raw-flow scale, not comparable to D(SPI)'s.
+            Note SPI/SQI standardization is fit per calendar month and, unless
+            ``calculation_method=f_zscore``, is non-linear (a CDF->Gaussian
+            quantile map) - the OLS intercept/slope in this fit only absorbs
+            a single GLOBAL affine rescaling, so switching target_var can
+            shift the recovered (n, τ) themselves, not just their amplitude.
+        n_boot : int, default 0
+            If > 0, attach a block-bootstrap CI (same paired year-aligned
+            moving-block resampling of the raw (P, Q) overlap as
+            ``analyze_correlation``'s bootstrap). The Nelder-Mead search over
+            (n, τ) is re-run on every synthetic record and percentiles are taken
+            for the SCALARS: ``optimal_n``, ``optimal_k`` (τ), ``optimal_K`` (L)
+            and R²/RMSE/KGE. The kernel ordinates h(j) and the OLS intercept/
+            slope are NOT bootstrapped.
+        block_length : int, optional
+            Block length in months; default ``max(24, 2 * self.K)`` rounded to
+            whole years. Pass e.g. 72 for 6-year blocks.
+        ci : tuple, default (2.5, 97.5)
+        circular, random_state
+            As in ``analyze_correlation``.
+        boot_l_step : int, default 3
+            Stride of the kernel-length (L) search INSIDE the bootstrap replicas
+            only: L runs over ``range(2, K + 1, boot_l_step)`` instead of every
+            integer, cutting the per-replica cost ~``boot_l_step``-fold. The
+            point estimate always uses the full L sweep. A coarser stride makes
+            the ``optimal_K`` bootstrap distribution correspondingly granular.
 
         Returns
         -------
         dict (no seasonal split) or dict-of-dicts (seasonal split) with keys:
-            'optimal_L'  : int
+            'optimal_K'  : int (optimal kernel length L)
             'optimal_n'  : float
             'optimal_k'  : float
             'R2'         : float
-            'kernel'     : ndarray, shape (optimal_L,)
+            'kernel'     : ndarray, shape (optimal_K,)
+            'metrics'    : dict of evaluation metrics (see _eval_metrics)
             'sample_number' : int  (only in seasonal mode)
+            'ci' / 'boot' / 'boot_meta' : only if n_boot > 0 (per season in
+                                          seasonal mode)
 
         References
         ----------
         Nash, J.E. (1957). The form of the instantaneous unit hydrograph.
             IAHS Publ., 45(3), 114-121.
         """
-        from scipy.optimize import minimize
-
         self._check_correlation_eligible()
+        driver, target, driver_label, target_label, self_idx, sf_idx, months_overlap = \
+            self._kernel_benchmark_series(streamflow, driver_var, target_var)
 
         if K is None:
             K = self.K
         if seasons is not None:
             agg = 'custom'
 
-        # --- temporal overlap ---
-        self_idx, sf_idx = find_overlap(self.m_cal, streamflow.m_cal)
-        if len(self_idx) == 0:
-            raise ValueError("No overlapping data found.")
+        def _simulate(res):
+            return self._lag_convolve(driver, res['kernel'])
 
-        driver = self.ts[self_idx]
-        target = streamflow.spi_like_set[0, sf_idx]
-        m_cal_overlap = np.array([self.m_cal[i] for i in self_idx])
-        months_overlap = np.array([m[0] for m in m_cal_overlap], dtype=int)
-
-        def _optimize_nash(driver, target, season_mask=None):
-            """Optimise Nash IUH for a given data subset.
-            the challange is figure out the two paramters definish the best gamma-shaped kernel
-            testing incresing kernle from 1 to K"""
-
-
-
-            best = {'R2': -np.inf, 'L': None, 'n': None, 'k': None}
-
-            for L in range(2, K + 1):
-                def neg_r2(params):
-                    """Scipy minimize look to the minima!
-                    we pass -R² so the minimum corresponds to the maximum of R².
-                    """
-                    n_, k_ = params
-                    if n_ <= 0 or k_ <= 0 or n_ > 20 or k_ > K:
-                        return 1.0  # infeasible
-                    # given possible n_ and k_, build the bell-shaped kernel of lenght L,
-                    h = self._nash_kernel(n_, k_, L)
-                    # now fit the convolutional model and estimate the R2
-                    r2 = self._convolve_r2(driver, target, h,season_mask=season_mask)
-                    return -r2 if np.isfinite(r2) else 1.0
-
-                # grid of starting points: (n, k) ∈ {1,2,4} × {1,2,4}
-                # Starting grid (n, k) ∈ {1,2,4} × {1,2,4}: covers the physically plausible
-                # space for monthly data. n=1 is a pure exponential (reactive basin), n=4 is
-                # a broad bell (slow/inertial basin); k=1..4 months spans typical Mediterranean
-                # memory scales. The grid is intentionally coarse — Nelder-Mead refines locally
-                # from each starting point, so we only need seeds spread across the domain,
-                # not a dense coverage. For basins with very long memory (k>>4, e.g. deep
-                # aquifers), consider replacing k_grid with [1.0, Lmax/8, Lmax/4].
-                for n0 in [1.0, 2.0, 4.0]:
-                    for k0 in [1.0, 2.0, 4.0]:
-                        # Minimize moves [n, k] (the params defininf the shape of the bell-kernle
-                        # in the parameter space looking for where -R² is lowest
-                        res = minimize(neg_r2, x0=[n0, k0],
-                                       method='Nelder-Mead',
-                                       options={'xatol': 1e-4, 'fatol': 1e-4,
-                                                'maxiter': 2000})
-                        r2 = -res.fun
-                        if r2 > best['R2']:
-                            best.update({'R2': r2, 'L': L,
-                                         'n': res.x[0], 'k': res.x[1]})
-
-            #
-            kernel = self._nash_kernel(best['n'], best['k'], best['L'])
-            print(f"  Nash IUH: R²={best['R2']:.3f}  "
-                  f"L={best['L']}  n={best['n']:.2f}   τ={best['k']:.2f}")
-
-            # After best is identified, recompute simulated series for metrics
-            kernel = self._nash_kernel(best['n'], best['k'], best['L'])
-
-            # Replicate _convolve_r2 logic to obtain sim aligned with target
-            y_hat = np.full(len(driver), np.nan)
-            for t in range(best['L'] - 1, len(driver)):
-                y_hat[t] = np.dot(kernel, driver[t - best['L'] + 1: t + 1][::-1])
-
-            if season_mask is not None:
-                y_hat_eval = y_hat[season_mask]
-                target_eval = target[season_mask]
-            else:
-                y_hat_eval = y_hat
-                target_eval = target
-
-            # OLS rescaling (same as _convolve_r2) to match target scale
-            mask_v = np.isfinite(y_hat_eval) & np.isfinite(target_eval)
-            X = np.column_stack([y_hat_eval[mask_v], np.ones(mask_v.sum())])
-            b, _, _, _ = np.linalg.lstsq(X, target_eval[mask_v], rcond=None)
-            sim_rescaled = np.full_like(y_hat_eval, np.nan, dtype=float)
-            sim_rescaled[mask_v] = X @ b
-
-            metrics = self._eval_metrics(target_eval, sim_rescaled)
-
-            return {
-                'optimal_K': best['L'],
-                'optimal_n': best['n'],
-                'optimal_k': best['k'],
-                'R2': best['R2'],
-                'kernel': kernel,
-                'metrics': metrics,
-            }
+        def _kernel_panel(ax, res, title):
+            L = res['optimal_K']
+            ax.bar(np.arange(1, L + 1), res['kernel'], color='grey', edgecolor='k', lw=0.5)
+            ax.set_xlabel('lag index j (j = 1: contemporaneous month)')
+            ax.set_ylabel('Weight h(j)')
+            ax.set_title(f'{title}(n={res["optimal_n"]:.2f}, '
+                         f'τ={res["optimal_k"]:.2f}, K={L})')
+            ax.grid(alpha=0.3, axis='y')
 
         # ── no seasonal split ──────────────────────────────────────────────────
         if agg is None:
-            print("Starting Nash IUH benchmark...")
-            # overall best triplet (K*, n*, k*).
-            # K* optimal lenght of the kernel (how many months we have to look backwards)
-            # n*,k* = optimal two-params defining the gamma-shape of the kernel
-            result = _optimize_nash(driver, target)
+            print("Starting Nash kernel benchmark...")
+            result = self._nash_fit(driver, target, K)
 
-            if plot:
-                K = result['optimal_K']
-                h = result['kernel']
-                mask = np.isfinite(target)
-                y_hat = np.full(len(driver), np.nan)
-                for t in range(K - 1, len(driver)):
-                    y_hat[t] = np.dot(h, driver[t - K + 1: t + 1][::-1])
-                # fit intercept for plot
-                vm = np.isfinite(y_hat) & mask
-                X = np.column_stack([y_hat[vm], np.ones(vm.sum())])
-                beta, _, _, _ = np.linalg.lstsq(X, target[vm], rcond=None)
+            if n_boot > 0:
+                self._attach_benchmark_ci(
+                    'nash', streamflow, self_idx, sf_idx, K, result, None, None,
+                    n_boot=n_boot, block_length=block_length, ci=ci,
+                    circular=circular, random_state=random_state,
+                    l_step=boot_l_step, driver_var=driver_var, target_var=target_var)
 
+            if plot and result['optimal_K'] is not None:
                 fig, axes = plt.subplots(1, 2, figsize=(10, 3))
-                lags = np.arange(1, K + 1)
-                axes[0].bar(lags, h, color='grey', edgecolor='k', lw=0.5)
-                axes[0].set_xlabel('Lag (months)')
-                axes[0].set_ylabel('Weight h(j)')
-                axes[0].set_title(
-                    f'Nash IUH kernel  (n={result["optimal_n"]:.2f}, '
-                    f' τ={result["optimal_k"]:.2f}, K={K})')
-                axes[0].grid(alpha=0.3, axis='y')
-
-                Q_fit = X @ beta
-                axes[1].plot(Q_fit, target[vm], 'o', color='grey',
-                             alpha=0.5, label=f'R²={result["R2"]:.3f}')
-                axes[1].plot(
-                    [target[vm].min(), target[vm].max()],
-                    [target[vm].min(), target[vm].max()],
-                    '--', color='grey')
-                axes[1].set_xlabel('SQI1 simulated')
-                axes[1].set_ylabel('SQI1 observed')
-                axes[1].set_title('Nash IUH — best fit')
-                axes[1].legend()
-                axes[1].grid(alpha=0.3)
+                _kernel_panel(axes[0], result, f'Nash kernel on {driver_label}  ')
+                self._plot_rescaled_fit(axes[1], _simulate(result), target, None,
+                                        result['R2'], target_label, 'Nash kernel — best fit')
                 plt.tight_layout()
                 plt.show()
 
@@ -2537,7 +3640,7 @@ class BaseDroughtAnalysis:
         if missing:
             print("Alert: missing month(s):", missing)
 
-        print("Starting Nash IUH benchmark (seasonal)...")
+        print("Starting Nash kernel benchmark (seasonal)...")
         results = {}
         for name, mlist in seasons_dict.items():
             idx = np.isin(months_overlap, mlist)
@@ -2545,113 +3648,135 @@ class BaseDroughtAnalysis:
                 print(f"  Season {name}: insufficient data, skipped.")
                 continue
             print(f"  Season {name}:", end=' ')
-            res = _optimize_nash(driver, target, idx)
+            res = self._nash_fit(driver, target, K, season_mask=idx)
             res['sample_number'] = int(np.count_nonzero(idx))
             results[name] = res
 
-        if plot and results:
-            n_seasons = len(results)
+        if n_boot > 0 and results:
+            self._attach_benchmark_ci(
+                'nash', streamflow, self_idx, sf_idx, K, results, agg, seasons_dict,
+                n_boot=n_boot, block_length=block_length, ci=ci,
+                circular=circular, random_state=random_state, l_step=boot_l_step,
+                driver_var=driver_var, target_var=target_var)
+
+        plot_res = {k: v for k, v in results.items() if v['optimal_K'] is not None}
+        if plot and plot_res:
+            n_seasons = len(plot_res)
             fig, axes = plt.subplots(nrows=n_seasons, ncols=2,
-                                     figsize=(10, 3 * n_seasons))
-            if n_seasons == 1:
-                axes = axes[np.newaxis, :]
-            for i, (season, res) in enumerate(results.items()):
-                K = res['optimal_K']
-                h = res['kernel']
-                lags = np.arange(1, K + 1)
-                axes[i, 0].bar(lags, h, color='grey',
-                               edgecolor='k', lw=0.5)
-                axes[i, 0].set_xlabel('Lag (months)')
-                axes[i, 0].set_ylabel('Weight h(j)')
-                axes[i, 0].set_title(
-                    f'{season} — Nash IUH  '
-                    f'(n={res["optimal_n"]:.2f}, τ={res["optimal_k"]:.2f}, '
-                    f'K={K})')
-                axes[i, 0].grid(alpha=0.3, axis='y')
-
+                                     figsize=(10, 3 * n_seasons), squeeze=False)
+            for i, (season, res) in enumerate(plot_res.items()):
+                _kernel_panel(axes[i, 0], res, f'{season} — Nash kernel  ')
                 idx = np.isin(months_overlap, seasons_dict[season])
-                # convolve on the full contiguous series, then filter by season
-                y_hat_full = np.full(len(driver), np.nan)
-                for t in range(K - 1, len(driver)):
-                    y_hat_full[t] = np.dot(h, driver[t - K + 1: t + 1][::-1])
-                vm = np.isfinite(y_hat_full[idx]) & np.isfinite(target[idx])
-                # riapplica OLS per riscalare y_hat come fa _convolve_r2
-                X = np.column_stack([y_hat_full[idx][vm], np.ones(vm.sum())])
-                beta, _, _, _ = np.linalg.lstsq(X, target[idx][vm], rcond=None)
-                Q_fit = X @ beta
-                axes[i, 1].plot(Q_fit, target[idx][vm], 'o',
-                                color='grey', alpha=0.5,
-                                label=f'R²={res["R2"]:.3f}')
-
-                axes[i, 1].plot(
-                    [target[idx][vm].min(), target[idx][vm].max()],
-                    [target[idx][vm].min(), target[idx][vm].max()],
-                    '--', color='grey')
-                axes[i,1].set_xlabel('SQI1 simulated')
-                axes[i,1].set_ylabel('SQI1 observed')
-                axes[i, 1].set_title(f'Nash IUH | {season} — best fit')
-                axes[i, 1].legend()
-                axes[i, 1].grid(alpha=0.3)
-
-            plt.show()
+                self._plot_rescaled_fit(axes[i, 1], _simulate(res), target, idx,
+                                        res['R2'], target_label,
+                                        f'Nash kernel | {season} — best fit')
             plt.tight_layout()
-
+            plt.show()
 
         return results
+
+    def _kernel_benchmark_series(self, streamflow, driver_var, target_var):
+        """Driver/target series of the kernel benchmarks (Nash, IHACRES) on the
+        temporal overlap: 'SPI' -> self.spi_like_set[0], 'P' -> self.ts;
+        'SQI' -> streamflow.spi_like_set[0], 'Q' -> streamflow.ts."""
+        if driver_var not in ('P', 'SPI'):
+            raise ValueError("driver_var must be 'P' (raw driver series) or "
+                             "'SPI' (its 1-month SPI-like index); got %r." % (driver_var,))
+        if target_var not in ('Q', 'SQI'):
+            raise ValueError("target_var must be 'Q' (raw streamflow) or "
+                             "'SQI' (SQI1); got %r." % (target_var,))
+        self_idx, sf_idx = find_overlap(self.m_cal, streamflow.m_cal)
+        if len(self_idx) == 0:
+            raise ValueError("No overlapping data found.")
+        driver = self.ts[self_idx] if driver_var == 'P' else self.spi_like_set[0, self_idx]
+        target = (streamflow.ts[sf_idx] if target_var == 'Q'
+                  else streamflow.spi_like_set[0, sf_idx])
+        driver_label = 'raw driver' if driver_var == 'P' else f"{self.index_name}1"
+        target_label = 'Q' if target_var == 'Q' else f"{streamflow.index_name}1"
+        months_overlap = self.m_cal[self_idx, 0].astype(int)
+        return driver, target, driver_label, target_label, self_idx, sf_idx, months_overlap
+
+    @staticmethod
+    def _plot_rescaled_fit(ax, y_hat, target, season_mask, r2, target_label, title):
+        """Observed vs simulated scatter, after the same global OLS rescaling the
+        R² objective allows. ``y_hat`` is the fit's own simulation (from the
+        same helper the optimiser used), restricted to the season AFTER the
+        convolution on the full series."""
+        if season_mask is not None:
+            y_hat, target = y_hat[season_mask], target[season_mask]
+        vm = np.isfinite(y_hat) & np.isfinite(target)
+        X = np.column_stack([y_hat[vm], np.ones(vm.sum())])
+        beta, _, _, _ = np.linalg.lstsq(X, target[vm], rcond=None)
+        ax.plot(X @ beta, target[vm], 'o', color='grey', alpha=0.5, label=f'R²={r2:.3f}')
+        lo, hi = target[vm].min(), target[vm].max()
+        ax.plot([lo, hi], [lo, hi], '--', color='grey')
+        ax.set_xlabel(f'{target_label} simulated')
+        ax.set_ylabel(f'{target_label} observed')
+        ax.set_title(title)
+        ax.legend()
+        ax.grid(alpha=0.3)
 
     # ──────────────────────────────────────────────────────────────────────────────
     # METHOD 2 — benchmark_ihacres
     # ──────────────────────────────────────────────────────────────────────────────
     def benchmark_ihacres(self, streamflow, K=None, plot=True,
-                          agg=None, seasons=None):
+                          agg=None, seasons=None, n_boot=0, block_length=None,
+                          ci=(2.5, 97.5), circular=True, random_state=None,
+                          boot_l_step=3, driver_var='P', target_var='SQI'):
         """
-        This method predicts the standardized streamflow anomaly SQI_1(t) from raw precipitation P(t-j)
-        via a parametric kernel. Standardization of the target makes R² directly comparable to D(SPI).
-        The kernel shape retains its physical interpretation;
-        amplitude is absorbed by the OLS intercept and slope during fitting.
-
         IHACRES-inspired two-component benchmark (fast + slow routing).
-        Idea: The basin response is not a single process but the superposition
-        of two components with different velocities:
-        IHACRES uses  two decreasing exponentials, mixed in proportion "alpha".
 
-        Thus, monthly streamflow is modelled as the weighted sum of two linear
-        reservoir responses convolved with raw precipitation:
+        The basin response is modelled as the superposition of two linear
+        reservoirs with different time constants, mixed in proportion alpha:
 
-            SQI1(t) = alpha * Q_fast(t) + (1 - alpha) * Q_slow(t) + intercept
+            target_hat(t) = alpha · Q_fast(t) + (1 - alpha) · Q_slow(t)
+            Q_fast(t) = Σ_{i=0}^{L-1} h(i; τ_f) · driver(t - i)
+            Q_slow(t) = Σ_{i=0}^{L-1} h(i; τ_s) · driver(t - i)
 
-        e.g.,   alpha = 0.8 → basin dominated by rapid response.
-                alpha = 0.2 → basin dominated by baseflow
+        with h(i; τ) = exp(-i/τ) / Σ_m exp(-m/τ) a single-reservoir kernel (the
+        Nash kernel with n = 1): its largest weight, h(0), multiplies the
+        contemporaneous driver, and the weights decay with lag. As for every
+        other benchmark, the R² objective (squared Pearson) implicitly allows
+        one global affine rescaling of target_hat.
 
-        where:
-            Q_fast(t) = Σ_{j=0}^{K-1} h_fast(j; tau_f) · P(t-j)
-            Q_slow(t) = Σ_{j=0}^{K-1} h_slow(j; tau_s) · P(t-j)
+        e.g.,   alpha = 0.8 → basin dominated by the rapid response,
+                alpha = 0.2 → basin dominated by baseflow.
 
-        and h(j; tau) = exp(-j/tau) / Σ exp(-i/tau)  is a single-reservoir
-        (exponential) kernel — the Nash IUH with n=1.
-
-        Free parameters: tau_f, tau_s, alpha  (3 params total, K fixed by search).
-        Constraints: 0 < tau_f < tau_s,  0 < alpha < 1.
+        Free parameters: τ_f, τ_s, alpha (L chosen by search). Bounds:
+        0.5 <= τ_f <= 6, 2 <= τ_s <= 2K, τ_s - τ_f >= 1, 0.05 <= alpha <= 0.95.
 
         Physical interpretation
         -----------------------
         This is the linear routing module of IHACRES (Jakeman & Hornberger,
-        1993) applied directly to monthly P without the non-linear loss
-        module (which requires temperature or PET). At monthly scale the
-        loss non-linearity is secondary, and R² relative to the free-kernel
-        OLS benchmark captures the residual unexplained variance attributable
-        to ET and storage non-linearities.
+        1993) applied directly to monthly data without the non-linear loss
+        module (which requires temperature or PET). At monthly scale the loss
+        non-linearity is secondary, and R² relative to the free-kernel OLS
+        benchmark captures the residual unexplained variance attributable to
+        ET and storage non-linearities.
 
         Parameters
         ----------
         streamflow : BaseDroughtAnalysis
-            Streamflow object with .ts and .m_cal attributes.
-        K: int, optional
+            Streamflow object with .ts, .spi_like_set and .m_cal attributes.
+        K : int, optional
             Maximum kernel length (months). Defaults to self.K.
         plot : bool, default True
         agg : str or None
             Seasonal aggregation (same API as benchmark_convolution).
         seasons : dict, optional
+        driver_var : {'P', 'SPI'}, default 'P'
+            'P' (default): drive on the raw series ``self.ts`` (the classical
+            IHACRES reading). 'SPI': drive on ``self.spi_like_set[0]`` (SPI1),
+            the same driver as D(SPI) and Benchmarks B/C.
+        target_var : {'SQI', 'Q'}, default 'SQI'
+            'SQI' (default): predict SQI1, so R² is comparable to D(SPI)'s.
+            'Q': predict raw ``streamflow.ts``.
+        n_boot, block_length, ci, circular, random_state, boot_l_step
+            Block-bootstrap CI, same procedure and semantics as in
+            ``benchmark_nash`` (scalars only: ``optimal_tau_f``,
+            ``optimal_tau_s``, ``optimal_alpha``, ``optimal_K``, R²/RMSE/KGE —
+            never the two exponential kernels or the OLS rescaling).
+            ``boot_l_step`` thins the L search inside the replicas.
 
         Returns
         -------
@@ -2663,7 +3788,10 @@ class BaseDroughtAnalysis:
             'R2'           : float
             'kernel_fast'  : ndarray
             'kernel_slow'  : ndarray
+            'metrics'      : dict of evaluation metrics (see _eval_metrics)
             'sample_number': int  (seasonal mode only)
+            'ci' / 'boot' / 'boot_meta' : only if n_boot > 0 (per season in
+                                          seasonal mode)
 
         References
         ----------
@@ -2672,187 +3800,52 @@ class BaseDroughtAnalysis:
             Water Resources Research, 29(8), 2637-2649.
         """
         self._check_correlation_eligible()
-
+        driver, target, driver_label, target_label, self_idx, sf_idx, months_overlap = \
+            self._kernel_benchmark_series(streamflow, driver_var, target_var)
 
         if K is None:
             K = self.K
         if seasons is not None:
             agg = 'custom'
 
-        self_idx, sf_idx = find_overlap(self.m_cal, streamflow.m_cal)
-        if len(self_idx) == 0:
-            raise ValueError("No overlapping data found.")
+        def _simulate(res):
+            return self._ihacres_simulate(driver, res['optimal_tau_f'],
+                                          res['optimal_tau_s'], res['optimal_alpha'],
+                                          res['optimal_K'])
 
-        driver = self.ts[self_idx]
-        target = streamflow.spi_like_set[0, sf_idx]
-        m_cal_overlap = np.array([self.m_cal[i] for i in self_idx])
-        months_overlap = np.array([m[0] for m in m_cal_overlap], dtype=int)
+        def _kernel_panel(ax, res, title):
+            L = res['optimal_K']
+            lags = np.arange(1, L + 1)
+            width = 0.3
+            ax.bar(lags - width / 2, res['kernel_fast'], width=width, alpha=0.7,
+                   color='tab:orange', edgecolor='grey',
+                   label=f'fast τ={res["optimal_tau_f"]:.1f}')
+            ax.bar(lags + width / 2, res['kernel_slow'], width=width, alpha=0.7,
+                   color='tab:blue', edgecolor='grey',
+                   label=f'slow τ={res["optimal_tau_s"]:.1f}')
+            ax.set_xlabel('lag index j (j = 1: contemporaneous month)')
+            ax.set_ylabel('Weight h(j)')
+            ax.set_title(f'{title}α={res["optimal_alpha"]:.2f}  K={L}')
+            ax.legend()
+            ax.grid(alpha=0.3, axis='y')
 
-        def _exp_kernel(tau: float, K: int) -> np.ndarray:
-            """This is the Nash IUH with n=1—a single linear reservoir.
-            The response decays exponentially with time constant τ.
-            With small τ it decays quickly (fast), with large τ it decays slowly (slow)."""
-            j = np.arange(K, dtype=float)
-            h = np.exp(-j / tau)
-            # the resulting weights must be normalized:
-            return h / h.sum()
-
-        def _run_ihacres(drv, tgt, season_mask=None):
-            """Optimise IHACRES two-component model for a given data subset.
-
-            Fix 1: vectorized convolution via np.convolve (≈50-100× faster).
-            Fix 2: reduced multi-start grid (3 physically-motivated seeds).
-            Fix 3: hard bounds on tau_f, tau_s, alpha via L-BFGS-B instead of
-                   Nelder-Mead with penalty. Prevents collapse of tau_f → 0 and
-                   ensures tau_s > tau_f + delta_min.
-            """
-            from scipy.optimize import minimize
-
-            best = {'R2': -np.inf, 'K': None,
-                    'tau_f': None, 'tau_s': None, 'alpha': None}
-
-            # --- Hard bounds (physical constraints) ---
-            TAU_F_MIN = 0.5  # fast reservoir: at least 0.5 months
-            TAU_F_MAX = 6.0  # fast reservoir: at most 6 months
-            TAU_S_MIN = 2.0  # slow reservoir: at least 2 months
-            # TAU_S_MAX set dynamically as 2*K to allow long memory
-            ALPHA_MIN = 0.05  # at least 5% fast component
-            ALPHA_MAX = 0.95  # at most 95% fast component
-            DELTA_MIN = 1.0  # slow reservoir must exceed fast by at least 1 month
-
-            def neg_r2_factory(L_):
-                def neg_r2(params):
-                    tau_f, tau_s, alpha = params
-
-                    # Soft separation penalty (additional to bounds, keeps tau_s > tau_f)
-                    if tau_s - tau_f < DELTA_MIN:
-                        return 1.0 + (DELTA_MIN - (tau_s - tau_f))
-
-                    h_f = _exp_kernel(tau_f, L_)
-                    h_s = _exp_kernel(tau_s, L_)
-
-                    n = len(drv)
-                    Q_fast = np.convolve(drv, h_f[::-1], mode='full')[:n]
-                    Q_slow = np.convolve(drv, h_s[::-1], mode='full')[:n]
-                    Q_fast[:L_ - 1] = np.nan
-                    Q_slow[:L_ - 1] = np.nan
-                    Q_sim = alpha * Q_fast + (1 - alpha) * Q_slow
-
-                    if season_mask is not None:
-                        Q_sim = Q_sim[season_mask]
-                        tgt_loc = tgt[season_mask]
-                    else:
-                        tgt_loc = tgt
-
-                    mask = np.isfinite(tgt_loc) & np.isfinite(Q_sim)
-                    if mask.sum() < 5:
-                        return 1.0
-                    X = np.column_stack([Q_sim[mask], np.ones(mask.sum())])
-                    y = tgt_loc[mask]
-                    beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-                    ss_res = np.sum((y - X @ beta) ** 2)
-                    ss_tot = np.sum((y - y.mean()) ** 2)
-                    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else -1.0
-                    return -r2 if np.isfinite(r2) else 1.0
-
-                return neg_r2
-
-            starting_points = [
-                (1.0, 4.0, 0.7),
-                (2.0, 8.0, 0.5),
-                (2.0, 12.0, 0.3),
-            ]
-
-            for L_ in range(2, K + 1):
-                neg_r2 = neg_r2_factory(L_)
-                # bounds: tau_f ∈ [0.5, 6], tau_s ∈ [2, 2*K], alpha ∈ [0.05, 0.95]
-                bounds = [
-                    (TAU_F_MIN, TAU_F_MAX),
-                    (TAU_S_MIN, 2.0 * K),
-                    (ALPHA_MIN, ALPHA_MAX),
-                ]
-                for tf0, ts0, a0 in starting_points:
-                    # Clip starting point within bounds
-                    tf0_c = np.clip(tf0, TAU_F_MIN, TAU_F_MAX)
-                    ts0_c = np.clip(ts0, max(TAU_S_MIN, tf0_c + DELTA_MIN), 2.0 * K)
-                    a0_c = np.clip(a0, ALPHA_MIN, ALPHA_MAX)
-
-                    res = minimize(neg_r2, x0=[tf0_c, ts0_c, a0_c],
-                                   method='L-BFGS-B',
-                                   bounds=bounds,
-                                   options={'ftol': 1e-6, 'maxiter': 300})
-                    r2 = -res.fun
-                    if r2 > best['R2']:
-                        best.update({'R2': r2, 'K': L_,
-                                     'tau_f': res.x[0],
-                                     'tau_s': res.x[1],
-                                     'alpha': res.x[2]})
-
-            h_f = _exp_kernel(best['tau_f'], best['K'])
-            h_s = _exp_kernel(best['tau_s'], best['K'])
-            print(f"  IHACRES: R²={best['R2']:.3f}  K={best['K']}  "
-                  f"τ_fast={best['tau_f']:.2f}  τ_slow={best['tau_s']:.2f}  "
-                  f"α={best['alpha']:.2f}")
-            return {
-                'optimal_K': best['K'],
-                'optimal_tau_f': best['tau_f'],
-                'optimal_tau_s': best['tau_s'],
-                'optimal_alpha': best['alpha'],
-                'R2': best['R2'],
-                'kernel_fast': h_f,
-                'kernel_slow': h_s,
-            }
         # ── no seasonal split ──────────────────────────────────────────────────
         if agg is None:
             print("Starting IHACRES benchmark...")
-            result = _run_ihacres(driver, target)
+            result = self._ihacres_fit(driver, target, K)
 
-            if plot:
-                K = result['optimal_K']
-                h_f = result['kernel_fast']
-                h_s = result['kernel_slow']
-                alpha = result['optimal_alpha']
-                n = len(driver)
-                Q_fast = np.full(n, np.nan)
-                Q_slow = np.full(n, np.nan)
-                for t in range(K - 1, n):
-                    seg = driver[t - K + 1: t + 1][::-1]
-                    Q_fast[t] = np.dot(h_f, seg)
-                    Q_slow[t] = np.dot(h_s, seg)
-                Q_sim = alpha * Q_fast + (1 - alpha) * Q_slow
-                mask = np.isfinite(target) & np.isfinite(Q_sim)
-                X = np.column_stack([Q_sim[mask], np.ones(mask.sum())])
-                beta, _, _, _ = np.linalg.lstsq(X, target[mask], rcond=None)
-                Q_fit = X @ beta
+            if n_boot > 0:
+                self._attach_benchmark_ci(
+                    'ihacres', streamflow, self_idx, sf_idx, K, result, None, None,
+                    n_boot=n_boot, block_length=block_length, ci=ci,
+                    circular=circular, random_state=random_state,
+                    l_step=boot_l_step, driver_var=driver_var, target_var=target_var)
 
+            if plot and result['optimal_K'] is not None:
                 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-                lags = np.arange(1, K + 1)
-                width = 0.3
-                axes[0].bar(lags - width / 2, h_f, width=width, alpha=0.7,
-                            color='tab:orange',edgecolor='grey',
-                            label=f'fast τ={result["optimal_tau_f"]:.1f}')
-                axes[0].bar(lags + width / 2, h_s, width=width, alpha=0.7,
-                            color='tab:blue',edgecolor='grey',
-                            label=f'slow τ={result["optimal_tau_s"]:.1f}')
-                axes[0].set_xlabel('Lag (months)')
-                axes[0].set_ylabel('Weight h(j)')
-                axes[0].set_title(
-                    f'IHACRES kernels  α={result["optimal_alpha"]:.2f}  K={K}')
-                axes[0].legend()
-                axes[0].grid(alpha=0.3, axis='y')
-
-                axes[1].plot(Q_fit, target[mask], 'o',
-                             color='grey', alpha=0.5,
-                             label=f'R²={result["R2"]:.3f}')
-                axes[1].plot(
-                    [target[mask].min(), target[mask].max()],
-                    [target[mask].min(), target[mask].max()],
-                    '--', color='grey')
-                axes[1].set_xlabel('Q simulated')
-                axes[1].set_ylabel('Q observed')
-                axes[1].set_title('IHACRES — best fit')
-                axes[1].legend()
-                axes[1].grid(alpha=0.3)
+                _kernel_panel(axes[0], result, f'IHACRES kernels on {driver_label}  ')
+                self._plot_rescaled_fit(axes[1], _simulate(result), target, None,
+                                        result['R2'], target_label, 'IHACRES — best fit')
                 plt.tight_layout()
                 plt.show()
 
@@ -2873,407 +3866,77 @@ class BaseDroughtAnalysis:
                 print(f"  Season {name}: insufficient data, skipped.")
                 continue
             print(f"  Season {name}:", end=' ')
-            res = _run_ihacres(driver, target, season_mask=idx)
+            res = self._ihacres_fit(driver, target, K, season_mask=idx)
             res['sample_number'] = int(np.count_nonzero(idx))
             results[name] = res
 
-        if plot and results:
-            n_seasons = len(results)
+        if n_boot > 0 and results:
+            self._attach_benchmark_ci(
+                'ihacres', streamflow, self_idx, sf_idx, K, results, agg, seasons_dict,
+                n_boot=n_boot, block_length=block_length, ci=ci,
+                circular=circular, random_state=random_state, l_step=boot_l_step,
+                driver_var=driver_var, target_var=target_var)
+
+        plot_res = {k: v for k, v in results.items() if v['optimal_K'] is not None}
+        if plot and plot_res:
+            n_seasons = len(plot_res)
             fig, axes = plt.subplots(nrows=n_seasons, ncols=2,
-                                     figsize=(14, 5 * n_seasons))
-            if n_seasons == 1:
-                axes = axes[np.newaxis, :]
-            for i, (season, res) in enumerate(results.items()):
-                K = res['optimal_K']
-                h_f = res['kernel_fast']
-                h_s = res['kernel_slow']
-                alpha = res['optimal_alpha']
-                lags = np.arange(1, K + 1)
-                width = 0.3
-                axes[i, 0].bar(lags - width / 2, h_f, width=width, alpha=0.7,
-                               color='tab:orange', edgecolor='grey',
-                               label=f'fast τ={res["optimal_tau_f"]:.1f}')
-                axes[i, 0].bar(lags + width / 2, h_s, width=width, alpha=0.7,
-                               color='tab:blue', edgecolor='grey',
-                               label=f'slow τ={res["optimal_tau_s"]:.1f}')
-                axes[i, 0].set_xlabel('Lag (months)')
-                axes[i, 0].set_ylabel('Weight h(j)')
-                axes[i, 0].set_title(f'{season} — IHACRES  α={alpha:.2f}  K={K}')
-                axes[i, 0].legend()
-                axes[i, 0].grid(alpha=0.3, axis='y')
-
-                # convolve on full contiguous series, then filter by season
+                                     figsize=(14, 5 * n_seasons), squeeze=False)
+            for i, (season, res) in enumerate(plot_res.items()):
+                _kernel_panel(axes[i, 0], res, f'{season} — IHACRES  ')
                 idx = np.isin(months_overlap, seasons_dict[season])
-                Q_fast_full = np.full(len(driver), np.nan)
-                Q_slow_full = np.full(len(driver), np.nan)
-                for t in range(K - 1, len(driver)):
-                    seg = driver[t - K + 1: t + 1][::-1]
-                    Q_fast_full[t] = np.dot(h_f, seg)
-                    Q_slow_full[t] = np.dot(h_s, seg)
-                Q_sim_full = alpha * Q_fast_full + (1 - alpha) * Q_slow_full
-
-                # apply OLS rescaling on seasonal subset
-                vm = np.isfinite(Q_sim_full[idx]) & np.isfinite(target[idx])
-                X = np.column_stack([Q_sim_full[idx][vm], np.ones(vm.sum())])
-                beta, _, _, _ = np.linalg.lstsq(X, target[idx][vm], rcond=None)
-                Q_fit = X @ beta
-
-                axes[i, 1].plot(Q_fit, target[idx][vm], 'o',
-                                color='grey', alpha=0.5,
-                                label=f'R²={res["R2"]:.3f}')
-                axes[i, 1].plot(
-                    [target[idx][vm].min(), target[idx][vm].max()],
-                    [target[idx][vm].min(), target[idx][vm].max()],
-                    '--', color='grey')
-                axes[i, 1].set_title(f'{season} — best fit')
-                axes[i, 1].legend()
-                axes[i, 1].grid(alpha=0.3)
-
+                self._plot_rescaled_fit(axes[i, 1], _simulate(res), target, idx,
+                                        res['R2'], target_label,
+                                        f'IHACRES | {season} — best fit')
             plt.tight_layout()
             plt.show()
 
         return results
 
     # =====================================================================
-    # =====================================================================
-    #  CDN
-    def _calculate_CDN(self):
-        """
-        Compute the Cumulative Deviation from Normal (CDN).
-
-        CDN is the cumulative sum of SPI-1 starting from the baseline period.
-        It tracks the long-term memory of standardized anomalies.
-
-        Returns:
-            ndarray: CDN values (same length as self.ts). Values before the
-            baseline start are set to zero.
-        """
-        # Get baseline indices and ensemble mean
-        tb1_id, tb2_id = baseline_indices(self.m_cal,self.start_baseline_year,self.end_baseline_year)
-        spi1 = self.spi_like_set[0].copy()
-        # estimate the average to equalize the signal:
-        cdn = np.zeros(len(self.ts))
-        cdn[tb1_id::] = np.nancumsum(np.round(spi1[tb1_id::],3))#per evitare che si trascina errori
-        # base = np.mean(cdn)
-        # CDN = cdn-base
-
-        return cdn
-
-    def normal_values(self):
-        """
-          Compute the "normal" values of the  climatology  using the inverse function of the SPI-like index.
-
-          This method calculates the "normal" values for the variable of interest based on the
-          inverse of the SPI-like index at scale 1 (SPI_like_index_1 == 0). It uses the coefficients
-          (`self.c2r_index`) from the polynomial fitting of the SPI-like index for each month.
-          The normal values are computed for all months and tiled across the entire timeframe.
-
-          Returns
-          -------
-          numpy.ndarray
-              An array of "normal" values corresponding to the timeseries length (`self.ts`).
-
-
-          """
-        Nn = np.zeros(12)
-        for m in range(12):
-            Nn[m] = np.polyval(self.c2r_index[0,m,:],0)
-        Normal = np.tile(np.squeeze(Nn),len(np.unique(self.m_cal[:,1])))
-        Normal = Normal[0:len(self.ts)]
-        return Normal
-
-    def deficit_from_spi(self, window, spi=None, coeff=None):
-        """
-        Estimate the cumulative water deficit/surplus over a moving window,
-        derived from the SPI-like index at the matching accumulation scale.
-
-        Rather than summing raw monthly anomalies (which, for precipitation, are
-        bounded below by zero and unbounded above, producing a systematic positive
-        skew), this method maps the anomaly through the SPI-like space. The SPI-like
-        index at scale `window` is converted back to native cumulative units via the
-        polynomial calibration stored in `c2r_index`, and the deficit/surplus is taken
-        relative to the SPI=0 reference (which, by construction, coincides with
-        `normal_values()`).
-
-        The resulting deficit is expressed in physical units and reflects the
-        statistical rarity of the accumulated anomaly. Note that, because the c2r
-        calibration is the non-linear (gamma-based) inverse transform, the deficit in
-        native units remains physically asymmetric even though the SPI itself is
-        symmetric; this asymmetry is intentional and reflects the real bounded nature
-        of the variable.
-
-        Parameters
-        ----------
-        window : int
-            Accumulation scale in months, equal to the moving-window length.
-        spi : ndarray, optional
-            Pre-computed SPI-like series at scale `window`. If None, it is retrieved
-            from `self.spi_like_set` when `window <= self.K`, or computed on the fly
-            via `_compute_spi(month_scale=window)` otherwise.
-        coeff : ndarray, optional
-            Pre-computed c2r calibration coefficients (shape (12, n_coef)) at scale
-            `window`. Retrieved or computed together with `spi` when not provided.
-
-        Returns
-        -------
-        deficit : ndarray, shape (n,)
-            Cumulative deficit (negative) or surplus (positive) over the preceding
-            `window` months, in native cumulative units: millimetres for
-            Precipitation, cubic metres (total volume) for Streamflow. For Streamflow,
-            the cumulative sum of monthly mean discharges (m^3/s) returned by the
-            calibration is converted to total volume by multiplying by the average
-            number of seconds per month. Entries are NaN wherever the SPI-like index
-            is undefined (the first `window-1` months, or any gaps propagated from
-            missing values in the input series).
-
-        Notes
-        -----
-        - The SPI=0 reference equals `normal_values()` by construction, so this deficit
-          is consistent with the rest of the framework's climatological baseline.
-        - For scales exceeding `self.K`, the SPI fit reuses the same baseline period
-          (`start_baseline_year`, `end_baseline_year`) as initialisation. At long
-          scales the number of independent samples per reference month is small, so
-          the gamma fit should be interpreted with care.
-        """
-
-        from drought_scan.core import Streamflow
-
-        n = len(self.ts)
-        months = self.m_cal[:, 0].astype(int)
-
-        if spi is None or coeff is None:
-            if window <= self.K:
-                spi = self.spi_like_set[window - 1, :]
-                coeff = self.c2r_index[window - 1]
-            else:
-                spi, coeff = self._compute_spi(month_scale=window)
-
-        deficit = np.full(n, np.nan)
-        for x in np.where(~np.isnan(spi))[0]:
-            m = months[x] - 1
-            deficit[x] = np.polyval(coeff[m], spi[x]) - np.polyval(coeff[m], 0.0)
-
-        # Streamflow: deficit è in m³/s cumulati (somma di window medie mensili).
-        # Converti a volume totale m³ moltiplicando per i secondi medi al mese.
-        if isinstance(self, Streamflow):
-            avg_seconds_per_month = np.mean(
-                [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]) * 86400
-            deficit = deficit * avg_seconds_per_month
-
-        return deficit
-
-    def find_trends(self, var=None, window=None):
-        """
-        Analyze trends in self.CDN using rolling windows and linear regression.
-
-        Args:
-            window  (list of int, optional):   window size  in months.
-                Defaults to [60].
-
-        Returns:
-            dict: Dictionary containing results for each window size.
-                Each entry contains:
-                - 'trend': Array with -1 (negative trend), 0 (no trend), 1 (positive trend).
-                - 'slope': Array with slope coefficients.
-                - 'p_value': Array with p-values.
-                - 'delta': Array with the cumulative change (slope * window size).
-        """
-        from drought_scan.utils.statistics import _rolling_trend_analysis
-
-        # Default to a window size of 60 if none is provided
-        if window is None:
-            window = 60
-        if var is None:
-            var = self.CDN
-        results = _rolling_trend_analysis(var=var, window=window, significance=0.05)
-        return results
-
-    def volume_anomaly_rolling(self, window):
-        """
-        Compute the observed cumulative water deficit/surplus over a moving window
-        by direct summation of monthly anomalies.
-
-        For each time step, the anomaly of every month within the preceding `window`
-        months is summed, where the monthly anomaly is the difference between the
-        observed value and its climatological normal (`normal_values()`, i.e. the
-        SPI=0 reference). This yields the actual physical water balance over the
-        window, without any statistical transformation.
-
-        This is the direct, observation-based counterpart to `deficit_from_spi`:
-        `volume_anomaly_rolling` measures how many real cubic metres / millimetres
-        were missing or in excess (the quantity relevant for water-balance and
-        reservoir-management purposes), whereas `deficit_from_spi` measures the
-        statistical rarity of the accumulated anomaly. The two are strongly
-        correlated but diverge at extremes; for precipitation the raw sum is
-        physically asymmetric (bounded below by zero, unbounded above). This method
-        is useful as a sanity check and as a complementary metric to the SPI-based
-        estimate.
-
-        Parameters
-        ----------
-        window : int
-            Moving-window length in months.
-
-        Returns
-        -------
-        anomaly : ndarray, shape (n,)
-            Cumulative deficit (negative) or surplus (positive) over the preceding
-            `window` months. Units are millimetres for Precipitation. For Streamflow,
-            each monthly mean discharge anomaly (m^3/s) is multiplied by the number of
-            seconds in its calendar month before summation, so the result is a total
-            volume in cubic metres. Entries are NaN for the first `window-1` months;
-            gaps from missing values in the input series propagate into the sum.
-
-        Notes
-        -----
-        - The reference (`normal_values()`) equals the SPI=0 native value by
-          construction, ensuring consistency with `deficit_from_spi` and the rest of
-          the framework's baseline.
-        - Unlike `deficit_from_spi`, no SPI fit is involved, so this method is robust
-          at any window length but does not correct the bounded-variable asymmetry.
-        """
-        n = len(self.ts)
-        months = self.m_cal[:, 0].astype(int)
-        normal = self.normal_values()
-
-        anomaly = np.full(n, np.nan)
-
-        if isinstance(self, Streamflow):
-            DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-            seconds = np.array([DAYS_IN_MONTH[m - 1] * 86400 for m in months])
-            delta_per_month = (self.ts - normal[months - 1]) * seconds  # m³/mese
-        else:  # Precipitation
-            delta_per_month = self.ts - normal[months - 1]  # mm/mese
-
-        for i in range(window - 1, n):
-            anomaly[i] = np.sum(delta_per_month[i - window + 1: i + 1])
-
-        return anomaly
-    # =====================================================================
-    # other
-    # =====================================================================
-    def export_scan_plot_csv(self, weight_index=2, optimal_k=None, name=None, out_dir="exports"):
-        """
-        Exports the minimum data needed in CSV format to replicate the plot_scan in another workspace.
-
-        Args:
-            weight_index (int): weight index for the SIDI (default: decreasing log = 2)
-            optimal_k (int, optional): if specified, calculates a new SIDI with optimal K
-            name (str, optional): name of the basin for filename
-            out_dir (str): directory to save the exported data
-        """
-        os.makedirs(out_dir, exist_ok=True)
-
-        # time series needed
-        df_mcal = pd.DataFrame(self.m_cal, columns=["month", "year"])
-        df_cdn = pd.DataFrame({"CDN": self.CDN})
-        spi_df = pd.DataFrame(self.spi_like_set)
-
-        # SIDI:
-        if optimal_k is not None:
-            from drought_scan.utils import generate_weights, weighted_metrics  # o path corretto
-            weights = generate_weights(k=optimal_k)
-            sidis = []
-            for j in range(len(self.m_cal)):
-                vec = self.spi_like_set[0:optimal_k, j]
-                sidis.append([weighted_metrics(vec, weights[:, weight_index])[0]])
-            sidi_vec = np.squeeze(np.array(sidis))
-        else:
-            if self.is_seasonal_sidi:
-                print(f"Note: SIDI is seasonally optimized — "
-                      f"weight_index={weight_index} is ignored (all columns identical).")
-            sidi_vec = self.SIDI[:, weight_index]
-
-        df_sidi = pd.DataFrame({"SIDI": sidi_vec})
-
-        # general metadata
-        metadata = {
-            "index_name": self.index_name,
-            "K": self.K,
-            "threshold": float(self.threshold),
-            "weight_index": int(weight_index),
-            "optimal_k": int(optimal_k) if optimal_k is not None else self.K,
-            "start_baseline_year": int(self.start_baseline_year),
-            "end_baseline_year": int(self.end_baseline_year)
-        }
-
-        if hasattr(self, "shape"):
-            metadata["area_kmq"] = self.area_kmq
-        else:
-            metadata["area_kmq"] = np.nan
-        # Salvataggio
-        prefix = name.replace(" ", "_") if name else "DS_export"
-        df_mcal.to_csv(os.path.join(out_dir, f"{prefix}_m_cal.csv"), index=False)
-        df_cdn.to_csv(os.path.join(out_dir, f"{prefix}_cdn.csv"), index=False)
-        spi_df.to_csv(os.path.join(out_dir, f"{prefix}_spi.csv"), index=False, header=False)
-        df_sidi.to_csv(os.path.join(out_dir, f"{prefix}_sidi.csv"), index=False)
-
-        with open(os.path.join(out_dir, f"{prefix}_meta.json"), "w") as f:
-            json.dump(metadata, f, indent=2)
-
-        print(f"Data exported successfully in {out_dir}/ with prefix '{prefix}'")
-
-    def _savedsplot(self):
-
-        k = self.K if not hasattr(self, 'optimal_k') or self.optimal_k is None else self.optimal_k
-        w = self.weight_index if not hasattr(self,
-                                             'optimal_weight_index') or self.optimal_weight_index is None else self.optimal_weight_index
-        baseline = self.start_baseline_year, self.end_baseline_year
-        print(f"saving plot in {os.getcwd()}")
-
-        # check the number of plots:
-        figs = plt.get_fignums()
-        if len(figs) == 1:
-            # --- singola figura ---
-            fname = f"DS_{self.basin_name}_k{k}_w{w}_baseline{baseline}.png"
-            plt.figure(figs[0]).savefig(
-                fname, dpi=300, facecolor='w', edgecolor='w',
-                bbox_inches='tight', pad_inches=0.1, metadata=None
-            )
-            print(f"  -> saved {fname}")
-
-        elif len(figs) == 3:
-            # --- three single figures ---
-            fnames = [
-                f"CDN_{self.basin_name}_baseline{baseline}.png",
-                f"HeatMap_{self.basin_name}_baseline{baseline}.png",
-                f"SIDI_{self.basin_name}_k{k}_w{w}_baseline{baseline}.png"
-            ]
-            for fig_num, fname in zip(figs, fnames):
-                plt.figure(fig_num).savefig(
-                    fname, dpi=300, facecolor='w', edgecolor='w',
-                    bbox_inches='tight', pad_inches=0.1, metadata=None
-                )
-                print(f"  -> saved {fname}")
-
-        else:
-            print(f"Warning: unexpected number of plots ({len(figs)}). No files saved.")
-
-    # =====================================================================
-    # ▸ STANDARD Methods GRIDDED-LEVEL
+    # ▸ SPATIAL (gridded) methods
     # =====================================================================
     @staticmethod
     def _process_grid_point(ts_ij, m_cal, K, start_baseline_year, end_baseline_year,
-                            calculation_method, M_valid, t_idx, n_weights):
+                            calculation_method, t_idx, n_weights,
+                            season_months=None):
         """Standalone computation for a single grid point — picklable by joblib.
          results = Parallel(n_jobs=-1)(
             delayed(self._process_grid_point)(
-                self.Pgrid[:, i, j],
-                self.m_cal, self.K,
+                grid[:, i, j],
+                self.m_cal, K,
                 self.start_baseline_year, self.end_baseline_year,
                 self.calculation_method,
-                M_valid, t_idx, n_weights
+                t_idx, n_weights, season_months
             )
             for (i, j) in valid_ij
         )
+
+        `season_months` mirrors recalculate_SIDI_seasonal's per-season standardization:
+        when given (a list of 1-indexed calendar months), the z-score references only
+        the baseline months belonging to that season, exactly as the seasonal SIDI
+        does. Left None, the reference is the whole baseline — the non-seasonal case.
+        Without it, spatial_sidi(seasonal_params=...) picked the season's K but then
+        standardized against the whole year, so the map was the GLOBAL SIDI evaluated
+        at a seasonal K, not the seasonal SIDI (on the Po, up to 0.16 index units
+        apart in JJA).
+
+        K may be a single integer (same scale applied to all 5 weighting schemes,
+        the historical behaviour) or a sequence of 5 — one scale per scheme, in the
+        column order of generate_weights — exactly like recalculate_SIDI /
+        _resolve_per_weight_K on the (non-spatial) time series. Each SIDI column
+        then uses its own accumulation scale instead of sharing a single one.
         """
         from drought_scan.utils.drought_indices import (
             generate_weights, weighted_metrics, baseline_indices
         )
         try:
-            # --- replicate _calculate_spi_like_set ---
-            spiset = np.full((K, len(ts_ij)), np.nan, dtype=float)
-            for k in range(1, K + 1):
+            Ks = BaseDroughtAnalysis._resolve_per_weight_K(K, n_scales=np.inf)
+            K_max = int(Ks.max())
+
+            # --- replicate _calculate_spi_like_set, up to the largest K requested ---
+            spiset = np.full((K_max, len(ts_ij)), np.nan, dtype=float)
+            for k in range(1, K_max + 1):
                 Spi_ts = np.full_like(ts_ij, np.nan, dtype=float)
                 for ref_month in range(1, 13):
                     indices, spi_values, coeff, _ = calculation_method(
@@ -3283,111 +3946,253 @@ class BaseDroughtAnalysis:
                         Spi_ts[indices] = spi_values.copy()
                 spiset[k - 1, :] = Spi_ts
 
-            # --- replicate _spi_like_set_ensemble_mean ---
-            weights = generate_weights(K)
-            sidi_raw = np.array([
-                [weighted_metrics(spiset[:K, j], w)[0] for w in weights.T]
-                for j in range(len(m_cal))
-            ], dtype=float)
+            # --- replicate _spi_like_set_ensemble_mean: one K per weighting scheme ---
+            sidi_raw = np.empty((len(m_cal), len(Ks)), dtype=float)
+            for wi, k in enumerate(Ks):
+                w = generate_weights(int(k))[:, wi]
+                for j in range(len(m_cal)):
+                    sidi_raw[j, wi] = weighted_metrics(spiset[:k, j], w)[0]
 
-            # --- replicate _calculate_SIDI ---
+            # --- replicate _calculate_SIDI / recalculate_SIDI_seasonal ---
+            # Shared helper: one formula, one guard. A degenerate baseline raises here
+            # and is caught below, so the point is reported like any other failure
+            # instead of returning a short tuple.
             tb1_id, tb2_id = baseline_indices(m_cal, start_baseline_year, end_baseline_year)
-            baseline_mean = np.nanmean(sidi_raw[tb1_id:tb2_id + 1, :], axis=0)
-            baseline_std = np.nanstd(sidi_raw[tb1_id:tb2_id + 1, :], axis=0)
-            if np.any(baseline_std == 0):
-                return None, None
-            SIDI_ij = (sidi_raw - baseline_mean) / baseline_std
+            baseline_mask = np.zeros(len(m_cal), dtype=bool)
+            baseline_mask[tb1_id:tb2_id + 1] = True
+            if season_months is not None:
+                # Per-season reference, as recalculate_SIDI_seasonal does: mixing
+                # seasons would dilute the signal the seasonal calibration isolates.
+                baseline_mask &= np.isin(m_cal[:, 0].astype(int), list(season_months))
+            SIDI_ij = BaseDroughtAnalysis._zscore_baseline(
+                sidi_raw, sidi_raw[baseline_mask, :]
+            )
 
-            spi_out = {m: spiset[m - 1, t_idx] for m in M_valid}
-
-            return SIDI_ij[t_idx, :], spi_out, None
+            return SIDI_ij[t_idx, :], None
 
         except Exception as e:
-            return None, None, str(e)  # aggiungi messaggio errore
+            return None, str(e)
 
-    def spatial_maps(self, month_scales=None, timestamp=None, K=None, seasonal_params=None):
+    # Spatial products and the method that owns each. They are snapshots at ONE
+    # timestamp, `self.spatial_timestamp`, shared by both methods.
+    _SPATIAL_PRODUCTS = {'spatial_sidi': ('SIDI_grid', 'spatial_K'),
+                         'spatial_spi': ('SPI_grid', 'reverse_SPI_grid')}
+
+    def _resolve_spatial_timestamp(self, timestamp):
         """
-        Compute gridded SPI at selected temporal scales and SIDI for each grid point in Pgrid.
+        Index into ``m_cal`` of the target timestamp of ``spatial_sidi`` /
+        ``spatial_spi`` — the same rule for both:
+
+          - ``timestamp=(month, year)`` given: that month;
+          - not given: the stored ``spatial_timestamp`` if a previous spatial call
+            set one, else the last month of ``m_cal``.
+        """
+        if timestamp is None:
+            stored = getattr(self, 'spatial_timestamp', None)
+            if stored is None:
+                return len(self.m_cal) - 1
+            month_t, year_t = stored
+        else:
+            month_t, year_t = timestamp
+        matches = np.where((self.m_cal[:, 0] == month_t) & (self.m_cal[:, 1] == year_t))[0]
+        if len(matches) == 0:
+            raise ValueError(f"Timestamp {(month_t, year_t)} not found in m_cal.")
+        return int(matches[0])
+
+    def _set_spatial_timestamp(self, t_idx, owner):
+        """
+        Commit ``m_cal[t_idx]`` as the spatial snapshot date, on behalf of
+        ``owner`` ('spatial_sidi' or 'spatial_spi'). If the date changes, EVERY
+        product of the other method is deleted (with a warning): all the maps
+        stored on the object always refer to ``spatial_timestamp``.
+        """
+        new_ts = self.m_cal[t_idx].copy()
+        old_ts = getattr(self, 'spatial_timestamp', None)
+        if old_ts is not None and not np.array_equal(new_ts, old_ts):
+            other = next(m for m in self._SPATIAL_PRODUCTS if m != owner)
+            stale = [a for a in self._SPATIAL_PRODUCTS[other] if a in self.__dict__]
+            for attr in stale:
+                delattr(self, attr)
+            if stale:
+                import warnings
+                warnings.warn(
+                    f"spatial timestamp changed from {old_ts} to {new_ts}: the "
+                    f"{other}() products ({', '.join(stale)}) referred to the old date "
+                    f"and have been removed — rerun {other}() for this date.")
+        self.spatial_timestamp = new_ts
+
+    def _spatial_grid(self):
+        """
+        The (time, n_rows, n_cols) grid of THIS object's own variable, on which
+        ``spatial_sidi`` / ``spatial_spi`` replicate the basin pipeline pixel by
+        pixel — so the maps are SIDI-like / SPI-like maps of whatever the class
+        standardizes (SPI, SPETI, SPEI, STI, ...):
+
+          - Precipitation: ``Pgrid``;  Pet: ``PETgrid``;  Temperature: ``Tgrid``;
+          - Balance: ``prec_grid - pet_grid`` (pixel-wise P - PET, on the common
+            domain ``_import_data`` cropped both grids to).
+
+        Raises ValueError if the object holds no grid: built from ``ts``/``m_cal``
+        rather than a NetCDF file, a Teleindex/Streamflow, or a Balance whose P
+        and PET grids could not be aligned (different resolutions).
+        """
+        if isinstance(self, Balance):
+            P, E = getattr(self, 'prec_grid', None), getattr(self, 'pet_grid', None)
+            if P is None or E is None:
+                raise ValueError(
+                    "No spatial grid for this Balance object: it was built from ts/m_cal, "
+                    "or its P and PET grids have different resolutions and could not be "
+                    "aligned pixel by pixel (see the warning issued at import).")
+            return P - E
+        for attr in ('Pgrid', 'PETgrid', 'Tgrid'):
+            grid = getattr(self, attr, None)
+            if grid is not None:
+                return grid
+        raise ValueError(
+            f"No spatial grid for this {type(self).__name__} object: the spatial methods "
+            f"need an object built from a gridded NetCDF file (with a shapefile), not "
+            f"from ts/m_cal.")
+
+    def spatial_sidi(self, timestamp=None, K=None, seasonal_params=None, agg=None, seasons=None):
+        """
+        Gridded SIDI (SIDI-like index of this object's variable) for each point of
+        its grid (see ``_spatial_grid``), at one timestamp.
+
+        Every pixel goes through the same pipeline as the basin-level index —
+        SPI-like set, weighted ensemble mean, standardization on the baseline — so
+        `SIDI_grid[i, j, w]` is exactly what `self.SIDI[t_idx, w]` would be for a
+        basin consisting of that pixel alone (verified to 1e-9 in the tests).
+
+        **SPI maps live in `spatial_spi()`.** This method used to also compute an
+        `SPI_grid` capped at K, which clashed with the uncapped one `spatial_spi`
+        writes: whichever ran last won, and a warning told you to be careful about
+        the order. Each method now owns one product — SIDI here, SPI and its
+        millimetre-equivalent reverse there.
 
         Args:
-            month_scales (list of int, optional): Temporal scales for SPI maps. Defaults to [1, 3, 6, 12, 18, 24].
-            timestamp (tuple, optional): (month, year) of target slice. Defaults to last timestamp.
-            K (int, optional): Max temporal scale. Overrides self.K for this computation only.
-                Note: this method has no awareness of self.optimal_k / self.optimal_weight_index
-                (set via set_optimal_SIDI). If you want the spatial grid to reflect a previously
-                optimized SIDI, pass K=self.optimal_k explicitly and select the corresponding
-                weight_index when plotting (plot_spatial(var='SIDI', weight_index=self.optimal_weight_index)).
-            seasonal_params (dict, optional): Output of set_optimal_SIDI_seasonal's
-                self.seasonal_params. If provided, K is automatically resolved to the
-                best_k of the season containing `timestamp` (or the last available
-                timestamp). Overrides `K` if both are given. A warning reports the
-                suggested weight_index to use when plotting.
+            timestamp (tuple, optional): (month, year) of target slice. Defaults to
+                the stored `spatial_timestamp` (set by a previous spatial_sidi /
+                spatial_spi call), else the last month of `m_cal` — the same rule
+                as the other spatial method (see `_resolve_spatial_timestamp`).
+            K (int or sequence of int, optional): month-scale(s) for the SIDI ensemble.
+                A single value applies the same scale to all 5 weighting schemes; a
+                sequence of 5 assigns one per scheme — one SIDI column per (K, weight)
+                optimum — exactly like `recalculate_SIDI`.
+
+                Defaults to **whatever calibration the object carries**, so the grid
+                matches `self.SIDI` without being told twice: `self.seasonal_params`
+                if a seasonal SIDI was committed, else `self.optimal_k` if a global one
+                was, else `self.K`. It used to always fall back to `self.K` and merely
+                warn that a committed `optimal_k` was being ignored.
+            seasonal_params (dict, optional): a seasonal calibration to score without
+                committing it to the object. Two shapes are accepted:
+                  * the `set_optimal_SIDI_seasonal` wrapper (i.e. `self.seasonal_params`),
+                    with `'seasons'` and `'config'` keys — the month->season mapping
+                    travels inside it; or
+                  * the raw output of `analyze_correlation_seasonal()` (keys are season
+                    names, values carry `best_k`/`col_best_weight`/`best_k_per_weight`).
+                    Then also pass `agg=` (or `seasons=`) so months can be mapped to
+                    seasons; it falls back to a committed `self.seasonal_params['agg']`.
+                K is resolved to the per-scheme optima of the season containing
+                `timestamp`, and each pixel is standardized on that season's baseline
+                months — the same per-season reference `recalculate_SIDI_seasonal` uses.
+                Overrides `K` if both are given.
+            agg (str, optional): aggregation scheme ('quarter', 'semiannual', ...) — used
+                only when `seasonal_params` is the raw `analyze_correlation_seasonal`
+                output. Must match the `agg` that output was computed with.
+            seasons (dict, optional): `{season_name: [month_ints]}` for `agg='custom'`,
+                same role as `agg`.
 
         Stores in self:
             SIDI_grid        : ndarray (n_rows, n_cols, n_weights) — all weighting schemes.
-            SPI_grid         : dict {scale: ndarray (n_rows, n_cols)}.
             spatial_timestamp: ndarray (2,) — [month, year] of the stored snapshot.
+            spatial_K        : int or sequence — K used for this spatial computation.
 
         Notes:
-            Default weight for display: weight_index=2 (see generate_weights convention).
-            Access a specific weight slice with: ds.SIDI_grid[:, :, weight_index]
+            Access a specific weight slice with: ds.SIDI_grid[:, :, weight_index].
+            `plot_spatial(var='SIDI')` picks the column via `_resolve_weight_index`.
+            All stored maps refer to ONE date, `spatial_timestamp`. If this call
+            moves it, the products of spatial_spi() (SPI_grid, reverse_SPI_grid)
+            are removed with a warning — rerun spatial_spi() for the new date.
         """
         from joblib import Parallel, delayed, cpu_count
         from drought_scan.utils.drought_indices import generate_weights
 
-        if month_scales is None:
-            month_scales = [1, 3, 6, 12, 18, 24]
-
-        _K_orig = self.K
-
         # --- resolve timestamp (needed upfront for seasonal K lookup) ---
-        if timestamp is None:
-            t_idx = len(self.m_cal) - 1
-        else:
-            month_t, year_t = timestamp
-            matches = np.where((self.m_cal[:, 0] == month_t) & (self.m_cal[:, 1] == year_t))[0]
-            if len(matches) == 0:
-                raise ValueError(f"Timestamp {timestamp} not found in m_cal.")
-            t_idx = int(matches[0])
+        t_idx = self._resolve_spatial_timestamp(timestamp)
 
         # --- resolve K from seasonal_params, if given ---
+        season_months = None
         if seasonal_params is not None:
+            # Accept either the set_optimal_SIDI_seasonal wrapper ({'seasons', 'config',
+            # 'agg'} — i.e. self.seasonal_params) or the raw analyze_correlation_seasonal
+            # output ({season_name: {'best_k', 'col_best_weight', ...}}). The raw form
+            # does not carry the month->season mapping, so it needs agg=/seasons=
+            # (falling back to a committed self.seasonal_params['agg']).
+            if 'seasons' in seasonal_params and 'config' in seasonal_params:
+                seasons_dict = seasonal_params['seasons']
+                config = seasonal_params['config']
+            else:
+                _agg, _seasons = agg, seasons
+                if _agg is None and _seasons is None:
+                    committed = getattr(self, 'seasonal_params', None)
+                    _agg = committed.get('agg') if isinstance(committed, dict) else None
+                    if _agg is None:
+                        raise ValueError(
+                            "spatial_sidi: seasonal_params looks like the raw "
+                            "analyze_correlation_seasonal output; also pass agg=... "
+                            "(or seasons=...) so months can be mapped to seasons."
+                        )
+                seasons_dict = self._build_seasons_dict(_agg, _seasons)
+                config = seasonal_params
+
             target_month = int(self.m_cal[t_idx, 0])
-            seasons_dict = seasonal_params['seasons']
             season_name = next((s for s, months in seasons_dict.items() if target_month in months), None)
             if season_name is None:
-                raise ValueError(f"Month {target_month} not covered by seasonal_params['seasons'].")
-            cfg = seasonal_params['config'][season_name]
-            K = cfg['best_k']
-            suggested_weight_index = cfg['col_best_weight']
-            import warnings
-            warnings.warn(
-                f"Using seasonal K={K} for season '{season_name}' (month {target_month}). "
-                f"Plot with weight_index={suggested_weight_index} for consistency."
-            )
+                raise ValueError(f"Month {target_month} not covered by the seasonal months.")
+            cfg = config[season_name]
+            # Prefer the per-scheme K list when available (analyze_correlation_seasonal
+            # now reports it) — one optimal K per weighting scheme, like the non-seasonal
+            # K=best_k_per_weight case, instead of forcing every scheme to the single K
+            # that only the best-correlated scheme actually peaks at.
+            K = cfg.get('best_k_per_weight', cfg['best_k'])
+            # The season's months travel with its K: the pixel SIDI is standardized on
+            # this season's baseline months only, like recalculate_SIDI_seasonal.
+            season_months = seasons_dict[season_name]
+            K_txt = [int(k) for k in np.ravel(K)]
+            print(f"Note: spatial SIDI for season '{season_name}' (month {target_month}): "
+                  f"K per scheme={K_txt}, standardized on that season's baseline months.")
+
+        # --- otherwise, follow whatever calibration the object carries ---
+        if seasonal_params is None and K is None and self.is_seasonal_sidi:
+            # A committed seasonal SIDI is a seasonal_params in all but name; re-enter
+            # the branch above with it rather than silently mapping a global index.
+            self._calibration_note()
+            return self.spatial_sidi(timestamp=timestamp,
+                                     seasonal_params=self.seasonal_params)
 
         if K is None:
-            if hasattr(self, 'optimal_k'):
-                import warnings
-                warnings.warn(
-                    f"self.optimal_k={self.optimal_k} is set (from set_optimal_SIDI) "
-                    f"but spatial_maps is using self.K={self.K}. "
-                    f"Pass K=self.optimal_k explicitly if you want spatial consistency."
-                )
-            K = self.K
-        self.K = K
+            K = getattr(self, 'optimal_k', None)
+            if K is None:
+                K = self.K
+            else:
+                # following the committed global calibration, so the grid matches
+                # self.SIDI; pass K=self.K explicitly for the un-calibrated index
+                self._calibration_note()
 
-        M_valid = [m for m in month_scales if m <= self.K]
-        if len(M_valid) < len(month_scales):
-            import warnings
-            warnings.warn(f"Scales {set(month_scales) - set(M_valid)} exceed K={self.K} and will be skipped.")
+        # NOTE: self.K is deliberately NOT reassigned. This used to set `self.K = K`,
+        # pass `self.K` to the workers and restore it at the end — so any exception in
+        # between (a failing grid point, an interrupt) left the object carrying the
+        # spatial K permanently, and a sequence K left `self.K` as a list.
+        Ks_resolved = self._resolve_per_weight_K(K, n_scales=np.inf)
 
-        n_time, n_rows, n_cols = self.Pgrid.shape
-        n_weights = generate_weights(self.K).shape[1]
+        grid = self._spatial_grid()
+        n_time, n_rows, n_cols = grid.shape
+        n_weights = generate_weights(1).shape[1]
 
         # --- pre-mask valid grid points ---
         with np.errstate(invalid='ignore'):
-            valid_mask = ~(np.all(np.isnan(self.Pgrid), axis=0) | (np.nanstd(self.Pgrid, axis=0) == 0))
+            valid_mask = ~(np.all(np.isnan(grid), axis=0) | (np.nanstd(grid, axis=0) == 0))
         valid_ij = np.argwhere(valid_mask)
         n_valid = len(valid_ij)
 
@@ -3400,30 +4205,27 @@ class BaseDroughtAnalysis:
         # --- parallel computation ---
         results = Parallel(n_jobs=-1)(
             delayed(self._process_grid_point)(
-                self.Pgrid[:, i, j],
-                self.m_cal, self.K,
+                grid[:, i, j],
+                self.m_cal, K,
                 self.start_baseline_year, self.end_baseline_year,
                 self.calculation_method,
-                M_valid, t_idx, n_weights
+                t_idx, n_weights, season_months
             )
             for (i, j) in valid_ij
         )
 
-        # --- reconstruct grids ---
+        # --- reconstruct grid ---
         SIDI_grid = np.full((n_rows, n_cols, n_weights), np.nan)
-        SPI_grid = {m: np.full((n_rows, n_cols), np.nan) for m in M_valid}
 
         n_none = 0
         errors = {}
         for idx, (i, j) in enumerate(valid_ij):
-            sidi_vals, spi_vals, err = results[idx]
+            sidi_vals, err = results[idx]
             if sidi_vals is None:
                 n_none += 1
                 errors[(i, j)] = err
                 continue
             SIDI_grid[i, j, :] = sidi_vals
-            for m in M_valid:
-                SPI_grid[m][i, j] = spi_vals[m]
 
         print(f"compute_spatial_sidi: 100% — done. ({n_none}/{len(valid_ij)} points failed)")
         if errors:
@@ -3432,184 +4234,49 @@ class BaseDroughtAnalysis:
                 n = sum(1 for v in errors.values() if v == e)
                 print(f"  {n} points: {e}")
 
+        self._set_spatial_timestamp(t_idx, owner='spatial_sidi')
         self.SIDI_grid = SIDI_grid
-        self.SPI_grid = SPI_grid
-        new_timestamp = self.m_cal[t_idx].copy()
-        if hasattr(self, 'spatial_timestamp') and not np.array_equal(new_timestamp, self.spatial_timestamp):
-            import warnings
-            warnings.warn(
-                f"timestamp changed from {self.spatial_timestamp} to {new_timestamp}. "
-                f"trend_grid has been invalidated — rerun compute_spatial_trends."
-            )
-            if hasattr(self, 'trend_grid'):
-                del self.trend_grid
-        self.spatial_timestamp = new_timestamp
         self.spatial_K = K
-        self.K = _K_orig
-
-    def spatial_maps_old(self, month_scales =None, timestamp=None, K=None):
-        """
-        Compute gridded SPI at selected temporal scales and SIDI for each grid point in Pgrid.
-
-        Args:
-            month_scales (list of int, optional): Temporal scales for SPI maps. Defaults to [1, 3, 6, 12, 18, 24].
-            timestamp (tuple, optional): (month, year) of target slice. Defaults to last timestamp.
-            K (int, optional): Max temporal scale. Overrides self.K for this computation only.
-                Note: this method has no awareness of self.optimal_k / self.optimal_weight_index
-                (set via set_optimal_SIDI). If you want the spatial grid to reflect a previously
-                optimized SIDI, pass K=self.optimal_k explicitly and select the corresponding
-                weight_index when plotting (plot_spatial(var='SIDI', weight_index=self.optimal_weight_index)).
-
-        Stores in self:
-            SIDI_grid        : ndarray (n_rows, n_cols, n_weights) — all weighting schemes.
-            SPI_grid         : dict {scale: ndarray (n_rows, n_cols)}.
-            spatial_timestamp: ndarray (2,) — [month, year] of the stored snapshot.
-
-        Notes:
-            Default weight for display: weight_index=2 (see generate_weights convention).
-            Access a specific weight slice with: ds.SIDI_grid[:, :, weight_index]
-        """
-        from joblib import Parallel, delayed, cpu_count
-
-        if month_scales is None:
-            month_scales = [1, 3, 6, 12, 18, 24]
-
-        _K_orig = self.K
-        if K is None:
-            if hasattr(self, 'optimal_k'):
-                import warnings
-                warnings.warn(
-                    f"self.optimal_k={self.optimal_k} is set (from set_optimal_SIDI) "
-                    f"but spatial_maps is using self.K={self.K}. "
-                    f"Pass K=self.optimal_k explicitly if you want spatial consistency."
-                )
-            K = self.K
-        else:
-            self.K = K
-
-        if timestamp is None:
-            t_idx = len(self.m_cal) - 1
-        else:
-            month_t, year_t = timestamp
-            matches = np.where((self.m_cal[:, 0] == month_t) & (self.m_cal[:, 1] == year_t))[0]
-            if len(matches) == 0:
-                raise ValueError(f"Timestamp {timestamp} not found in m_cal.")
-            t_idx = int(matches[0])
-
-        M_valid = [m for m in month_scales if m <= self.K]
-        if len(M_valid) < len(month_scales):
-            import warnings
-            warnings.warn(f"Scales {set(month_scales) - set(M_valid)} exceed K={self.K} and will be skipped.")
-
-        n_time, n_rows, n_cols = self.Pgrid.shape
-        n_weights = generate_weights(self.K).shape[1]
-
-        # --- pre-mask valid grid points ---
-        valid_mask = ~(np.all(np.isnan(self.Pgrid), axis=0) | (np.nanstd(self.Pgrid, axis=0) == 0))
-        valid_ij = np.argwhere(valid_mask)
-        n_valid = len(valid_ij)
-
-        n_cores = cpu_count()
-        t_per_point = 1.4  # secondi stimati dal benchmark
-        estimated_min = (n_valid * t_per_point / n_cores) / 60
-        print(f"computed spatial SIDI (D) and SPIs: {n_valid}/{n_rows * n_cols} valid grid points.")
-        print(f"Running on {n_cores} cores — may take up to {estimated_min:.0f} min.")
-
-        # --- parallel computation ---
-        results = Parallel(n_jobs=-1)(
-            delayed(self._process_grid_point)(
-                self.Pgrid[:, i, j],
-                self.m_cal, self.K,
-                self.start_baseline_year, self.end_baseline_year,
-                self.calculation_method,
-                M_valid, t_idx, n_weights
-            )
-            for (i, j) in valid_ij
-        )
-
-        # --- reconstruct grids ---
-        SIDI_grid = np.full((n_rows, n_cols, n_weights), np.nan)
-        SPI_grid = {m: np.full((n_rows, n_cols), np.nan) for m in M_valid}
-
-        # for idx, (i, j) in enumerate(valid_ij):
-        #     sidi_vals, spi_vals = results[idx]
-        #     if sidi_vals is None:
-        #         continue
-        #     SIDI_grid[i, j, :] = sidi_vals
-        #     for m in M_valid:
-        #         SPI_grid[m][i, j] = spi_vals[m]
-
-        n_none = 0
-        errors = {}
-        for idx, (i, j) in enumerate(valid_ij):
-            sidi_vals, spi_vals, err = results[idx]
-            if sidi_vals is None:
-                n_none += 1
-                errors[(i, j)] = err
-                continue
-            SIDI_grid[i, j, :] = sidi_vals
-            for m in M_valid:
-                SPI_grid[m][i, j] = spi_vals[m]
-
-        print(f"compute_spatial_sidi: 100% — done. ({n_none}/{len(valid_ij)} points failed)")
-        if errors:
-            unique_errors = set(errors.values())
-            for e in unique_errors:
-                n = sum(1 for v in errors.values() if v == e)
-                print(f"  {n} points: {e}")
-
-        self.SIDI_grid = SIDI_grid
-        self.SPI_grid = SPI_grid
-        new_timestamp = self.m_cal[t_idx].copy()
-        if hasattr(self, 'spatial_timestamp') and not np.array_equal(new_timestamp, self.spatial_timestamp):
-            import warnings
-            warnings.warn(
-                f"timestamp changed from {self.spatial_timestamp} to {new_timestamp}. "
-                f"trend_grid has been invalidated — rerun compute_spatial_trends."
-            )
-            if hasattr(self, 'trend_grid'):
-                del self.trend_grid
-        self.spatial_timestamp = new_timestamp
-        # self.spatial_timestamp = self.m_cal[t_idx].copy()
-        self.K = _K_orig
 
     @staticmethod
-    def _process_grid_point_trends(ts_ij, m_cal, K, start_baseline_year, end_baseline_year,
-                                   calculation_method, windows, t_idx):
+    def _process_grid_point_spi(ts_ij, m_cal, start_baseline_year, end_baseline_year,
+                                calculation_method, windows, t_idx):
         """
-        Standalone computation of CDN and per-window deficit for a single grid point — picklable by joblib.
+        Standalone per-window SPI and native-unit deficit for a single grid point —
+        picklable by joblib.
+
+        Formerly `_process_grid_point_trends`, which also computed a full CDN series
+        (the cumulative sum of SPI-1 over the whole record) per pixel. That series was
+        never stored by the caller — only tested for None — so every pixel paid for a
+        12-month SPI-1 fit whose result was discarded. Mapping the CDN is not something
+        the library does (Arianna, 2026-08-26): the spatial products are the SPI and its
+        millimetre-equivalent reverse. The SPI-1 pass is gone.
 
         Returns:
-            CDN_ij         : ndarray (n_months,) — cumulative deviation from normal (cumsum of SPI-1)
             deficit_at_tidx: dict {window: float} — deficit/surplus in native units at t_idx,
-                             via the exact inverse of the fitted distribution (analogous to
-                             spi_to_native: norm.cdf(spi) -> distribution.ppf), not the
-                             polynomial (c2r) approximation. NaN where SPI is undefined;
-                             0.0 where |SPI| < 0.5.
+                             via the exact inverse of the fitted distribution — the same
+                             pair spi_to_native uses (norm.cdf(spi) -> gamma_ppf_zi /
+                             pearson3.ppf / kde_ppf / linear), zero-inflation included,
+                             not the polynomial (c2r) approximation. NaN where SPI is
+                             undefined. The real value is returned everywhere else,
+                             including inside the near-neutral |SPI| < 0.5 band: greying
+                             that band out is a rendering choice, applied by plot_spatial
+                             at draw time (exactly as plot_cdn_trends does on its own
+                             copy), not a hole punched in the data.
+            spi_at_tidx    : dict {window: float} — standardized SPI value at t_idx for that
+                             window, independent of any K/SIDI ensemble (this is the same
+                             the only place SPI maps come from — spatial_sidi computes
+                             the SIDI only).
             error          : str or None
         """
 
 
-        from scipy.stats import norm, gamma, pearson3
-        from drought_scan.utils.drought_indices import baseline_indices, f_spi, f_spei, f_zscore, f_kde
-        base_func = calculation_method.func if isinstance(calculation_method, partial) else calculation_method
+        from drought_scan.utils.drought_indices import get_standardization
+        spec = get_standardization(calculation_method)
         try:
-            # --- SPI-1 per CDN (invariato) ---
-            Spi1 = np.full(len(ts_ij), np.nan, dtype=float)
-            for ref_month in range(1, 13):
-                indices, spi_values, coeff, _ = calculation_method(
-                    ts_ij, 1, ref_month, m_cal, start_baseline_year, end_baseline_year
-                )
-                if indices is not None and spi_values is not None:
-                    Spi1[indices] = spi_values.copy()
-
-            tb1_id, _ = baseline_indices(m_cal, start_baseline_year, end_baseline_year)
-            CDN_ij = np.nancumsum(Spi1)
-            CDN_ij[:tb1_id] = np.nan
-
-            # --- deficit_from_spi per ogni window ---
             months = m_cal[:, 0].astype(int)
             deficit_at_tidx = {}
+            spi_at_tidx = {}
 
             for w in windows:
                 spi_w = np.full(len(ts_ij), np.nan, dtype=float)
@@ -3625,112 +4292,70 @@ class BaseDroughtAnalysis:
                             params_w[ref_month] = params
 
                 spi_val = spi_w[t_idx]
+                spi_at_tidx[w] = spi_val
                 ref_month_t = int(months[t_idx])
                 if np.isnan(spi_val) or ref_month_t not in params_w:
                     deficit_at_tidx[w] = np.nan
-                elif abs(spi_val) < 0.5:
-                    deficit_at_tidx[w] = 0.0
                 else:
-                    p = norm.cdf(spi_val)
+                    # The same exact inverse as spi_to_native (registry entry of the
+                    # method), so the pixel deficit and the basin deficit are the
+                    # same quantity, tail clipping included.
                     fit = params_w[ref_month_t]
-                    if base_func == f_spi:
-                        a, loc, scale = fit
-                        raw_val = gamma.ppf(p, a, loc=loc, scale=scale)
-                        normal_val = gamma.ppf(0.5, a, loc=loc, scale=scale)
-                    elif base_func == f_spei:
-                        c, loc, scale = fit
-                        raw_val = pearson3.ppf(p, c, loc=loc, scale=scale)
-                        normal_val = pearson3.ppf(0.5, c, loc=loc, scale=scale)
-                    elif base_func == f_zscore:
-                        mean, std = fit
-                        raw_val = spi_val * std + mean
-                        normal_val = mean
-                    elif base_func == f_kde:
-                        raise NotImplementedError(
-                            "Exact deficit (spi_to_native-style) is not supported for f_kde; "
-                            "use f_spi/f_spei/f_zscore as calculation_method."
-                        )
-                    else:
-                        raise ValueError(f"Unknown calculation_method: {base_func}")
+                    raw_val = spec.to_native(spi_val, fit)
+                    normal_val = spec.to_native(0.0, fit)
                     deficit_at_tidx[w] = float(raw_val - normal_val)
 
-            return CDN_ij, deficit_at_tidx, None
+            return deficit_at_tidx, spi_at_tidx, None
 
         except Exception as e:
             return None, None, str(e)
 
-    @staticmethod
-    def _process_grid_point_trends_old(ts_ij, m_cal, K, start_baseline_year, end_baseline_year,
-                                   calculation_method):
+    def spatial_spi(self, windows=None, timestamp=None):
         """
-        Standalone computation of CDN and std_to_mm for a single grid point — picklable by joblib.
+        Compute pixel-wise SPI-like maps of this object's variable (SPI, SPETI,
+        SPEI, STI, ... — see ``_spatial_grid``), and their native-unit reverse
+        (millimetres for the cumulative variables), at a target timestamp.
 
-        Returns:
-            CDN_ij    : ndarray (n_months,) — cumulative deviation from normal (cumsum of SPI-1)
-            std_to_mm : float — mm equivalent of one standardized unit, derived from pixel-level fit
-            error     : str or None
-        """
-        from drought_scan.utils.drought_indices import  baseline_indices
-        try:
-            # --- SPI-1 for all 12 months ---
-            Spi1 = np.full(len(ts_ij), np.nan, dtype=float)
-            c2r = np.full((12, 4), np.nan, dtype=float)
+        For each valid grid point and each requested window (accumulation scale), returns
+        the standardized SPI and its native-unit reverse transform (deficit/surplus).
+        Unlike spatial_sidi(), these SPI windows are NOT capped by K: K only governs the
+        SIDI ensemble computed separately, while SPI at any accumulation scale is defined
+        on its own and computed here without limit.
 
-            for ref_month in range(1, 13):
-                indices, spi_values, coeff, _ = calculation_method(
-                    ts_ij, 1, ref_month, m_cal, start_baseline_year, end_baseline_year
-                )
-                if indices is not None and spi_values is not None:
-                    Spi1[indices] = spi_values.copy()
-                    c2r[ref_month - 1, :] = coeff.copy()
-
-            # --- CDN: cumsum of SPI-1 from baseline start ---
-            tb1_id, tb2_id = baseline_indices(m_cal, start_baseline_year, end_baseline_year)
-            CDN_ij = np.nancumsum(Spi1)
-            CDN_ij[:tb1_id] = np.nan  # before baseline: undefined
-
-            # --- std_to_mm: pixel-level equivalent of 1 standardized unit ---
-            normal_vals = np.array([
-                np.polyval(c2r[m, :], 0) for m in range(12)
-            ])
-            unit_vals = np.array([
-                np.polyval(c2r[m, :], 1) for m in range(12)
-            ])
-            std_to_mm = float(np.nanmean(unit_vals - normal_vals))
-
-            return CDN_ij, std_to_mm, None
-
-        except Exception as e:
-            return None, None, str(e)
-
-    def spatial_trends(self, windows=None, timestamp=None):
-        """
-        Compute pixel-wise CDN trend maps at a target timestamp.
-
-        For each valid grid point, computes the CDN (cumsum of SPI-1) and applies
-        rolling trend analysis over each window. The net change (delta) is converted
-        to mm-equivalent using pixel-level calibration coefficients.
+        Replaces the short-lived `spatial_cdn` (2026-08-26, removed the same day). That
+        name promised a CDN map, and the worker did compute a full per-pixel CDN series —
+        which the method then threw away, never storing it anywhere. Mapping the CDN is
+        not a product of this library; the spatial products are the SPI and its
+        millimetre equivalent. Dropping that pass removes one 12-month SPI-1 fit per
+        grid point.
 
         Args:
-            windows (list of int, optional): Moving window sizes in months.
-                                             Defaults to [24, 36, 60, 120].
-            timestamp (tuple, optional): (month, year) of target slice.
-                                         Defaults to last available timestamp.
+            windows (list of int, optional): Accumulation scales / moving window sizes in
+                                             months. Defaults to [24, 36, 60, 120].
+            timestamp (tuple, optional): (month, year) of target slice. Defaults to
+                the stored `spatial_timestamp` (set by a previous spatial_sidi /
+                spatial_spi call), else the last month of `m_cal` — the same rule
+                as the other spatial method (see `_resolve_spatial_timestamp`).
 
         Stores in self:
-            trend_grid       : dict {window: ndarray (n_rows, n_cols)} — mm-equivalent
-                               net change over each window at the target timestamp.
+            SPI_grid         : dict {window: ndarray (n_rows, n_cols)} — standardized SPI
+                               at each requested window, at the target timestamp.
+            reverse_SPI_grid : dict {window: ndarray (n_rows, n_cols)} — mm-equivalent
+                               deficit/surplus (reverse SPI) over each window at the
+                               target timestamp. Real values throughout, NaN only where
+                               the SPI itself is undefined (record shorter than the
+                               window at that timestamp, or gaps in the input series).
+                               The near-neutral |SPI| < 0.5 band is NOT zeroed here:
+                               plot_spatial greys it out at draw time, so the matrices
+                               keep the millimetres and the map still reads "normal".
             spatial_timestamp: ndarray (2,) — [month, year] of the stored snapshot.
 
         Notes:
-            Default weight for display: weight_index=2 (see generate_weights convention).
-            If spatial_timestamp already exists and differs from the requested timestamp,
-            SIDI_grid and SPI_grid are invalidated — rerun spatial_maps for consistency.
+            All stored maps refer to ONE date, `spatial_timestamp`. If this call
+            moves it, the products of spatial_sidi() (SIDI_grid, spatial_K) are
+            removed with a warning — rerun spatial_sidi() for the new date.
         """
         from joblib import Parallel, delayed, cpu_count
-
-        if hasattr(self, 'trend_grid'):
-            del self.trend_grid
 
         if windows is None:
             windows = [24, 36, 60, 120]
@@ -3738,49 +4363,29 @@ class BaseDroughtAnalysis:
             windows = [windows]
 
         # --- resolve timestamp ---
-        if timestamp is None:
-            t_idx = len(self.m_cal) - 1
-        else:
-            month_t, year_t = timestamp
-            matches = np.where((self.m_cal[:, 0] == month_t) & (self.m_cal[:, 1] == year_t))[0]
-            if len(matches) == 0:
-                raise ValueError(f"Timestamp {timestamp} not found in m_cal.")
-            t_idx = int(matches[0])
-
-        new_ts = self.m_cal[t_idx].copy()
-
-        # --- cross-check with existing spatial_timestamp ---
-        if hasattr(self, 'spatial_timestamp') and not np.array_equal(new_ts, self.spatial_timestamp):
-            import warnings
-            warnings.warn(
-                f"timestamp changed from {self.spatial_timestamp} to {new_ts}. "
-                f"SIDI_grid and SPI_grid have been invalidated — rerun spatial_maps."
-            )
-            for attr in ['SIDI_grid', 'SPI_grid']:
-                if hasattr(self, attr):
-                    delattr(self, attr)
-
-        self.spatial_timestamp = new_ts
+        t_idx = self._resolve_spatial_timestamp(timestamp)
 
         # --- pre-mask valid grid points ---
-        n_time, n_rows, n_cols = self.Pgrid.shape
-        valid_mask = ~(np.all(np.isnan(self.Pgrid), axis=0) | (np.nanstd(self.Pgrid, axis=0) == 0))
+        grid = self._spatial_grid()
+        n_time, n_rows, n_cols = grid.shape
+        with np.errstate(invalid='ignore'):
+            valid_mask = ~(np.all(np.isnan(grid), axis=0) | (np.nanstd(grid, axis=0) == 0))
         valid_ij = np.argwhere(valid_mask)
         n_valid = len(valid_ij)
 
         n_cores = cpu_count()
-        t_per_point = 1.5  # SPI-1 only, lighter than full spatial_maps
+        t_per_point = 1.5  # per-window SPI only, lighter than full spatial_sidi
         estimated_min = (n_valid * t_per_point / n_cores) / 60
-        print(f"compute_spatial_trends: {n_valid}/{n_rows * n_cols} valid grid points.")
+        print(f"spatial_spi: {n_valid}/{n_rows * n_cols} valid grid points.")
         print(f"Running on {n_cores} cores — may take up to {estimated_min:.0f} min.")
 
         # --- parallel computation ---
         import matplotlib.pyplot as plt
         plt.close('all')  # to avoid potential ram saturation
         results = Parallel(n_jobs=-1)(
-            delayed(self._process_grid_point_trends)(
-                self.Pgrid[:, i, j],
-                self.m_cal, self.K,
+            delayed(self._process_grid_point_spi)(
+                grid[:, i, j],
+                self.m_cal,
                 self.start_baseline_year, self.end_baseline_year,
                 self.calculation_method,
                 windows, t_idx
@@ -3788,30 +4393,36 @@ class BaseDroughtAnalysis:
             for (i, j) in valid_ij
         )
 
-        # --- reconstruct trend grids ---
-        trend_grid = {w: np.full((n_rows, n_cols), np.nan) for w in windows}
+        # --- reconstruct SPI / reverse-SPI grids ---
+        reverse_SPI_grid = {w: np.full((n_rows, n_cols), np.nan) for w in windows}
+        SPI_grid = {w: np.full((n_rows, n_cols), np.nan) for w in windows}
 
         n_none = 0
         errors = {}
         for idx, (i, j) in enumerate(valid_ij):
-            CDN_ij, deficit_at_tidx, err = results[idx]
-            if CDN_ij is None:
+            deficit_at_tidx, spi_at_tidx, err = results[idx]
+            if deficit_at_tidx is None:
                 n_none += 1
                 errors[(i, j)] = err
                 continue
 
             for w in windows:
-                deficit = deficit_at_tidx.get(w, np.nan)
-                trend_grid[w][i, j] = deficit if not np.isnan(deficit) else 0.0
+                # NaN stays NaN: an undefined pixel (record too short for this window,
+                # or a gap in the series) is not a pixel with zero anomaly. This used to
+                # write 0.0 for both, making the two indistinguishable on the map.
+                reverse_SPI_grid[w][i, j] = deficit_at_tidx.get(w, np.nan)
+                SPI_grid[w][i, j] = spi_at_tidx.get(w, np.nan)
 
-        print(f"compute_spatial_trends: 100% — done. ({n_none}/{n_valid} points failed)")
+        print(f"spatial_spi: 100% — done. ({n_none}/{n_valid} points failed)")
         if errors:
             unique_errors = set(errors.values())
             for e in unique_errors:
                 n = sum(1 for v in errors.values() if v == e)
                 print(f"  {n} points: {e}")
 
-        self.trend_grid = trend_grid
+        self._set_spatial_timestamp(t_idx, owner='spatial_spi')
+        self.reverse_SPI_grid = reverse_SPI_grid
+        self.SPI_grid = SPI_grid
 
     # =====================================================================
     # ▸ VISUALIZATION
@@ -3828,9 +4439,13 @@ class BaseDroughtAnalysis:
                 year_ext (tuple, optional): Years defining X-axis limits.
                 split_plot :   If True, each panel (CDN, Heatmap, SIDI) is plotted in a separate figure,
                 plot_order : str, default='CHS';    Order of the panels when split_plot=False.
+                saveplot (bool, optional): If True, also saves the plot via self._savedsplot(). Default False.
+                figsize (tuple, optional): Figure size passed to plot_overview.
 
 
             """
+        if optimal_k is None:
+            self._calibration_note()
         plot_overview(self, optimal_k=optimal_k, weight_index=weight_index,year_ext=year_ext,
                       split_plot=split_plot,plot_order=plot_order,figsize=figsize)
         if saveplot==True:
@@ -3854,11 +4469,9 @@ class BaseDroughtAnalysis:
         mm : ndarray, shape (K, len(domain), 12)
             Matrix of fitted values used for plotting, containing the equivalent
             raw values for each SPI domain point, scale, and month.
-            Returned only if the function is assigned to a variable
-            (e.g. ``mm = precipitation.plot_spi_fit(K=3, month=3)``).
-            If the function is called directly without assignment
-            (e.g. ``precipitation.plot_spi_fit(K=3, month=3)``),
-            the plot is generated and nothing is printed to the console.
+            Returned only if `return_data=True` (default False).
+            If `return_data=False`, only the plot is generated and the function
+            returns None.
         """
 
         var = 'mm' if isinstance(self, (Precipitation, Pet, Balance)) else "raw values"
@@ -3867,28 +4480,54 @@ class BaseDroughtAnalysis:
             "July", "August", "September", "October", "November", "December"
         ]
 
-        coeff = self.c2r_index
         domain = np.arange(-3,3.2,0.2)
-        mm = np.zeros((self.K,len(domain),12))
-        for m in range(12):
-            for k in range(self.K):
-                for i,spi_value in enumerate(domain):
-                    mm[k,i,m]  = np.polyval(coeff[k, m, :], spi_value)
+
+        if return_data:
+            # The caller wants the whole grid, so pay for it.
+            mm = np.zeros((self.K, len(domain), 12))
+            for m in range(12):
+                for k in range(self.K):
+                    mm[k, :, m] = self.spi_to_native(domain, month_scale=k + 1, ref_month=m + 1)
+            curve = mm[K - 1, :, month - 1]
+        else:
+            # Only the (K, month) curve being drawn. Filling the full K x 12 grid to
+            # plot one cell cost K*12 spi_to_native calls, and for f_kde each one
+            # rebuilds a 2000-point interpolation grid.
+            mm = None
+            curve = self.spi_to_native(domain, month_scale=K, ref_month=month)
+
         cmap = spi_cmap().reversed() if self.threshold > 0 else spi_cmap()
         plt.figure(figsize=(7,5))
-        plt.scatter(mm[K-1, :, month-1], domain, s=80, c=domain, cmap=cmap)
+        plt.scatter(curve, domain, s=80, c=domain, cmap=cmap)
         plt.xlabel(var,fontsize=14)
         plt.ylabel(f"{self.index_name}{K}",fontsize=14)
         plt.title(f"{self.index_name}{K} calibration, {months[month-1]}",fontsize=14)
         plt.grid()
-        plt.colorbar(label=f"{self.index_name}")  # opzionale
+        plt.colorbar(label=f"{self.index_name}")
         plt.tight_layout()
         if return_data:
             return mm
 
-    def severe_events(self, weight_index=None, plot=True, max_events=None, labels=False, unit=None, name=None):
+    def severe_events_old(self, weight_index=None, plot=True, max_events=None, labels=False, unit=None, name=None):
+        """
+        OBSOLETE. Kept only because it is the procedure behind the first
+        publication of the method (Di Paola et al., 2025), so that those results
+        remain reproducible; do not use it for new analyses. Renamed from
+        `severe_events` on 2026-08-26, pending a replacement.
 
-        tstartid, tendid, duration, deficit = severe_events_deficits_computation(self, weight_index=weight_index)
+        Known defects, deliberately left as they were in the published version:
+        - the deficit is built from the polynomial `c2r_index` approximation rather
+          than the exact inverse (`spi_to_native`), so it disagrees with
+          `deficit_from_spi` — the two are different numbers under the same name;
+        - `severe_events_deficits_computation_old` hardcodes `-1` when choosing the
+          parity of the run lengths, instead of `ds_object.threshold`, so durations
+          come out misaligned with their start indices for any object whose threshold
+          is not -1 (Pet and Temperature default to +1);
+        - with a positive threshold the drought condition is inverted (`SIDI > threshold`
+          is treated as the non-drought state), so on Pet/Temperature roughly 84% of the
+          record reads as drought.
+        """
+        tstartid, tendid, duration, deficit = severe_events_deficits_computation_old(self, weight_index=weight_index)
         if plot == True:
             plot_severe_events(self,
                                tstartid=tstartid,
@@ -3907,6 +4546,11 @@ class BaseDroughtAnalysis:
         Args:
             windows (list of int, optional): List of window lengths (in months) over which to evaluate trends.
                                              Default is [12, 36, 60, 120].
+            figsize (tuple, optional): Figure size. Defaults to (14, 10).
+            show_spi (bool, optional): If True, overlay SPI on the plot. Default False.
+            ax (matplotlib.axes.Axes, optional): Existing axes to plot on.
+            year_ext (tuple, optional): Years defining X-axis limits.
+            unit (str, optional): Unit label for the plot.
 
         Returns:
             None. Displays a plot.
@@ -3927,6 +4571,9 @@ class BaseDroughtAnalysis:
         var_name : str or None, optional
             Optional label to include in the plot title.
 
+        ax : matplotlib.axes.Axes, optional
+            Existing axes to plot on. If None, creates new figure.
+
         cumulate : bool, default=False
             If True, compute and display the cumulative sum per month for each year.
 
@@ -3944,16 +4591,32 @@ class BaseDroughtAnalysis:
 
         monthly_profile(self, var=var,var_name=var_name, cumulate=cumulate,ax=ax, highlight_years=highlight_years, season_shift=season_shift)
 
-    def plot_spatial(self, var='SIDI', weight_index=2, month_scale = None, ax=None, title=None,cmap=None):
+    def plot_spatial(self, var='SIDI', weight_index=None, month_scale = None, ax=None, title=None,cmap=None,
+                     neutral_band=0.5):
         """
-        Plot a spatial map of SIDI or SPI from compute_spatial_sidi output.
+        Plot a spatial map of SIDI, SPI, or the millimetre-equivalent reverse SPI.
 
         Args:
-            var (str): 'SIDI' or 'SPI' or CDN. Default 'SIDI'.
-            weight_index (int): Weight slice for SIDI. Default 2.
+            var (str): 'SIDI', 'SPI', or 'reverse_spi'. Default 'SIDI'.
+                'SPI' and 'reverse_spi' read from spatial_spi() output: 'SPI' is the
+                standardized SPI at the requested window, 'reverse_spi' is its
+                native-unit deficit/surplus.
+                'CDN' is no longer accepted: it was an alias for 'reverse_spi', and the
+                two are not the same quantity — the CDN is a cumulative sum of SPI-1
+                over the record, which this library does not map (see spatial_spi).
+            weight_index (int, optional): SIDI column to map. Default: resolved by
+                ``_resolve_weight_index`` (0 after a seasonal calibration, the committed
+                one after a global calibration, else the construction default).
+            month_scale (int, optional): Temporal scale to select, required for
+                var='SPI' or 'reverse_spi'.
             ax (matplotlib.axes.Axes, optional): Existing axes. If None, creates new figure.
             cmap (str): Colormap. Default is red-2-green palette using the coulors by Crimeri as used in the heatmap
             title (str, optional): Custom title.
+            neutral_band (float, optional): Half-width, in SPI units, of the near-neutral
+                band drawn in grey on a 'reverse_spi' map, to give "normal" a visible
+                extent. Default 0.5, matching plot_cdn_trends. This is a rendering
+                choice only — `reverse_SPI_grid` keeps the real millimetres inside the
+                band. Set to 0 (or None) to draw every pixel on the colour scale.
 
         Returns:
             matplotlib.axes.Axes
@@ -3971,50 +4634,74 @@ class BaseDroughtAnalysis:
         b_norm = BoundaryNorm(bounds, cmap.N)
 
         if var =='SIDI' and not hasattr(self, 'SIDI_grid'):
-            raise ValueError("No spatial data found. Run compute_spatial_maps() first.")
-        if var =='SPI' and not hasattr(self, 'SPI_grid'):
-            raise ValueError("No spatial data found. Run spatial_maps() first.")
-        if var =='CDN' and not hasattr(self, 'trend_grid'):
-            raise ValueError("No spatial data found. Run spatial_trend() first.")
+            raise ValueError("No spatial data found. Run spatial_sidi() first.")
+        if var == 'CDN':
+            raise ValueError(
+                "var='CDN' is no longer supported: it was an alias for 'reverse_spi', "
+                "but a CDN map (cumulative sum of SPI-1) is not something this library "
+                "produces. Use var='reverse_spi' for the millimetre-equivalent "
+                "deficit/surplus, or var='SPI' for the standardized index."
+            )
+        if var == 'SPI' and not hasattr(self, 'SPI_grid'):
+            raise ValueError("No spatial data found. Run spatial_spi() first.")
+        if var == 'reverse_spi' and not hasattr(self, 'reverse_SPI_grid'):
+            raise ValueError("No spatial data found. Run spatial_spi() first.")
+
+        # Pixels to grey out at draw time (never removed from the stored grids).
+        neutral_mask = None
 
         # --- select data ---
         if var == 'SIDI':
+            weight_index = self._resolve_weight_index(weight_index)
             data = self.SIDI_grid[:, :, weight_index]
             weight_names = {
                 0: 'equal weights',
                 1: 'linear decreasing',
-                2: 'logarithmically decreasing',
+                2: 'geometrically decreasing',
                 3: 'linear increasing',
-                4: 'logarithmically increasing',
+                4: 'geometrically increasing',
             }
             weight_name = weight_names.get(weight_index, f'weight {weight_index}')
-            K_label = self.spatial_K if hasattr(self, 'spatial_K') else self.K
+            K_used = self.spatial_K if hasattr(self, 'spatial_K') else self.K
+            # K_used may be a scalar (same K for all 5 schemes) or a sequence
+            # (one K per scheme, see recalculate_SIDI); show the one that
+            # actually applies to the selected weight_index.
+            K_label = K_used[weight_index] if np.ndim(K_used) > 0 else K_used
             label = f'{self.SIDI_name} (K={K_label}, {weight_name})'
             norm = b_norm
 
-        elif var == 'CDN':
-            if month_scale is None or month_scale not in self.trend_grid:
-                raise ValueError(f"Specify a valid month_scale. Available: {list(self.trend_grid.keys())}")
-            data = self.trend_grid[month_scale]
+        elif var == 'reverse_spi':
+            if month_scale is None or month_scale not in self.reverse_SPI_grid:
+                raise ValueError(f"Specify a valid month_scale. Available: {list(self.reverse_SPI_grid.keys())}")
+            data = self.reverse_SPI_grid[month_scale]
             if np.all(np.isnan(data)):
                 raise ValueError(
-                    "CDN grid is all-NaN: spatial_trends() could not compute exact "
-                    "deficit/native conversion for this calculation_method. If this "
-                    "instance uses calculation_method=f_kde, switch to f_spi, f_spei, "
-                    "or f_zscore and rerun spatial_trends()."
+                    "reverse_spi grid is all-NaN: spatial_spi() produced no defined "
+                    "pixel for this window — the record may be shorter than the window, "
+                    "or every grid point failed. Check spatial_spi()'s failure report."
                 )
-            label = f'deficit/surplus on {month_scale} months'
+            label = f'reverse {self.index_name}: deficit/surplus over {month_scale} months'
             val = np.nanmax(np.abs(data.flatten()))
             cdnbounds = np.linspace(-val,val, len(bounds))
             norm = BoundaryNorm(cdnbounds, cmap.N)
+
+            # Near-neutral band, greyed out so "normal" has a visible extent — the same
+            # convention plot_cdn_trends applies to its own copy of the bars. Decided on
+            # the SPI, not on the millimetres, because the band is defined in SPI units;
+            # SPI_grid is written by the same spatial_spi() call, for the same windows and
+            # the same timestamp, so the two grids are always in step.
+            if neutral_band and getattr(self, 'SPI_grid', None) and month_scale in self.SPI_grid:
+                spi_layer = self.SPI_grid[month_scale]
+                with np.errstate(invalid='ignore'):
+                    neutral_mask = np.abs(spi_layer) < neutral_band
         elif var == 'SPI':
             if month_scale is None or month_scale not in self.SPI_grid:
                 raise ValueError(f"Specify a valid month_scale. Available: {list(self.SPI_grid.keys())}")
             data = self.SPI_grid[month_scale]
-            label = f'SPI-{month_scale}'
+            label = f'{self.index_name}-{month_scale}'
             norm = b_norm
         else:
-            raise ValueError("var must be 'SIDI' or 'SPI'.")
+            raise ValueError("var must be 'SIDI', 'SPI', or 'reverse_spi'.")
 
         # --- axes ---
         if ax is None:
@@ -4039,11 +4726,28 @@ class BaseDroughtAnalysis:
             zorder=1
         )
 
+        # --- near-neutral band, drawn over the colour layer ---
+        if neutral_mask is not None and np.any(neutral_mask):
+            band = np.ma.masked_where(~neutral_mask, np.zeros_like(data))
+            ax.imshow(
+                band,
+                extent=extent,
+                origin='upper',
+                cmap=ListedColormap(['0.82']),
+                aspect='auto',
+                zorder=1.5,
+            )
+
         # --- shape overlay ---
         self.shape.boundary.plot(ax=ax, color='black', linewidth=0.8, zorder=2)
 
         # --- colorbar ---
         plt.colorbar(im, ax=ax, label=label, fraction=0.03, pad=0.02)
+        if neutral_mask is not None and np.any(neutral_mask):
+            from matplotlib.patches import Patch
+            ax.legend(handles=[Patch(facecolor='0.82', edgecolor='none',
+                                     label=f'|{self.index_name}| < {neutral_band:g} (normal)')],
+                      loc='lower left', fontsize=9, frameon=False)
 
         bounds = self.shape.geometry.total_bounds  # [minx, miny, maxx, maxy]
         ax.set_xlim(bounds[0] - 0.1, bounds[2] + 0.1)
@@ -4064,6 +4768,314 @@ class BaseDroughtAnalysis:
 
 
 
+    def _monthly_normals(self):
+        """
+          Compute the 12 monthly "normal" values (January..December) as the exact
+          inverse of the SPI-like index at scale 1 (SPI_like_index_1 == 0), via
+          `spi_to_native`.
+
+          Returns
+          -------
+          numpy.ndarray
+              Array of shape (12,), indexed by calendar month - 1.
+          """
+        Nn = np.zeros(12)
+        for m in range(12):
+            Nn[m] = self.spi_to_native(0.0, month_scale=1, ref_month=m + 1)
+        return Nn
+
+    def _reapply_optimization(self):
+        """Re-apply SIDI optimization after spi_like_set recalculation."""
+        if self.calibration_mode == 'seasonal':
+            cfg = self.seasonal_params['config']
+            seasons = self.seasonal_params['seasons']
+            self.SIDI = self.recalculate_SIDI_seasonal_all_schemes(cfg, seasons)
+        elif self.calibration_mode == 'global':
+            self.set_optimal_SIDI(
+                self.optimal_k, self.optimal_weight_index, overwrite=True
+            )
+
+    # --- Classes that should NOT call analyze_correlation -----------------
+    _EXCLUDED_FROM_CORRELATION = ()  # populated after Streamflow/Temperature/Teleindex are defined
+
+    @staticmethod
+    def _resolve_per_weight_K(K, n_scales):
+        """
+        Normalize `K` into one month-scale per weighting scheme.
+
+        Each weighting scheme has its own optimal K (see analyze_correlation, which
+        scores every (K, weight) pair): a scalar applies the same K to all schemes —
+        the historical behaviour — while a sequence assigns one K per column, so
+        every column of SIDI stays interpretable on its own terms.
+
+        Args:
+            K (int or sequence of int): single scale, or one per weighting scheme.
+            n_scales (int): number of SPI-like scales available.
+
+        Returns:
+            ndarray: shape (n_weights,), the scale to use for each weighting scheme.
+        """
+        n_weights = generate_weights(1).shape[1]
+        Ks = np.atleast_1d(np.asarray(K)).ravel()
+        if Ks.size == 1:
+            Ks = np.repeat(Ks, n_weights)
+        if Ks.size != n_weights:
+            raise ValueError(
+                f"K must be a single integer or one per weighting scheme "
+                f"({n_weights}); got {Ks.size} values.")
+        Ks = Ks.astype(int)
+        if np.any(Ks <= 0):
+            raise ValueError("K must be a positive integer.")
+        if np.any(Ks > n_scales):
+            raise ValueError(f"K={int(Ks.max())} exceeds available scales ({n_scales}).")
+        return Ks
+
+    @staticmethod
+    def _zscore_baseline(values, baseline, context=""):
+        """
+        Standardize `values` to zero mean / unit variance using `baseline`
+        (already sliced/masked to the reference period) for mean/std. Same
+        formula as f_zscore's core standardization, factored out so
+        _calculate_SIDI/recalculate_SIDI/recalculate_SIDI_seasonal share one
+        implementation instead of each reimplementing it independently.
+
+        Note on ddof: np.nanstd defaults to ddof=0, which is intended here — the
+        baseline IS the reference population the index is defined against (same
+        convention as f_zscore and as scipy.stats.zscore). This deliberately
+        differs from the ddof=1 used for the KDE bandwidth in f_kde, where
+        Silverman's rule is defined on the unbiased sample sigma. The two are
+        different conventions for different purposes, not an inconsistency.
+        """
+        mean = np.nanmean(baseline, axis=0)
+        std = np.nanstd(baseline, axis=0)
+        if np.any(~np.isfinite(std)) or np.any(std == 0):
+            raise ValueError(f"Zero or non-finite std in baseline{context}; cannot standardize.")
+        return (values - mean) / std
+
+    def analyze_correlation_seasonal_rolling(self, streamflow, agg='quarter', seasons=None,
+                                             window_length=30, step=10, min_coverage=20,
+                                             plot=True):
+        """
+        Moving-window version of analyze_correlation_seasonal: repeats the
+        per-season R^2(K) analysis on successive windows of `window_length` years,
+        shifted by `step` years, to explore the stability / non-stationarity of
+        the SIDI-streamflow relationship over time. Only the R^2-vs-K curves are
+        drawn, not the scatter plots.
+
+        WARNING: the windows overlap (by window_length - step years) and are NOT
+        independent samples. Read the result as a sensitivity / non-stationarity
+        analysis, not as independent statistical replicas.
+
+        Applicable to: Precipitation, Pet, Balance.
+
+        Parameters
+        ----------
+        streamflow : Streamflow (or any BaseDroughtAnalysis)
+        agg : {'quarter', 'semiannual', 'four-monthly', 'custom'}, default 'quarter'
+            'monthly' is not supported here.
+        seasons : dict, optional
+            Custom month->season mapping, when agg='custom'.
+        window_length : int, default 30
+            Nominal window length, in years.
+        step : int, default 10
+            Shift between consecutive windows, in years.
+        min_coverage : int, default 20
+            Minimum coverage (years) for a window to be included; window
+            generation stops at the first window below this threshold.
+        plot : bool, default True
+
+        Returns
+        -------
+        dict
+            {window_label: {season_name: {best_k, col_best_weight, max_correlation,
+                                           R2_matrix, sample_number}}}
+        """
+        self._check_correlation_eligible()
+        import matplotlib.colors as mcolors
+
+        if agg == 'monthly':
+            raise ValueError("agg='monthly' is not supported by the rolling version "
+                             "(use analyze_correlation_seasonal for the monthly bar chart).")
+
+        wlabel = list(WEIGHT_LABELS)
+
+        from matplotlib.lines import Line2D
+
+        # One base colour per scheme: WEIGHT_COLORS, the same palette as the
+        # R²(K) curves of analyze_correlation, so the figures read alike.
+        scheme_colors = list(WEIGHT_COLORS)[:len(wlabel)]
+
+        def _shade(base_color, frac):
+            """Blend from white (frac->0, oldest window) to base_color
+            (frac=1, most recent window = the scheme's own colour)."""
+            base_rgb = np.array(mcolors.to_rgb(base_color))
+            white = np.array([1.0, 1.0, 1.0])
+            return tuple(white + frac * (base_rgb - white))
+
+        if seasons is not None:
+            agg = 'custom'
+
+        if not isinstance(streamflow, BaseDroughtAnalysis):
+            raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
+
+        # --- Full temporal overlap ---
+        self_indices, streamflow_indices = find_overlap(self.m_cal, streamflow.m_cal)
+        if len(self_indices) == 0 or len(streamflow_indices) == 0:
+            raise ValueError("No overlapping data found between the two objects.")
+
+        y_full = streamflow.spi_like_set[0, streamflow_indices]
+        spi_like_full = self.spi_like_set[:, self_indices]
+        m_cal_overlap = np.array([self.m_cal[i] for i in self_indices])
+        months_overlap = np.array([m[0] for m in m_cal_overlap], dtype=int)
+        years_overlap = np.array([m[1] for m in m_cal_overlap], dtype=int)
+
+        K_range = np.arange(1, self.K + 1)
+
+        # --- Season definitions ---
+        seasons = self._build_seasons_dict(agg, seasons)
+        all_months = [m for lst in seasons.values() for m in lst]
+        unique = set(all_months)
+        missing = [m for m in range(1, 13) if m not in unique]
+        duplicates = [m for m in unique if all_months.count(m) > 1]
+        if missing:
+            print("Alert: missing month(s):", missing)
+        if duplicates:
+            print("Alert: duplicate month(s):", duplicates)
+
+        # --- Moving windows ---
+        start_year = int(years_overlap.min())
+        end_year = int(years_overlap.max())
+
+        windows = []
+        ws = start_year
+        while ws <= end_year:
+            we = ws + window_length - 1
+            we_clip = min(we, end_year)
+            coverage = we_clip - ws + 1
+            if coverage < min_coverage:
+                break
+            windows.append((ws, we_clip, f"{ws}-{we}"))
+            ws += step
+
+        if not windows:
+            raise ValueError("No window meets the required minimum coverage "
+                             f"({min_coverage} years).")
+
+        n_win = len(windows)
+        print(f"Moving windows: {[w[2] for w in windows]}")
+
+        # --- Figure layout (same rule as analyze_correlation_seasonal, no monthly branch) ---
+        n_seasons = len(seasons)
+        layout_map = {1: (1, 1), 2: (1, 2), 3: (1, 3), 4: (2, 2), 5: (2, 3), 6: (2, 3)}
+        nrows, ncols = layout_map.get(n_seasons, (2, 3))
+        if agg == 'custom':
+            wid = np.round(5 * ncols, 1)
+            h = np.round(5 * nrows, 1) + 0.5
+            figsize1 = (wid + 3, h)
+        else:
+            figsize1 = {2: (14, 5), 3: (16, 6), 4: (14, 10)}.get(n_seasons, (14, 10))
+
+        # --- Correlations per window and season ---
+        print("Starting rolling seasonal correlation analysis...")
+        results = {}
+        for ws, we_clip, wlabel_win in windows:
+            year_mask = (years_overlap >= ws) & (years_overlap <= we_clip)
+            MatCorr = {}
+            for name, mlist in seasons.items():
+                idx = year_mask & np.isin(months_overlap, mlist)
+                if np.count_nonzero(idx) <= 10:
+                    continue
+                M = self._r2_surface(spi_like_full[:, idx], y_full[idx], K_range, min_valid=10)
+                max_corr = np.nanmax(M)
+                bk, bw = np.unravel_index(np.nanargmax(M), M.shape)
+                MatCorr[name] = {
+                    "best_k": int(K_range[bk]),
+                    "col_best_weight": int(bw),
+                    "best_k_per_weight": K_range[np.nanargmax(M, axis=0)],
+                    "max_correlation": float(max_corr),
+                    "R2_matrix": M,
+                    "sample_number": int(np.count_nonzero(idx)),
+                }
+            results[wlabel_win] = MatCorr
+            summary = ", ".join(f"{s}: R2max={v['max_correlation']:.2f}" for s, v in MatCorr.items())
+            print(f" Window {wlabel_win}: {summary}")
+
+        # --- Plot: R^2 vs K, one line per (window, scheme), colour gradient ---
+        if plot:
+            fig, ax = plt.subplots(figsize=figsize1, nrows=nrows, ncols=ncols)
+            ax = np.atleast_1d(ax).ravel()
+
+            shades = np.linspace(0.3, 1.0, n_win)  # light (oldest) -> full colour (most recent window)
+            season_names = list(seasons.keys())
+            x_end = len(K_range) - 1
+            ref_scheme = 0  # scheme anchoring the period label (EW)
+
+            for i, name in enumerate(season_names):
+                for wi, (ws, we_clip, wlabel_win) in enumerate(windows):
+                    if name not in results[wlabel_win]:
+                        continue
+                    mat = results[wlabel_win][name]['R2_matrix']
+                    for w in range(mat.shape[1]):
+                        color = _shade(scheme_colors[w], shades[wi])
+                        ax[i].plot(mat[:, w], color=color, linewidth=1.6, alpha=0.9)
+                    # period label, anchored at the end of the reference curve
+                    y_end = mat[-1, ref_scheme]
+                    ax[i].annotate(wlabel_win, xy=(x_end, y_end), xytext=(6, 0),
+                                   textcoords='offset points', fontsize=7,
+                                   color=_shade(scheme_colors[ref_scheme], shades[wi]),
+                                   va='center', ha='left')
+                ax[i].set_xlim(-0.5, x_end + 3.5)  # room on the right for the labels
+                ax[i].grid()
+                ax[i].set_xticks(np.arange(0, len(K_range), 3))
+                ax[i].set_xticklabels(K_range[0:-1:3])
+                ax[i].tick_params(axis='x', labelsize=14)
+                ax[i].tick_params(axis='y', labelsize=14)
+                ax[i].set_ylabel(r"$R^2$", fontweight="bold", fontsize=16)
+                ax[i].set_xlabel("Month-scale (K)", fontweight="bold", fontsize=16)
+                ax[i].set_title(name, fontweight="bold", fontsize=16)
+
+            # compact legend: one entry per weighting scheme, full colour (= most recent window)
+            handles = [Line2D([0], [0], color=scheme_colors[w], lw=2, label=wlabel[w])
+                       for w in range(len(wlabel))]
+            ax[0].legend(handles=handles, loc=3, fontsize=10)
+
+            for j in range(len(season_names), len(ax)):
+                fig.delaxes(ax[j])
+
+            fig.suptitle(
+                f"{self.basin_name} - Rolling seasonal correlation: "
+                f"{self.SIDI_name} vs. {streamflow.index_name}1",
+                fontsize=16, fontweight="bold")
+
+            plt.tight_layout()
+            plt.show(block=False)
+
+        return results
+
+    @staticmethod
+    def _cdn_from_spi1(spi1, tb1_id):
+        """
+        Cumulative Deviation from Normal: running sum of SPI-1 from the start of
+        the baseline onwards, zero before it.
+
+        Single definition shared by the basin-level CDN (`_calculate_CDN`) and the
+        pixel-level one (`_process_grid_point_trends`), which used to cumulate from
+        index 0, skip the rounding and fill the pre-baseline span with NaN — giving
+        two different series under the same name (they differed by a constant offset,
+        the pre-baseline SPI-1 sum).
+
+        Args:
+            spi1 (ndarray): SPI-like series at scale 1.
+            tb1_id (int): index of the first baseline month.
+
+        Returns:
+            ndarray: CDN, same length as `spi1`.
+        """
+        cdn = np.zeros(len(spi1))
+        # rounded to 3 decimals so the running sum does not accumulate float noise
+        cdn[tb1_id:] = np.nancumsum(np.round(spi1[tb1_id:], 3))
+        return cdn
+
 class Precipitation(BaseDroughtAnalysis):
     def __init__(self, start_baseline_year, end_baseline_year,basin_name,ts=None,m_cal=None,prec_path=None,
                  shape_path=None,shape=None, K=None,weight_index=None,
@@ -4075,9 +5087,10 @@ class Precipitation(BaseDroughtAnalysis):
         Args:
             start_baseline_year (int): Starting year for baseline period.
             end_baseline_year (int): Ending year for baseline period.
+            basin_name (str): Name of the basin/site.
             ts (ndarray, optional): Aggregated basin-level precipitation timeseries.
             m_cal (ndarray, optional): Calendar array (month, year) matching `ts`.
-            data_path (str, optional): Path to the NetCDF file containing precipitation data.
+            prec_path (str, optional): Path to the NetCDF file containing precipitation data.
             shape_path (str, optional): Path to the shapefile defining the basin.
             shape (object, optional): Shapefile geometry (if already loaded).
             K (int, optional): Maximum temporal scale for SPI calculations. Default is 36.
@@ -4085,12 +5098,15 @@ class Precipitation(BaseDroughtAnalysis):
             weight_index (int, optional): Index of the weighting scheme to use for SIDI calculation.
                 - weight_index = 0: Equal weights
                 - weight_index = 1: Linear decreasing weights
-                - weight_index = 2: Logarithmically decreasing weights (default)
+                - weight_index = 2: Geometrically decreasing weights (default)
                 - weight_index = 3: Linear increasing weights
-                - weight_index = 4: Logarithmically increasing weights
+                - weight_index = 4: Geometrically increasing weights
 
             threshold (int,optional) : threshold to define severe events, Default is -1 (i.e. -1 standard deviation of SIDI)
             verbose (bool, optional): Whether to print initialization messages. Default is True.
+            index_name (str, optional): Name of the drought index. Defaults to 'SPI'.
+            rolling (bool, optional): If True, use rolling 30-day windows when importing
+                gridded data instead of fixed calendar months. Default False.
 
 
         """
@@ -4103,7 +5119,7 @@ class Precipitation(BaseDroughtAnalysis):
         self.verbose = verbose
         self.basin_name = basin_name
 
-        # Gestione dello shape
+        # Shapefile
         if shape is not None:
             self.shape = shape
         elif shape_path is not None:
@@ -4119,7 +5135,6 @@ class Precipitation(BaseDroughtAnalysis):
         elif prec_path is not None and self.shape is not None:
             # Load data from file
             self.prec_path = prec_path
-            # self.Pgrid, self.m_cal, self.ts = self._import_data()
 
             self.ts, self.m_cal, self.Pgrid,self.Lat,self.Lon,self.day = import_netcdf_for_cumulative_variable(prec_path,['tp','rr','precipitation','prec','LAPrec1871',
                                                                                                'pre','swe','SWE','sd','SD','sf','SF','rain',
@@ -4152,142 +5167,570 @@ class Precipitation(BaseDroughtAnalysis):
             print(" >>> .analyze_correlation()   — optimal K and weighting (requires Streamflow)")
             print(f" >>> .ts, .spi_like_set, .SIDI, .CDN  — direct attribute access")
 
-    def set_optimal_SIDI(self, optimal_k, optimal_weight_index, overwrite=False):
+    def import_forecast(self, forecast_path,clima_path = None,verbose=True):
         """
-        Recalculate SIDI using the optimal K (obtained via analyze_correlation with Streamflow).
-        Optionally store optimal_k (and optimal_weight_index) on this instance.
+            Imports forecast data from a NetCDF file and, if a climatology file is provided,
+            computes forecast anomalies relative to the climatology.
 
-        Args:
-            optimal_k (int): optimal K determined by analyze_correlation(streamflow).
-            optimal_weight_index (int): specific weight index to track/store (0-based).
-            overwrite (bool): if True, updates self.SIDI and stores self.optimal_k
-                              and self.optimal_weight_index on the instance.
+            Args:
+                forecast_path (str): Path to the NetCDF file containing forecast data.
+                clima_path (str, optional): Path to the NetCDF file containing climatology data.
 
-        Returns:
-            np.ndarray: SIDI array (time x n_weightings) computed with optimal_k.
-        """
-        if optimal_k is None or optimal_k < 0:
-            raise ValueError("optimal_k must be a positive integer obtained by SIDI vs SQI1 optimitation (use 'analize_correlation' method to estimate optima_k.")
+            Raises:
+                ValueError: If `forecast_path` is not provided.
+                ValueError: If the climatology timestamps are not a multiple of the forecast period.
 
-        if optimal_weight_index is None or optimal_weight_index < 0 or  optimal_weight_index >= 5:
-            raise ValueError(
-                "optimal_weight index must be positive integers obtained via SIDI vs SQI1 optimization")
-        # ---- compute SIDI with the requested K (no side effects yet)
-        SIDI_new = self.recalculate_SIDI(K=optimal_k)
+            Sets:
+                self.forecast_ts (np.ndarray): 2D array (N_members, N_forecast) containing forecast timeseries.
+                self.forecast_m_cal (np.ndarray): Array with forecast timestamps.
+            """
+        # Check if paths are provided
+        if not forecast_path:
+            print("No forecast paths provided. Skipping forecast import.")
+            self.forecast_ts = None
+            self.forecast_m_cal = None
+            return  # Exit early if no forecast data is available
 
-        if overwrite:
-            self.SIDI = SIDI_new
-            self.optimal_k = optimal_k
-            self.optimal_weight_index = int(optimal_weight_index)
+        forecast_ts,m_cal,_,lat,lon,day = import_netcdf_for_cumulative_variable(forecast_path,['tp','rr','precipitation','prec','LAPrec1871'],shape=self.shape,verbose = verbose)
+        n_forecasts,n_members  = np.shape(forecast_ts) # Number of forecast time steps
+        self.forecast_m_cal = m_cal
+        print(f'Forecast cover the time span form {m_cal[0,0]}/{m_cal[0,1]} to {m_cal[-1,0]}/{m_cal[-1,1]}')
 
-        return SIDI_new
+        if clima_path is not None:
+            print("Relativizing forecasts to the climatology...")
+            # Import climatology data
+            clima_ts, clima_m_cal,_,_,_,_ =  import_netcdf_for_cumulative_variable(clima_path, ['tp','rr','precipitation','prec','LAPrec1871'],shape=self.shape,verbose = verbose)
+            try:
+                n_months, n_clima_members = np.shape(clima_ts)
+                if n_forecasts != n_months:
+                    raise ValueError('the number of months in the forecasts window are different from those in the climatological window')
+                n_years = int(n_months/  n_forecasts)
+                # Ensure climatology data is a multiple of forecast period
+                if n_months %  n_forecasts !=0:
+                    raise ValueError("The timestamp of the climatology is not a multiple of the forecast period.")
+                mat = clima_ts.reshape(n_years, n_forecasts,n_clima_members)
+                climatology = np.mean(np.mean(mat, axis=0),axis=1)
+                anomalies_ts =  np.array([(forecast_ts[:,m] - climatology)/climatology for m in range(n_members)])
+            except ValueError:
+                climatology = np.array(clima_ts,copy=True)
+                anomalies_ts =  np.array([(forecast_ts[:,m] - climatology)/climatology for m in range(n_members)])
+              # in case of a unique timeseries
 
-    def set_optimal_SIDI_seasonal(self, seasonal_corr, agg='quarter',
-                                  seasons=None, overwrite=False):
-        """
-        Recalculate SIDI using season-specific optimal K and weight_index
-        (obtained via ``analyze_correlation_seasonal``).
 
-        The method builds a "mosaic" SIDI where each month is computed with
-        the optimal parameters of its season, then standardised per-season
-        on the baseline.
-
-        When ``overwrite=True`` the 1-D seasonal SIDI is tiled to shape
-        ``(time, 5)`` so that downstream consumers expecting
-        ``self.SIDI[:, weight_index]`` keep working transparently
-        (every column holds the same optimised series).
-
-        Args:
-            seasonal_corr (dict): Output of ``analyze_correlation_seasonal()``.
-                Each key is a season name, each value contains at least
-                ``'best_k'`` and ``'col_best_weight'``.
-            agg (str): Aggregation scheme — **must match** the one used in
-                ``analyze_correlation_seasonal()``.
-                Options: 'quarter', 'semiannual', 'four-monthly', 'monthly', 'custom'.
-            seasons (dict, optional): Required when ``agg='custom'``.
-                ``{season_name: [month_ints]}``.
-            overwrite (bool): If True, updates ``self.SIDI`` (tiled to ``(time, 5)``)
-                and stores ``self.seasonal_params`` on the instance.
-
-        Returns:
-            np.ndarray: SIDI array ``(time,)`` with season-specific optimization.
-        """
-        if seasons is not None:
-            agg = 'custom'
-
-        seasons_dict = self._build_seasons_dict(agg, seasons)
-
-        # Validate coverage
-        missing = [s for s in seasons_dict if s not in seasonal_corr]
-        if missing:
-            print(f"Warning: seasons {missing} not found in seasonal_corr; "
-                  f"corresponding months will be NaN in SIDI.")
-
-        SIDI_seasonal = self.recalculate_SIDI_seasonal(seasonal_corr, seasons_dict)
-
-        if overwrite:
-            # tile to (time, 5) for backward compatibility with
-            # consumers that do self.SIDI[:, weight_index]
-            self.SIDI = np.tile(SIDI_seasonal[:, np.newaxis], (1, 5))
-            print("Note: SIDI overwritten with seasonal optimization. "
-                  "All 5 weight columns are identical (season-specific K and weight already applied).")
-            # ... rest of seasonal_params assignment
-            self.seasonal_params = {
-                'agg': agg,
-                'seasons': seasons_dict,
-                'config': {
-                    name: {'best_k': v['best_k'],
-                           'col_best_weight': v['col_best_weight']}
-                    for name, v in seasonal_corr.items()
-                    if name in seasons_dict
-                }
-            }
-
+            # Assign results to class attributes
+            self.forecast_ts = anomalies_ts.copy()
         else:
-            return SIDI_seasonal
+            print('No climatology provided, store raw forecast in .forecast_ts')
+            self.forecast_ts = forecast_ts
+        print('Forecasts imported successfully!')
 
-    def plot_covariates(self, streamflow,year_ext=None, split_plot=False):
+    def analyze_convolution_irf(self, streamflow, driver_var='SPI', plot=True,
+                                plot_mode='all'):
         """
-        Plot the covariate relationship between the optimized SIDI and a Streamflow-based index.
+        The five SIDI weighting families used as fixed-shape impulse-response
+        functions over LAGS of the 1-month driver, instead of over SCALES.
+
+        For every kernel length k = 1..K and every family w (the columns of
+        ``generate_weights(k)``, ``WEIGHT_LABELS`` order):
+
+            target_hat(t) = Σ_{i=0}^{k-1} W[i, w] · driver(t - i)
+
+        where W[0, w] multiplies the contemporaneous month (so the "decreasing"
+        families favour recent months), scored by R² (squared Pearson) against
+        SQI1 — the same objective as ``analyze_correlation``.
+
+        Where it sits among the other methods:
+          - D(SPI) / ``analyze_correlation`` apply these five shapes to the
+            SPI_1..SPI_k ACCUMULATION SCALES; this method applies them to the
+            LAGS of SPI1 directly, i.e. it tests the shape as a monthly memory
+            kernel (compare ``effective_month_weights``).
+          - Benchmark B (``benchmark_convolution(var='SPI')``) fits the same lag
+            kernel freely by OLS; here the shape is prescribed (zero free
+            parameters once k is chosen).
+          - With ``driver_var='P'`` the driver is the raw series ``self.ts``,
+            i.e. Benchmark A's driver with the shape prescribed instead of
+            fitted.
 
         Parameters
         ----------
-        streamflow : BaseDroughtAnalysis or Streamflow
-            Streamflow object providing SQI1 or similar indices.
-        year_ext : tuple of int, optional
-            (start_year, end_year) to restrict the x-axis.
-        split_plot : bool, optional
-            If True, produces separate figures for each panel. Default False.
+        streamflow : BaseDroughtAnalysis
+            Object carrying SQI1 (``spi_like_set[0]``).
+        driver_var : {'SPI', 'P'}, default 'SPI'
+            'SPI': SPI1 (``self.spi_like_set[0]``); 'P': raw ``self.ts``.
+        plot : bool, default True
+            R²(k) curves (one per family) and the best-fit scatter.
+        plot_mode : {'all', 'monthly'}, default 'all'
+            Scatter colouring.
 
-        Raises
-        ------
-        TypeError
-            If streamflow is not a BaseDroughtAnalysis instance, or if the
-            Precipitation object has not been optimized.
+        Returns
+        -------
+        dict
+            - "best_k", "col_best_weight", "max_correlation": the best (k, family).
+            - "best_k_per_weight", "max_correlation_per_weight": per family.
+            - "R2_matrix" (ndarray, shape (K, 5)): R² of every (k, family).
+            - "weights" (ndarray): the winning kernel, length best_k.
         """
-        if not isinstance(streamflow, BaseDroughtAnalysis):
-            raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
+        self._check_correlation_eligible()
+        if driver_var not in ('P', 'SPI'):
+            raise ValueError("driver_var must be 'P' or 'SPI'; got %r." % (driver_var,))
 
-        if self.is_seasonal_sidi:
-            print(f"Note: SIDI is seasonally optimized — weight_index is ignored (all columns identical).")
-            weight_index = None  # colonna 0, colore rosso
-        elif hasattr(self, 'optimal_weight_index'):
-            weight_index = self.optimal_weight_index
-        else:
-            raise TypeError(
-                "The Precipitation object must be optimized with "
-                "'set_optimal_SIDI()' or 'set_optimal_SIDI_seasonal()' OVERWRITE=True "
-                "before calling this function."
+        self_idx, sf_idx = find_overlap(self.m_cal, streamflow.m_cal)
+        if len(self_idx) == 0 or len(sf_idx) == 0:
+            raise ValueError("No overlapping data found between the two objects.")
+
+        driver = (np.asarray(self.ts, float)[self_idx] if driver_var == 'P'
+                  else self.spi_like_set[0, self_idx])
+        y = streamflow.spi_like_set[0, sf_idx]
+        wlabel = list(WEIGHT_LABELS)
+        n_w = len(wlabel)
+
+        K_range = np.arange(1, self.K + 1)
+        R2 = np.full((len(K_range), n_w), np.nan)
+        for ik, k in enumerate(K_range):
+            W = generate_weights(int(k))
+            for w in range(n_w):
+                y_hat = self._lag_convolve(driver, W[:, w])
+                valid = np.isfinite(y) & np.isfinite(y_hat)
+                if valid.sum() > 10:
+                    R2[ik, w] = stats.pearsonr(y_hat[valid], y[valid])[0] ** 2
+
+        if np.all(np.isnan(R2)):
+            raise ValueError("No (k, family) pair could be scored on the overlap.")
+        bk, bw = np.unravel_index(np.nanargmax(R2), R2.shape)
+        best_k = int(K_range[bk])
+        best_w = generate_weights(best_k)[:, bw]
+        max_corr = float(R2[bk, bw])
+        print(f"Best R2 = {max_corr:.3f} (k={best_k}, family={wlabel[bw]}) "
+              f"[{'raw driver' if driver_var == 'P' else self.index_name + '1'} lags]")
+
+        if plot:
+            plt.figure(figsize=(10, 5))
+            for w in range(n_w):
+                plt.plot(K_range, R2[:, w], lw=2, color=WEIGHT_COLORS[w], label=wlabel[w])
+            plt.grid()
+            plt.legend(loc=3)
+            plt.xticks(K_range)
+            plt.ylabel(r"$R^2$", fontsize=12)
+            plt.xlabel("kernel length k (months)", fontsize=12)
+            plt.title(f"{self.basin_name} — fixed-shape lag kernels vs "
+                      f"{streamflow.index_name}1", fontsize=14)
+            plt.tight_layout()
+            plt.show(block=False)
+
+            x = self._lag_convolve(driver, best_w)
+            plt.figure(figsize=(7, 7))
+            if plot_mode == 'monthly':
+                cmap = cmc.romaO if cmc is not None else plt.get_cmap('twilight_shifted', 12)
+                months = self.m_cal[self_idx, 0]
+                for m in range(1, 13):
+                    f = months == m
+                    plt.plot(x[f], y[f], 'o', color=cmap(m / 12), label=f'month {m}')
+                plt.legend(fontsize=9)
+            else:
+                plt.plot(x, y, 'ok', markerfacecolor='yellow')
+            plt.grid()
+            plt.xlabel("lag-kernel driver (weighted sum)", fontsize=12)
+            plt.ylabel(f"{streamflow.index_name}1", fontsize=12)
+            plt.title(f"k={best_k}, {wlabel[bw]}; $R^2$={max_corr:.2f}", fontsize=14)
+            plt.tight_layout()
+            plt.show(block=False)
+
+        return {
+            "best_k": best_k,
+            "col_best_weight": int(bw),
+            "max_correlation": max_corr,
+            "best_k_per_weight": K_range[np.nanargmax(R2, axis=0)],
+            "max_correlation_per_weight": np.nanmax(R2, axis=0),
+            "R2_matrix": R2,
+            "weights": best_w,
+        }
+
+    def ds_balance(self, streamflow, weight_index=None, verbose=True):
+        """
+        Monthly water balance of the basin over the whole record: how much of the
+        observed streamflow the precipitation accounts for, and how much it does not.
+
+        REQUIRES an optimised SIDI. Call ``set_optimal_SIDI_seasonal(..., overwrite=True)``
+        (or ``set_optimal_SIDI(..., overwrite=True)``) BEFORE this method: the balance is
+        only meaningful against a SIDI calibrated on the streamflow, and the default SIDI
+        is not. The method raises if neither optimisation has been applied.
+
+        Method, month by month:
+
+        1. ``r`` is measured on the baseline, per season, between SQI1 and the optimised
+           SIDI. Since both are unit-variance z-scores, ``r`` IS the regression
+           coefficient, so the discharge the precipitation implies is ``r * SIDI`` -
+           shrunk towards the mean, because an imperfect relation does not license
+           predicting values as extreme as the driver itself. ``r`` is measured WITH ITS
+           SIGN rather than taken as sqrt(R2): with temperature or PET as driver the
+           relation can be genuinely negative, and R2 discards the sign.
+        2. That expectation is converted to native units with ``spi_to_native`` at scale
+           1 - the same reverse transform behind ``normal_values`` and
+           ``deficit_from_spi``, so the whole balance sits on one convention.
+        3. ``sqrt(1 - r**2)`` is the share of streamflow variance the precipitation does
+           NOT explain. Converted to discharge it is the typical volume moved by
+           everything else - abstraction, reservoirs, aquifers - and it is the ruler the
+           divergence has to be measured against. It also absorbs measurement and model
+           error, so read it as an upper bound on the non-meteorological signal.
+        4. The precipitation deficit is accumulated with the SAME weights the SIDI uses
+           (``generate_weights(k)[:, weight_index]`` over scales 1..k), NOT at scale k
+           alone: the SIDI reads nested windows, so a month at lag j enters every scale
+           k > j and its effective weight W_eff(j) decays with j for every scheme (see
+           ``effective_month_weights``). The deficit at scale k alone would describe a
+           different rainfall history than the one the SIDI actually reads. Each
+           scale's deficit is first expressed as the mean discharge sustained over its
+           own j months, then the scales are combined with the scheme's weights.
+
+        No runoff coefficient appears anywhere, deliberately: ``Qa`` is already expressed
+        in discharge, because the whole chain is calibrated on observed streamflow. The
+        rainfall-runoff conversion has therefore already been absorbed, and applying
+        another one downstream would count it twice.
+
+        Args:
+            streamflow (Streamflow): object carrying the streamflow index
+                (``spi_like_set[0]`` = SQI1). Must overlap this object in time.
+            weight_index (int, optional): weighting-scheme column to read from
+                ``self.SIDI``. Default **0 (equal weights, ew)**, whatever the
+                calibration — deliberately NOT ``_resolve_weight_index``: no single
+                scheme is optimal in every season, and a default that silently
+                followed the calibration would hide that choice. A reminder is
+                printed; pass another index (0..4) to use a different scheme.
+                After a seasonal calibration each column is that scheme's own
+                seasonal SIDI, with its own per-season K.
+            verbose (bool): print the seasons, the measured ``r`` and the baseline
+                delivery ratio. Default True.
+
+        Returns:
+            pandas.DataFrame indexed by month, with columns:
+                ``month``, ``year``  : calendar position
+                ``season``, ``k``    : season the month belongs to, and its accumulation scale
+                ``r``                : that season's correlation, measured on the baseline
+                ``Qn``               : reference discharge, the value at SQI1 = 0
+                ``Qo``               : observed discharge
+                ``anomaly``          : Qo - Qn, water missing versus a normal month
+                ``Qa``               : discharge the precipitation implies (r * SIDI, native units)
+                ``rain_share``       : Qa - Qn, the part of the anomaly precipitation accounts for
+                ``divergence``       : Qo - Qa, the part it does not
+                ``typical_volume``   : the sqrt(1 - r**2) band, in discharge units
+                ``delivery``         : Qo / Qa, how much the basin returns of what the rain implies
+                ``rain_deficit_k``   : precipitation deficit over the scheme-weighted k months,
+                                       as the sustained discharge delivering the same volume
+
+            ``rain_share`` and ``anomaly`` close exactly: ``rain_share + divergence == anomaly``,
+            by algebra and not by estimation.
+
+        Raises:
+            ValueError: if the SIDI has not been optimised, or the two objects do not overlap.
+
+        Example:
+            >>> corr = prec.analyze_correlation_seasonal(flow, seasons=seasons, plot=False)
+            >>> prec.set_optimal_SIDI_seasonal(corr, seasons=seasons, overwrite=True)
+            >>> df = prec.ds_balance(flow)
+            >>> df.loc['2022', ['anomaly', 'rain_share', 'divergence', 'delivery']]
+        """
+        import pandas as pd
+        from drought_scan.utils.drought_indices import generate_weights
+        from drought_scan.utils.statistics import find_overlap
+
+        # ---- 0. the SIDI must be the optimised one -----------------------------
+        if self.calibration_mode is None:
+            raise ValueError(
+                "ds_balance() requires an optimised SIDI, and this object still carries "
+                "the default one.\n"
+                "Run the correlation analysis against the streamflow first, then overwrite:\n"
+                "    corr = precipitation.analyze_correlation_seasonal(streamflow, seasons=...)\n"
+                "    precipitation.set_optimal_SIDI_seasonal(corr, seasons=..., overwrite=True)\n"
+                "or, for a single scale:\n"
+                "    corr = precipitation.analyze_correlation(streamflow)\n"
+                "    precipitation.set_optimal_SIDI(corr['best_k'], corr['col_best_weight'], overwrite=True)"
             )
 
-        plot__covariates(self, streamflow=streamflow, weight_index=weight_index,
-                         year_ext=year_ext, split_plot=split_plot)
+        self._calibration_note()
+        if weight_index is None:
+            weight_index = 0
+            hint = ""
+            if self.calibration_mode == 'global' and getattr(self, 'optimal_weight_index', 0) != 0:
+                hint = (f" The global calibration committed weight_index="
+                        f"{self.optimal_weight_index} ({WEIGHT_LABELS[self.optimal_weight_index]}).")
+            elif self.calibration_mode == 'seasonal':
+                hint = (" With a seasonal calibration no single scheme is optimal in every "
+                        "season: check the per-season peaks of analyze_correlation_seasonal.")
+            print(f"Note: ds_balance uses weight_index=0 ({WEIGHT_LABELS[0]}) by default."
+                  f"{hint} Pass weight_index=0..4 to choose another scheme.")
+        weight_index = self._resolve_weight_index(weight_index)   # validates 0..4
+
+        # ---- which series, and which K per season, for THIS scheme ------------
+        if self.is_seasonal_sidi:
+            seasons = self.seasonal_params['seasons']
+            # self.SIDI[:, weight_index] is this scheme's own seasonal series, so the K
+            # reported alongside it must be this scheme's per-season K, not the season's
+            # overall-best K (which belongs to whichever scheme won that season). The
+            # two only coincided while every column was a copy of the 1-D mosaic.
+            best_k = {}
+            for name, cfg in self.seasonal_params['config'].items():
+                if 'best_k_per_weight' in cfg:
+                    best_k[name] = int(np.ravel(cfg['best_k_per_weight'])[weight_index])
+                else:
+                    best_k[name] = int(cfg['best_k'])
+        else:
+            seasons = {'all': list(range(1, 13))}
+            k_all = self.optimal_k
+            if not np.isscalar(k_all):          # best_k_per_weight: one per scheme
+                k_all = np.asarray(k_all)[weight_index]
+            best_k = {'all': int(k_all)}
+
+        return self._ds_balance_core(
+            streamflow, self.SIDI[:, weight_index], best_k, seasons,
+            weight_index, verbose=verbose,
+        )
+
+    def _ds_balance_core(self, streamflow, sidi_full, best_k, seasons, weight_index,
+                         verbose=True, label=""):
+        """
+        The water-balance computation itself, for ONE weighting scheme.
+
+        Shared by ``ds_balance`` (which reads the scheme's series and per-season K off
+        the committed object) and ``ds_balance_all_schemes`` (which supplies them for
+        each of the five schemes in turn). The two used to carry two copies of these
+        ~120 lines, because before ``self.SIDI`` kept one column per scheme there was
+        no way to ask the object for scheme *w*'s seasonal series — it had to be
+        rebuilt from the raw R² surface, and the whole balance rebuilt around it.
+
+        Parameters
+        ----------
+        streamflow : Streamflow
+            The target river.
+        sidi_full : ndarray
+            This scheme's SIDI over the full record, shape ``(len(self.m_cal),)``.
+        best_k : dict
+            ``{season_label: K}`` for this scheme.
+        seasons : dict
+            ``{season_label: [month_ints]}``.
+        weight_index : int
+            The scheme's column index — used for the rain-deficit weights and reporting.
+        verbose : bool
+            Print the per-season summary.
+        label : str
+            Suffix for the printed header, e.g. the scheme name.
+
+        Returns
+        -------
+        pandas.DataFrame
+            See ``ds_balance`` for the meaning of each column.
+        """
+        import pandas as pd
+        from drought_scan.utils.drought_indices import generate_weights
+        from drought_scan.utils.statistics import find_overlap
+
+        # ---- 1. temporal overlap ---------------------------------------------
+        self_idx, sf_idx = find_overlap(self.m_cal, streamflow.m_cal)
+        if len(self_idx) == 0:
+            raise ValueError("No overlapping period between precipitation and streamflow.")
+
+        m_cal = self.m_cal[self_idx]
+        months = m_cal[:, 0].astype(int)
+        years = m_cal[:, 1].astype(int)
+        n = len(months)
+
+        sqi1 = streamflow.spi_like_set[0][sf_idx]
+        sidi = np.asarray(sidi_full)[self_idx]
+        Qo = streamflow.ts[sf_idx]
+        baseline = (years >= self.start_baseline_year) & (years <= self.end_baseline_year)
+
+        month_to_season = {m: s for s, ml in seasons.items() for m in ml}
+
+        # ---- 3. per-season r, signed, measured on the baseline ----------------
+        r_season = {}
+        for name, mlist in seasons.items():
+            fit = (np.isin(months, mlist) & baseline
+                   & np.isfinite(sqi1) & np.isfinite(sidi))
+            if fit.sum() >= 3 and np.std(sidi[fit]) > 0:
+                r_season[name] = float(stats.pearsonr(sidi[fit], sqi1[fit])[0])
+            else:
+                r_season[name] = np.nan
+                print(f"Warning: season '{name}' has fewer than 3 valid baseline points; "
+                      f"r is undefined and its months will be NaN.")
+
+        r_ts = np.array([r_season.get(month_to_season.get(m), np.nan) for m in months])
+        k_ts = np.array([best_k.get(month_to_season.get(m), np.nan) for m in months], dtype=float)
+
+        # ---- 4. expected discharge and typical volume, in native units --------
+        expected_z = r_ts * sidi
+        band_z = np.sqrt(np.clip(1.0 - r_ts ** 2, 0.0, 1.0))
+
+        Qn = np.full(n, np.nan)
+        Qa = np.full(n, np.nan)
+        Qlow = np.full(n, np.nan)
+        for m in range(1, 13):
+            idm = np.where(months == m)[0]
+            if idm.size == 0:
+                continue
+            Qn[idm] = streamflow.spi_to_native(0.0, month_scale=1, ref_month=m)
+            ok = idm[np.isfinite(expected_z[idm])]
+            if ok.size:
+                Qa[ok] = np.asarray(streamflow.spi_to_native(expected_z[ok], 1, m))
+                Qlow[ok] = np.asarray(streamflow.spi_to_native(expected_z[ok] - band_z[ok], 1, m))
+
+        typical = Qa - Qlow
+        with np.errstate(invalid='ignore', divide='ignore'):
+            delivery = np.where(Qa > 0, Qo / Qa, np.nan)
+
+        # ---- 5. rain deficit, weighted with the same weights as the SIDI ------
+        # mm accumulated over j months -> equivalent mean discharge sustained over
+        # the same j months (mm * km2 * 1e3 = m3), with the real calendar seconds.
+        seconds = np.array([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]) * 86400.0
+        scales = sorted({int(k) for k in np.unique(k_ts) if np.isfinite(k)})
+        cms_by_scale = {}
+        for j in range(1, max(scales) + 1) if scales else []:
+            d_mm = self.deficit_from_spi(window=j)[self_idx]
+            secs = np.array([seconds[months[max(0, i - j + 1):i + 1] - 1].sum() for i in range(n)])
+            with np.errstate(invalid='ignore', divide='ignore'):
+                cms_by_scale[j] = np.where(secs > 0, d_mm * self.area_kmq * 1e3 / secs, np.nan)
+
+        rain_deficit = np.full(n, np.nan)
+        for k in scales:
+            W = generate_weights(k)[:, weight_index]
+            stack = np.vstack([cms_by_scale[j] for j in range(1, k + 1)])
+            # Plain sum, not nansum: the k-scale weighted deficit is defined only
+            # once every one of its k scales is. nansum treated a missing scale as a
+            # zero contribution, quietly under-reporting the deficit over the first
+            # k-1 months of the record instead of saying it is undefined there.
+            rain_deficit[k_ts == k] = np.sum(stack * W[:, None], axis=0)[k_ts == k]
+
+        out = pd.DataFrame({
+            'month': months,
+            'year': years,
+            'season': [month_to_season.get(m) for m in months],
+            'k': k_ts,
+            'r': r_ts,
+            'Qn': Qn,
+            'Qo': Qo,
+            'anomaly': Qo - Qn,
+            'Qa': Qa,
+            'rain_share': Qa - Qn,
+            'divergence': Qo - Qa,
+            'typical_volume': typical,
+            'delivery': delivery,
+            'rain_deficit_k': rain_deficit,
+        }, index=pd.to_datetime([f"{y}-{m:02d}-01" for m, y in zip(months, years)]))
+
+        if verbose:
+            print("#########################################################################")
+            print(f"ds_balance{label} - {self.basin_name}: {n} months, "
+                  f"{years.min()}-{years.max()} "
+                  f"(baseline {self.start_baseline_year}-{self.end_baseline_year})")
+            print(f"weighting scheme column: {weight_index}"
+                  f"{' (seasonal SIDI: per-scheme columns)' if self.is_seasonal_sidi else ''}")
+            for name in seasons:
+                r = r_season.get(name, np.nan)
+                print(f"  season {name:12s} k={best_k.get(name)}  r={r:+.3f}  "
+                      f"unexplained sqrt(1-r2)={np.sqrt(max(1 - r ** 2, 0)):.3f}")
+            bl_del = out.loc[baseline, 'delivery'].dropna()
+            if len(bl_del):
+                print(f"delivery Qo/Qa on the baseline: median {bl_del.median():.3f}, "
+                      f"10th-90th {bl_del.quantile(.1):.2f}-{bl_del.quantile(.9):.2f}")
+            print("#########################################################################")
+
+        return out
+
+    def ds_balance_all_schemes(self, streamflow, seasonal_corr=None, seasons=None,
+                               verbose=True):
+        """
+        ``ds_balance``, computed independently for EACH of the 5 weighting schemes.
+
+        Every scheme is scored on its own terms: its own per-season optimal K, its own
+        seasonal SIDI, its own balance. These are the series the water-balance tables
+        are built from.
+
+        This used to be ~170 lines re-implementing the whole balance, because after a
+        seasonal commit all five columns of ``self.SIDI`` were identical copies of the
+        1-D mosaic and the other four schemes' calibration survived only inside the raw
+        R² surface. ``self.SIDI`` now keeps one column per scheme, so this is a loop
+        over the same ``_ds_balance_core`` that ``ds_balance`` calls.
+
+        Args:
+            streamflow (Streamflow): same as ``ds_balance``.
+            seasonal_corr (dict, optional): ``analyze_correlation_seasonal``'s return
+                value. Pass it to score the schemes WITHOUT committing anything to the
+                object (each season's entry must still carry its ``R2_matrix`` or
+                ``best_k_per_weight``). Omit it to read the calibration already
+                committed on ``self``.
+            seasons (dict, optional): the season->months mapping matching
+                ``seasonal_corr``. Required with it, ignored without it.
+            verbose (bool): print, per scheme, the seasons/k/r and the baseline
+                delivery ratio. Default True.
+
+        Returns:
+            dict[str, pandas.DataFrame]: keyed by scheme label, in this fixed order -
+            ``"ew"``, ``"lindw"``, ``"geodw"``, ``"liniw"``, ``"geoiw"``
+            (``generate_weights``'s column order, see ``WEIGHT_LABELS``). Each
+            DataFrame has the same columns as ``ds_balance``'s.
+
+        Raises:
+            ValueError: if neither ``seasonal_corr`` nor a committed seasonal
+                calibration is available, or the two objects do not overlap.
+
+        Example:
+            >>> corr = prec.analyze_correlation_seasonal(flow, seasons=seasons, plot=False)
+            >>> balances = prec.ds_balance_all_schemes(flow, corr, seasons)
+            >>> balances["geodw"].loc['2022', ['anomaly', 'rain_share', 'divergence']]
+        """
+        wlabel = list(WEIGHT_LABELS)
+        K_range = np.arange(1, self.spi_like_set.shape[0] + 1)
+
+        if seasonal_corr is not None:
+            if seasons is None:
+                raise ValueError(
+                    "ds_balance_all_schemes: `seasons` is required alongside "
+                    "`seasonal_corr` — pass the same mapping given to "
+                    "analyze_correlation_seasonal."
+                )
+            # Score without touching self: build the five columns on the fly.
+            SIDI_all = self.recalculate_SIDI_seasonal_all_schemes(seasonal_corr, seasons)
+            config = seasonal_corr
+        elif self.is_seasonal_sidi:
+            self._calibration_note()
+            seasons = self.seasonal_params['seasons']
+            SIDI_all = self.SIDI
+            config = self.seasonal_params['config']
+        else:
+            raise ValueError(
+                "ds_balance_all_schemes needs either `seasonal_corr` (the dict "
+                "analyze_correlation_seasonal returns) plus its `seasons` mapping, or "
+                "an object already committed with set_optimal_SIDI_seasonal(..., "
+                "overwrite=True)."
+            )
+
+        out = {}
+        for w, label in enumerate(wlabel):
+            best_k = {}
+            for name, info in config.items():
+                if name not in seasons:
+                    continue
+                if 'best_k_per_weight' in info:
+                    best_k[name] = int(np.ravel(info['best_k_per_weight'])[w])
+                elif 'R2_matrix' in info:
+                    col = np.asarray(info['R2_matrix'], dtype=float)[:, w]
+                    if np.all(np.isnan(col)):
+                        continue
+                    best_k[name] = int(K_range[np.nanargmax(col)])
+                else:
+                    best_k[name] = int(info['best_k'])
+            if not best_k:
+                continue
+            out[label] = self._ds_balance_core(
+                streamflow, SIDI_all[:, w], best_k, seasons, w,
+                verbose=verbose, label=f" [{label}]",
+            )
+        return out
+
 
 class Streamflow(BaseDroughtAnalysis):
     def __init__(self, start_baseline_year, end_baseline_year,basin_name,
                  ts=None, m_cal=None, shape=None, shape_path=None,
-                 data_path=None, K=None, weight_index=2,
-                 calculation_method=f_kde, threshold=-1, index_name='SQI',rolling = False):
+                 data_path=None, K=None, weight_index=None,
+                 calculation_method=f_kde, threshold=None, index_name='SQI',rolling = False,
+                 verbose=True):
         """
         Initialize the Streamflow class for drought analysis using streamflow data (e.g., river discharge).
 
@@ -4310,28 +5753,30 @@ class Streamflow(BaseDroughtAnalysis):
             calculation_method (callable, optional): Function to compute SPI-like indices. Default is `f_kde`.
             threshold (float, optional): Threshold (in standard deviations) to define severe drought events. Default is -1.
             index_name (str, optional): Name of the drought index. Default is 'SQI'.
+            rolling (bool, optional): If True, aggregate daily data on rolling 30-day
+                windows instead of fixed calendar months. Default False.
+            verbose (bool, optional): Whether to print loading messages. Default is True.
 
         Raises:
             ValueError: If neither streamflow data nor a path to load it are provided.
         """
-        # Parametri principali
+        # Main parameters
         self.start_baseline_year = start_baseline_year
         self.end_baseline_year = end_baseline_year
+        self.verbose = verbose
         self.K = K if K is not None else 36
-        self.threshold = threshold
-        self.weight_index = weight_index
+        self.threshold = threshold if threshold is not None else -1
+        self.weight_index = weight_index if weight_index is not None else 2
         self.basin_name = basin_name
         self.data_path = data_path
 
-
-
-        # Metodo di calcolo e nome indice
+        # Calculation method and index name
         if not callable(calculation_method):
             raise ValueError("`calculation_method` must be a callable function.")
         self.calculation_method = calculation_method
         self.index_name = index_name
 
-        # Gestione shapefile
+        # Shapefile
         if shape is not None:
             self.shape = shape
         elif shape_path is not None:
@@ -4339,28 +5784,27 @@ class Streamflow(BaseDroughtAnalysis):
         else:
             self.shape = None
 
-        # Gestione dati: ts e m_cal oppure data_path
+        # Data: either ts and m_cal, or data_path
         if ts is not None and m_cal is not None:
             self.ts = ts
             self.m_cal = m_cal
-            self.is_placeholder = False
             self.day = None
         elif data_path is not None:
-            # All'interno della tua classe (es. Streamflow, BaseDroughtAnalysis, ecc.)
             if data_path.endswith(('.csv', '.txt','.xls', '.xlsx')):
-                print("Loading streamflow data from text/excel file...")
+                if verbose:
+                    print("Loading streamflow data from text/excel file...")
                 self.ts, self.m_cal,self.day = load_streamflow(data_path,rolling=rolling)
             else:
                 raise ValueError("Unsupported file format. Use .csv, .txt, .xls, or .xlsx")
         else:
             raise ValueError("You must provide either (`ts` and `m_cal`) or a valid `data_path`.")
 
-        # Inizializzazione della superclasse
+        # Initialize the base class
         super().__init__(self.ts, self.m_cal, self.K,
                          self.start_baseline_year, self.end_baseline_year,self.basin_name,
                          self.calculation_method, self.threshold, self.index_name,self.day)
 
-    def gap_filling(self, precipitation):
+    def gap_filling(self, precipitation, weight_index=None):
         """
         Fill missing values in the streamflow time series by regressing SQI1
         on precipitation-based SIDI, then back-transforming predictions to
@@ -4380,27 +5824,37 @@ class Streamflow(BaseDroughtAnalysis):
         precipitation : BaseDroughtAnalysis
             Precipitation (or Balance / Pet) instance whose ``SIDI`` has
             already been overwritten with optimal parameters.
+        weight_index : int, optional
+            Which column of ``precipitation.SIDI`` (0..4) to regress on. The
+            seasonal optimization no longer picks one "best" scheme, so the
+            choice is the caller's: passed explicitly here, else
+            0 (equal weights) after a seasonal calibration, the committed
+            ``optimal_weight_index`` after a global one, else the construction
+            default, else 2.
+            See ``_resolve_weight_index``.
 
         Returns
         -------
         None
-            Updates ``self.ts`` in place. If any gaps are filled, also
-            recomputes ``self.spi_like_set``, ``self.SIDI``, and ``self.CDN``.
+            Updates ``self.ts`` in place and unconditionally recomputes
+            ``self.spi_like_set``, ``self.SIDI``, and ``self.CDN``
+            (this only returns early, without recomputing, when
+            ``self.ts`` has no NaN values to begin with).
         """
         if not isinstance(precipitation, BaseDroughtAnalysis):
             raise TypeError("The input must be an instance of Precipitation.")
 
         # --- require an optimized SIDI on the precipitation object --------
-        if precipitation.is_seasonal_sidi:
-            SIDI_full = precipitation.SIDI[:, 0]
-        elif hasattr(precipitation, 'optimal_weight_index'):
-            SIDI_full = precipitation.SIDI[:, precipitation.optimal_weight_index]
-        else:
+        if precipitation.calibration_mode is None:
             raise ValueError(
                 "precipitation.SIDI has not been optimized yet.\n"
                 "Run one of the following before calling gap_filling():\n"
                 "  precipitation.set_optimal_SIDI(k, w, overwrite=True)\n"
                 "  precipitation.set_optimal_SIDI_seasonal(corr, agg, overwrite=True)")
+        # self.SIDI is always (time, 5) after set_*; pick the weighting scheme.
+        w = precipitation._resolve_weight_index(weight_index)
+        precipitation._calibration_note()
+        SIDI_full = precipitation.SIDI[:, w]
 
         # --- checks for missing values otherwise exit ---------------------
         mask_nan = np.isnan(self.ts)
@@ -4421,7 +5875,7 @@ class Streamflow(BaseDroughtAnalysis):
 
         # specify the variable of interest
         sqi1 = self.spi_like_set[0][self_idx]
-        m_cal = self.m_cal[self_idx]  # (N_overlap, 2) atteso [month, year]
+        m_cal = self.m_cal[self_idx]  # (N_overlap, 2) [month, year]
         ts = self.ts[self_idx].copy()  # (N_overlap,)
 
         SIDI = SIDI_full[prec_idx]
@@ -4448,19 +5902,26 @@ class Streamflow(BaseDroughtAnalysis):
         prediction_mask = np.isnan(sqi1) & np.isfinite(SIDI)
         n_to_fill = int(np.sum(prediction_mask))
 
+        Q_pred = ts.copy()
         if n_to_fill > 0:
             sqi1_pred = sqi1.copy()
             sqi1_pred[prediction_mask] = a * SIDI[prediction_mask] + b
 
-            # back-transform SQI1 -> portata con polinomi mensili
-            Q_pred = ts.copy()
+            # back-transform SQI1 -> discharge (exact inverse, spi_to_native),
+            # grouped by calendar month: spi_to_native takes a single ref_month
+            # per call, and for f_kde each call rebuilds an interpolation grid,
+            # so grouping the gaps of the same month avoids rebuilding it per gap.
             mc_pred = m_cal[prediction_mask]
             s_pred = sqi1_pred[prediction_mask]
+            Q_pred_vals = np.empty(s_pred.shape[0], dtype=float)
 
-            Q_pred[prediction_mask] = [
-                np.polyval(self.c2r_index[0, mc_pred[i, 0] - 1, :], s_pred[i])
-                for i in range(s_pred.shape[0])
-            ]
+            for m in range(1, 13):
+                sub = np.where(mc_pred[:, 0] == m)[0]
+                if sub.size == 0:
+                    continue
+                Q_pred_vals[sub] = self.spi_to_native(s_pred[sub], month_scale=1, ref_month=m)
+
+            Q_pred[prediction_mask] = Q_pred_vals
 
         # ==================================================================
         # UPDATE
@@ -4602,7 +6063,6 @@ class Streamflow(BaseDroughtAnalysis):
 
         plt.tight_layout()
         plt.show(block=False)
-    # prima di usare BFI bisogna impostare la possibità che i dati di portata siano giornaliri
 
     def BFI(self, block_size=5, plot=True, figsize=(14, 5)):
         """
@@ -4633,14 +6093,13 @@ class Streamflow(BaseDroughtAnalysis):
         bfi : float
             Baseflow Index in [0, 1].
         baseflow : np.ndarray
-            Daily baseflow series, same length as self.ts.
+            Daily baseflow series, re-read from self.data_path (self.ts is monthly).
 
         Raises
         ------
-        AttributeError
-            If self.day does not exist, indicating the series is not daily.
         ValueError
-            If the series is too short or contains only NaN.
+            If the file format is unsupported, or if the series is too short
+            (< block_size * 3 days) or contains only NaN.
 
         References
         ----------
@@ -4655,6 +6114,11 @@ class Streamflow(BaseDroughtAnalysis):
         from drought_scan.utils.data_io import _read_csv_smart,_pick_date_col,_pick_value_col,_date_related_cols
 
         # re-read raw file to get the daily series (self.ts is already monthly)
+        if not getattr(self, 'data_path', None):
+            raise ValueError(
+                "BFI needs the original daily series, re-read from `data_path`, but "
+                "this Streamflow object was built from `ts`/`m_cal` (monthly). "
+                "Build it with data_path=<daily CSV/Excel file> to use BFI().")
         ext = os.path.splitext(self.data_path)[1].lower()
         if ext in ('.csv', '.txt'):
             df = _read_csv_smart(self.data_path)
@@ -4800,8 +6264,12 @@ class Pet(BaseDroughtAnalysis):
                 f_spi:   FOR  POSITIVE & RIGHT-SKEWED DATA (uses a Gamma Function) but works fine also for positive normal distribuited sample
                 f_spei:  FOR REAL VALUES & RIGHT-SKEWED (uses a Pearson III function)
                 f_zscore FOR REAL VALUES NORMAL DISTRIBUTED
-            threshold (float, optional): Threshold for severe events. Defaults to -1.
+            threshold (float, optional): Threshold for severe events. Defaults to 1.
+            weight_index (int, optional): Weighting scheme index for SIDI. Default is 2.
+            index_name (str, optional): Name of the index. Default is 'SPETI'.
             verbose (bool, optional): Whether to print initialization messages. Default is True.
+            rolling (bool, optional): If True, aggregate daily data on rolling 30-day
+                windows instead of fixed calendar months. Default False.
         """
         self.start_baseline_year = start_baseline_year
         self.end_baseline_year = end_baseline_year
@@ -4834,9 +6302,7 @@ class Pet(BaseDroughtAnalysis):
         self.K = K if K is not None else 36
 
         self.threshold = 1 if threshold is None else threshold
-
-        if weight_index is None:
-            self.weight_index = 2
+        self.weight_index = weight_index if weight_index is not None else 2
 
         if not callable(calculation_method):
             raise ValueError("`calculation_method` must be a callable function.")
@@ -4857,7 +6323,8 @@ class Pet(BaseDroughtAnalysis):
 class Balance(BaseDroughtAnalysis):
     def __init__(self, start_baseline_year, end_baseline_year, basin_name, prec_path=None, pet_path=None,
                  shape_path=None, shape=None, ts=None, m_cal=None, K=None,
-                 calculation_method=f_kde, threshold=None, index_name = 'SPEI',verbose=True,rolling=False):
+                 calculation_method=f_kde, threshold=None, index_name = 'SPEI',verbose=True,rolling=False,
+                 weight_index=None):
         """
         Initialize the Balance class for calculating water balance (precipitation - PET).
 
@@ -4878,12 +6345,16 @@ class Balance(BaseDroughtAnalysis):
                 f_spei:  FOR REAL VALUES & RIGHT-SKEWED (uses a Pearson III function)
                 f_zscore FOR REAL VALUES NORMAL DISTRIBUTED
             verbose (bool, optional): Whether to print initialization messages. Default is True.
+            rolling (bool, optional): If True, aggregate daily data on rolling 30-day
+                windows instead of fixed calendar months. Default False.
+            weight_index (int, optional): Weighting scheme index for SIDI. Default is 2.
         """
         self.start_baseline_year = start_baseline_year
         self.end_baseline_year = end_baseline_year
         self.verbose = verbose
         self.basin_name=basin_name
         self.rolling = rolling
+        self.weight_index = weight_index if weight_index is not None else 2
 
         # Load shapefile if provided
         if shape is not None:
@@ -4932,19 +6403,20 @@ class Balance(BaseDroughtAnalysis):
         and crop them to their common spatial extent.
 
         Returns:
-            tuple: (Pgrid, ETgrid, m_cal, ts, Lat_common, Lon_common)
+            tuple: (Pgrid, ETgrid, m_cal, ts, Lat_common, Lon_common, day1)
                 - Pgrid: precipitation grid on common domain [time, lat, lon]
                 - ETgrid: PET grid on common domain [time, lat, lon]
                 - m_cal: common calendar
                 - ts: precipitation minus PET time series
                 - Lat_common: common latitude vector
                 - Lon_common: common longitude vector
+                - day1: daily calendar associated with the precipitation series
         """
 
         # import preciptiation data
         prec_ts, prec_cal, Pgrid, Lat_p, Lon_p,day1= import_netcdf_for_cumulative_variable(
             self.prec_path,
-            possible_names=['tp','rr','precipitation','prec','LAPrec1871','pre','swe','SWE','sd','SD','sf','SF'],  # Possibili nomi della variabile
+            possible_names=['tp','rr','precipitation','prec','LAPrec1871','pre','swe','SWE','sd','SD','sf','SF'],  # candidate variable names
             shape=self.shape,
             verbose=self.verbose, rolling = self.rolling)
 
@@ -4966,36 +6438,53 @@ class Balance(BaseDroughtAnalysis):
         if not p_id.size:
             raise ValueError("No common dates found between precipitation and PET datasets.")
 
-            # Allinea i dati secondo le date comuni
+        # Align the data on the common dates
         m_cal = prec_cal[p_id]
         Pgrid = Pgrid[p_id, :, :]
         ETgrid = ETgrid[pet_id, :, :]
-        # Calcola la differenza tra precipitazione e PET
+        # Precipitation minus PET
         ts = prec_ts[p_id] - pet_ts[pet_id]
 
 
         # -----------------------------
         # convert coordinates to 1D arrays
         # -----------------------------
-        Lat_p = np.asarray(Lat_p).squeeze()
-        Lon_p = np.asarray(Lon_p).squeeze()
-        Lat_et = np.asarray(Lat_et).squeeze()
-        Lon_et = np.asarray(Lon_et).squeeze()
+        def _to_1d_lat(arr):
+            a = np.asarray(arr).squeeze()
+            if a.ndim == 2:
+                a = a[:, 0]  # meshgrid: latitudes repeat across columns
+            return a
+
+        def _to_1d_lon(arr):
+            a = np.asarray(arr).squeeze()
+            if a.ndim == 2:
+                a = a[0, :]  # meshgrid: longitudes repeat across rows
+            return a
+
+        Lat_p = _to_1d_lat(Lat_p)
+        Lon_p = _to_1d_lon(Lon_p)
+        Lat_et = _to_1d_lat(Lat_et)
+        Lon_et = _to_1d_lon(Lon_et)
 
         if Lat_p.ndim != 1 or Lon_p.ndim != 1 or Lat_et.ndim != 1 or Lon_et.ndim != 1:
-            raise ValueError("Lat/Lon must be 1D arrays.")
+            import warnings
+            warnings.warn("Lat/Lon arrays could not be reduced to 1D — spatial grid (Pgrid) disabled.")
+            Pgrid = None
 
         # -----------------------------
         # check same resolution
         # -----------------------------
-        dlat_p = np.median(np.abs(np.diff(Lat_p)))
-        dlon_p = np.median(np.abs(np.diff(Lon_p)))
-        dlat_et = np.median(np.abs(np.diff(Lat_et)))
-        dlon_et = np.median(np.abs(np.diff(Lon_et)))
-
         tol = 1e-8
-        if not (np.isclose(dlat_p, dlat_et, atol=tol) and np.isclose(dlon_p, dlon_et, atol=tol)):
-            raise ValueError("P and ET grids do not have the same spatial resolution.")
+        if Pgrid is not None:
+            dlat_p = np.median(np.abs(np.diff(Lat_p)))
+            dlon_p = np.median(np.abs(np.diff(Lon_p)))
+            dlat_et = np.median(np.abs(np.diff(Lat_et)))
+            dlon_et = np.median(np.abs(np.diff(Lon_et)))
+
+            if not (np.isclose(dlat_p, dlat_et, atol=tol) and np.isclose(dlon_p, dlon_et, atol=tol)):
+                import warnings
+                warnings.warn("P and ET grids have different spatial resolutions — spatial grid (Pgrid) disabled.")
+                Pgrid = None
 
         # -----------------------------
         # define common spatial extent
@@ -5023,7 +6512,8 @@ class Balance(BaseDroughtAnalysis):
         # -----------------------------
         # crop the 3D grids
         # -----------------------------
-        Pgrid = Pgrid[:, lat_idx_p[0]:lat_idx_p[-1] + 1, lon_idx_p[0]:lon_idx_p[-1] + 1]
+        if Pgrid is not None:
+            Pgrid = Pgrid[:, lat_idx_p[0]:lat_idx_p[-1] + 1, lon_idx_p[0]:lon_idx_p[-1] + 1]
         ETgrid = ETgrid[:, lat_idx_et[0]:lat_idx_et[-1] + 1, lon_idx_et[0]:lon_idx_et[-1] + 1]
 
         Lat_common_p = Lat_p[lat_idx_p[0]:lat_idx_p[-1] + 1]
@@ -5055,138 +6545,6 @@ class Balance(BaseDroughtAnalysis):
 
         return Pgrid, ETgrid, m_cal, ts,Lat_common, Lon_common,day1
 
-    def set_optimal_SIDI(self, optimal_k, optimal_weight_index, overwrite=False):
-        """
-        Recalculate SIDI using the optimal K (obtained via analyze_correlation with Streamflow).
-        Optionally store optimal_k (and optimal_weight_index) on this instance.
-
-        Args:
-            optimal_k (int): optimal K determined by analyze_correlation(streamflow).
-            optimal_weight_index (int): specific weight index to track/store (0-based).
-            overwrite (bool): if True, updates self.SIDI and stores self.optimal_k
-                              and self.optimal_weight_index on the instance.
-
-        Returns:
-            np.ndarray: SIDI array (time x n_weightings) computed with optimal_k.
-        """
-        if optimal_k is None or optimal_k < 0:
-            raise ValueError("optimal_k must be a positive integer obtained by SIDI vs SQI1 optimitation (use 'analize_correlation' method to estimate optima_k.")
-
-        if optimal_weight_index is None or optimal_weight_index < 0 or  optimal_weight_index >= 5:
-            raise ValueError(
-                "optimal_weight index must be positive integers obtained via SIDI vs SQI1 optimization")
-        # ---- compute SIDI with the requested K (no side effects yet)
-        SIDI_new = self.recalculate_SIDI(K=optimal_k)
-
-        if overwrite:
-            self.SIDI = SIDI_new
-            self.optimal_k = optimal_k
-            self.optimal_weight_index = int(optimal_weight_index)
-
-        return SIDI_new
-
-    def set_optimal_SIDI_seasonal(self, seasonal_corr, agg='quarter',
-                                  seasons=None, overwrite=False):
-        """
-        Recalculate SIDI using season-specific optimal K and weight_index
-        (obtained via ``analyze_correlation_seasonal``).
-
-        The method builds a "mosaic" SIDI where each month is computed with
-        the optimal parameters of its season, then standardised per-season
-        on the baseline.
-
-        When ``overwrite=True`` the 1-D seasonal SIDI is tiled to shape
-        ``(time, 5)`` so that downstream consumers expecting
-        ``self.SIDI[:, weight_index]`` keep working transparently
-        (every column holds the same optimised series).
-
-        Args:
-            seasonal_corr (dict): Output of ``analyze_correlation_seasonal()``.
-                Each key is a season name, each value contains at least
-                ``'best_k'`` and ``'col_best_weight'``.
-            agg (str): Aggregation scheme — **must match** the one used in
-                ``analyze_correlation_seasonal()``.
-                Options: 'quarter', 'semiannual', 'four-monthly', 'monthly', 'custom'.
-            seasons (dict, optional): Required when ``agg='custom'``.
-                ``{season_name: [month_ints]}``.
-            overwrite (bool): If True, updates ``self.SIDI`` (tiled to ``(time, 5)``)
-                and stores ``self.seasonal_params`` on the instance.
-
-        Returns:
-            np.ndarray: SIDI array ``(time,)`` with season-specific optimization.
-        """
-        if seasons is not None:
-            agg = 'custom'
-
-        seasons_dict = self._build_seasons_dict(agg, seasons)
-
-        # Validate coverage
-        missing = [s for s in seasons_dict if s not in seasonal_corr]
-        if missing:
-            print(f"Warning: seasons {missing} not found in seasonal_corr; "
-                  f"corresponding months will be NaN in SIDI.")
-
-        SIDI_seasonal = self.recalculate_SIDI_seasonal(seasonal_corr, seasons_dict)
-
-        if overwrite:
-            # tile to (time, 5) for backward compatibility with
-            # consumers that do self.SIDI[:, weight_index]
-            self.SIDI = np.tile(SIDI_seasonal[:, np.newaxis], (1, 5))
-            print("Note: SIDI overwritten with seasonal optimization. "
-                  "All 5 weight columns are identical (season-specific K and weight already applied).")
-            # ... rest of seasonal_params assignment
-            self.seasonal_params = {
-                'agg': agg,
-                'seasons': seasons_dict,
-                'config': {
-                    name: {'best_k': v['best_k'],
-                           'col_best_weight': v['col_best_weight']}
-                    for name, v in seasonal_corr.items()
-                    if name in seasons_dict
-                }
-            }
-
-        else:
-            return SIDI_seasonal
-
-    def plot_covariates(self, streamflow,year_ext=None, split_plot=False):
-        """
-        Plot the covariate relationship between the optimized SIDI and a Streamflow-based index.
-
-        Parameters
-        ----------
-        streamflow : BaseDroughtAnalysis or Streamflow
-            Streamflow object providing SQI1 or similar indices.
-        year_ext : tuple of int, optional
-            (start_year, end_year) to restrict the x-axis.
-        split_plot : bool, optional
-            If True, produces separate figures for each panel. Default False.
-
-        Raises
-        ------
-        TypeError
-            If streamflow is not a BaseDroughtAnalysis instance, or if the
-            Precipitation object has not been optimized.
-        """
-        if not isinstance(streamflow, BaseDroughtAnalysis):
-            raise TypeError("The input must be an instance of Streamflow or BaseDroughtAnalysis.")
-
-        if self.is_seasonal_sidi:
-            print(f"Note: SIDI is seasonally optimized — weight_index is ignored (all columns identical).")
-            weight_index = None  # colonna 0, colore rosso
-        elif hasattr(self, 'optimal_weight_index'):
-            weight_index = self.optimal_weight_index
-        else:
-            raise TypeError(
-                "The Precipitation object must be optimized with "
-                "'set_optimal_SIDI()' or 'set_optimal_SIDI_seasonal()' OVERWRITE=True "
-                "before calling this function."
-            )
-
-        plot__covariates(self, streamflow=streamflow, weight_index=weight_index,
-                         year_ext=year_ext, split_plot=split_plot)
-
-
 class Temperature(BaseDroughtAnalysis):
     def __init__(self, start_baseline_year, end_baseline_year,
                  basin_name, data_path=None, shape_path=None, ts=None, m_cal=None,
@@ -5207,11 +6565,11 @@ class Temperature(BaseDroughtAnalysis):
             weight_index (int, optional): Index of the weighting scheme to use for calculations.
                 - weight_index = 0: Equal weights
                 - weight_index = 1: Linear decreasing weights
-                - weight_index = 2: Logarithmically decreasing weights (default)
+                - weight_index = 2: Geometrically decreasing weights (default)
                 - weight_index = 3: Linear increasing weights
-                - weight_index = 4: Logarithmically increasing weights
+                - weight_index = 4: Geometrically increasing weights
 
-            threshold (int, optional): Threshold to define severe events, Default is -1.
+            threshold (int, optional): Threshold to define severe events, Default is 1.
             calculation_method (callable, optional): Method to use for drought calculations. Default is f_kde.
                 Available methods (in utils.py) are:
                 f_spi:   FOR  POSITIVE & RIGHT-SKEWED DATA (uses a Gamma Function) but works fine also for positive normal distribuited sample
@@ -5247,9 +6605,7 @@ class Temperature(BaseDroughtAnalysis):
         self.K = K if K is not None else 36
 
         self.threshold = 1 if threshold is None else threshold
-
-        if weight_index is None:
-            self.weight_index = 2
+        self.weight_index = weight_index if weight_index is not None else 2
 
         if not callable(calculation_method):
             raise ValueError("`calculation_method` must be a callable function.")
@@ -5308,11 +6664,12 @@ class Teleindex(BaseDroughtAnalysis):
         if ts is not None and m_cal is not None:  # User provided data
             self.ts = ts
             self.m_cal = m_cal
+            self.day = None
         elif data_path is not None:
             # Load data from file
             self.data_path = data_path
-            # self.Pgrid, self.m_cal, self.ts = self._import_data()
             self.ts, self.m_cal = import_timeseries(data_path)
+            self.day=None
         else:
             raise ValueError(
                 "Provide either (`ts` and `m_cal`) or a valid `data_path` to a CSV/Excel file")
@@ -5326,7 +6683,7 @@ class Teleindex(BaseDroughtAnalysis):
         self.calculation_method = calculation_method
         self.index_name = index_name
 
-        # Inizializza forecast come None
+        # No forecast attached yet
         self.forecast_ts = None
         self.forecast_m_cal = None
 
@@ -5342,15 +6699,13 @@ class Teleindex(BaseDroughtAnalysis):
             print(f"Your data starts from {self.m_cal[0]} and ends on {self.m_cal[-1]}.")
             print("#########################################################################")
             print("Run the following class methods to access key functionalities:\n")
-            print(" >>> ._plot_scan(): to plot the CDN, spiset heatmap, and D_{SPI} \n ")
-            print(
-                " >>> ._analyze_correlation(): to estimate the best K and weighting function (only if streamflow data are available) \n")
-            print(
-                "*************** Alternatively, you can access to: \n >>> precipitation.ts (P timeseries), \n >>> precipitation.spi_like_set (SPI (1:K) timeseries) \n >>> precipitation.SIDI (D_{SPI}) \n to visualize the data your way or proceed with further analyses!")
+            print(" >>> .plot_scan()             — CDN, index heatmap, and SIDI overview")
+            print(" >>> .ts, .spi_like_set, .SIDI, .CDN  — direct attribute access")
 
 
 # This populates the exclusion tuple now that the classes exist:
 BaseDroughtAnalysis._EXCLUDED_FROM_CORRELATION = (Streamflow, Temperature, Teleindex)
+BaseDroughtAnalysis._EXCLUDED_FROM_SIDI_OPTIMIZATION = (Streamflow, Temperature, Teleindex)
 
 if __name__ == "__main__":
     print("This module contains the main classes for computing SPI, SIDI, and CDN indices.")

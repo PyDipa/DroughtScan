@@ -1,13 +1,485 @@
+## [4.0.0] - 2026-10-12
+
+Major version: the SIDI data model, the spatial API and the forward/reverse
+transform pair all changed in ways that break existing code. Migration notes are
+at the end of this section.
+
+The [3.6.2] and [3.7.0] blocks below were never released; their contents ship
+here.
+
+
+### Added
+- `analyze_correlation`: now also reports the optimum of **each** weighting scheme,
+  not just the single best (K, weight) pair. The full R² surface over every
+  (K, weight) combination was already being computed and plotted, but discarded;
+  it is now returned. New keys: `best_k_per_weight` (5,), `max_correlation_per_weight`
+  (5,) and `R2_matrix` (K, 5). The per-scheme optima are printed alongside the global
+  best.
+- `recalculate_SIDI` / `set_optimal_SIDI` / `_spi_like_set_ensemble_mean`: `K` may
+  now be a sequence with one value per weighting scheme, in addition to a single
+  integer. Each weighting scheme peaks at a different K, so applying one scalar K
+  left the four columns other than `optimal_weight_index` calibrated at a scale
+  chosen for a different scheme — values with no interpretation, yet
+  indistinguishable from valid ones. Passing `best_k_per_weight` gives every column
+  its own optimum. A scalar keeps the previous behaviour, bit-for-bit.
+- `spatial_sidi(seasonal_params=...)` now also accepts the **raw output of
+  `analyze_correlation_seasonal()`** directly, not only the `set_optimal_SIDI_seasonal`
+  wrapper (`self.seasonal_params`). Pass `agg=` (or `seasons=`) alongside it so months
+  map to seasons; it falls back to a committed `self.seasonal_params['agg']`. This
+  lets you map a seasonal calibration without committing it to `self.SIDI`. New
+  `agg` / `seasons` parameters on `spatial_sidi`.
+
+### Changed
+- `spatial_maps()` is renamed **`spatial_sidi()`**, so the gridded-index pair reads
+  `spatial_sidi()` (SIDI) / `spatial_spi()` (SPI). No behaviour change from the rename.
+- `spatial_sidi` no longer computes SPI maps: it owns the SIDI grid, `spatial_spi`
+  owns `SPI_grid` and `reverse_SPI_grid`. Both used to write `SPI_grid` — one capped
+  at K, one uncapped — so whichever ran last won and a warning told you to mind the
+  order. The `month_scales` argument is gone with it.
+- `spatial_sidi` with no `K` now follows whatever calibration the object carries:
+  `self.seasonal_params` if a seasonal SIDI was committed, else `self.optimal_k`,
+  else `self.K`. It used to always fall back to `self.K` and merely warn that a
+  committed `optimal_k` was being ignored, so the map silently showed a different
+  index from `self.SIDI`.
+- Removed the dead spatial code: `spatial_maps_old`, `_process_grid_point_trends_old`,
+  the deprecated `spatial_trends()` wrapper and the deprecated `trend_grid`
+  property/setter/deleter. Use `spatial_spi()` and `reverse_SPI_grid`.
+- `plot_spi_fit(K, month)` filled the whole `(K, 31, 12)` calibration grid to draw a
+  single curve — `K*12` `spi_to_native` calls, each of which rebuilds a 2000-point
+  interpolation grid under `f_kde`. It now computes only the curve being plotted
+  unless `return_data=True` (measured 8x faster at K=24).
+- **`self.SIDI` now always means one thing: `(time, 5)`, column = weighting scheme.**
+  It was that in four of the five SIDI states; the fifth —
+  `set_optimal_SIDI_seasonal(overwrite=True)` — tiled the 1-D best-(K, weight)-per-season
+  mosaic across five identical columns, so the column axis silently stopped meaning
+  "scheme". That single exception is what made `weight_index` unanswerable downstream,
+  and what forced `ds_balance_all_schemes` and `diagnostics.basin_response` to rebuild
+  the four discarded schemes from the raw R² surface, each with its own copy of the
+  loop. The commit now stores the per-scheme columns in `self.SIDI`. (An intermediate
+  `self.SIDI_seasonal_best` 1-D mosaic was later dropped: several schemes are usually
+  statistically indistinguishable, so a per-season argmax series is a winner's-curse
+  artefact — the user picks a column, default 0.)
+- New `recalculate_SIDI_seasonal_all_schemes(seasonal_corr, seasons)` → `(time, 5)`:
+  each column that scheme's own seasonal series at its own per-season K. This is the
+  loop that used to live outside the class in two places; verified bit-identical to it
+  on the Po record. `recalculate_SIDI_seasonal` is unchanged and still returns the 1-D
+  mosaic.
+- `ds_balance_all_schemes` reduced from ~170 lines re-implementing the whole balance to
+  a loop over the new shared `_ds_balance_core`, which `ds_balance` also calls.
+  `seasonal_corr`/`seasons` are now optional: pass them to score without committing,
+  omit them to read the calibration already on the object. Verified that
+  `ds_balance(weight_index=w)` and `ds_balance_all_schemes()[label_w]` now agree
+  exactly — they could not before, since `ds_balance` read the tiled mosaic while
+  pairing it with the season's overall-best K.
+- New `BaseDroughtAnalysis._resolve_weight_index()`: one answer to "which column of
+  SIDI", used by `plot_scan`/`plot_overview`, `plot_covariates`, `_savedsplot` and
+  `ds_balance`. Precedence: explicit argument → `optimal_weight_index` (a committed
+  calibration) → `weight_index` (construction default) → 2. Previously each site
+  resolved it differently — `plot_overview` and `severe_events` hardcoded 2 and ignored
+  a committed calibration entirely, while `ds_balance` fell back to 0 — so one object
+  could be plotted, exported and balanced on three different schemes.
+  `export_scan_plot_csv` is deliberately left on its own explicit default.
+- The R² surface over every (K, weighting scheme) pair now comes from one shared
+  `BaseDroughtAnalysis._r2_surface`. `analyze_correlation`,
+  `analyze_correlation_seasonal` and `analyze_correlation_seasonal_rolling` each
+  carried their own copy of that loop — the last two byte-for-byte identical, the
+  first differing only in lacking the sample-size guard. Verified identical to the
+  previous implementation to 4e-16 on the Po record (same argmax, same
+  `best_k_per_weight`).
+- Those three copies each rescaled the weighted mean with
+  `(sidi - nanmean(sidi)) / nanstd(sidi)` before correlating. That looked like the
+  library's standardization but referenced the OVERLAP window, while the real one
+  (`_zscore_baseline`, used by `_calculate_SIDI`/`recalculate_SIDI`) references the
+  BASELINE. Since Pearson's r is invariant under positive affine rescaling, the step
+  could not affect any result — so it is dropped rather than repaired in triplicate,
+  leaving `_zscore_baseline` as the only place that decides what is standardized
+  against what.
+- `spatial_cdn` renamed to **`spatial_spi`**, and its per-pixel CDN pass removed.
+  The method computed a full CDN series (cumulative sum of SPI-1 over the record)
+  for every grid point and then discarded it — the caller only tested it for
+  `None`. Mapping the CDN is not a product of this library; the spatial products
+  are the SPI and its millimetre-equivalent reverse. Dropping the pass saves one
+  12-month scale-1 fit per grid point (measured: 2.1 ms/pixel with `f_spi`,
+  2.8 ms/pixel with `f_kde`, on a 360-month record). `spatial_cdn` was introduced
+  earlier the same day and is removed outright rather than deprecated; the older
+  `spatial_trends` stays as a deprecated wrapper.
+- The near-neutral `|SPI| < 0.5` band is now a rendering convention on the map, as
+  it already was on the time-series plot. `spatial_spi` writes the real millimetres
+  into `reverse_SPI_grid` everywhere the SPI is defined, and `plot_spatial` greys
+  the band out at draw time (new `neutral_band` argument, default 0.5, set to 0 to
+  disable). Previously the zeroing happened inside the returned value, so the
+  millimetres inside the band were unrecoverable from the stored grid — the same
+  band on `plot_cdn_trends` only ever touched a local copy of the bars.
+- `plot_spatial`: `var='CDN'` no longer accepted. It was an alias for
+  `'reverse_spi'`, but the two are different quantities and the alias suggested
+  the library produced a CDN map. It now raises with an explanation pointing at
+  `'reverse_spi'` (millimetre-equivalent deficit/surplus) and `'SPI'`.
+- Distribution-family selection (`test_standardization` / `_analyze_all` and the
+  methodology report) is now decided by the **mean point-by-point CDF deviation**
+  instead of the KS statistic D. D is the single worst point of disagreement, and
+  a zero-inflated fit has a genuine vertical jump of height `qq` at x=0 that D
+  latches onto: it returns ~`qq` however well the curve tracks the data elsewhere,
+  handing the win to whichever family has no jump to be penalised for. On a
+  synthetic gamma sample, at qq=0 the families score 0.165/0.047/0.043/0.029 and
+  KDE correctly wins; at qq=0.31 gamma, pearson3 and KDE all collapse to exactly
+  0.315 while the Gaussian "wins" with 0.221. Both numbers stay in the report
+  table, and on samples without exact zeros (e.g. Po basin-average rainfall,
+  qq=0) the two criteria agree. New key `best_by_mean_error`; `best_by_KS` is
+  kept and `recommendation` now points at the new criterion.
+- The SIDI weighting schemes built with `np.geomspace` were labelled
+  "logarithmic" everywhere user-facing, including plot labels and the guides; they
+  are geometric and are now named so (`gdw`/`giw` replace `lgdw`/`lgiw`).
+
+### Architecture review (2026-10)
+
+#### Fixed
+- **`benchmark_ihacres`: the routing kernel was applied reversed.** The fit convolved
+  the driver with `h[::-1]`, giving the largest weight to the OLDEST month, while the
+  plot (and the documented model) gave it to the current month: the reported R² and
+  (τ_fast, τ_slow, α) described a different model from the one drawn. Fit and plot now
+  share one convolution helper (`_lag_convolve`), as do Nash and the OLS benchmarks.
+  **IHACRES results computed before this fix must be recomputed.**
+- `analyze_convolution_irf` could not run (undefined names); rewritten (see Changed).
+- `spi_sqi_corr_test`: the `lag` argument was overwritten by the loop (always LAG-1
+  plotted) and the lag was applied after splitting by calendar month, i.e. in years.
+  Replaced by `spi_sqi_corr_lagged`.
+- `analyze_correlation_test` failed with a NameError. Replaced by
+  `analyze_correlation_lagged`.
+- `analyze_correlation_seasonal_rolling(plot=True)` failed (missing `Line2D` import).
+- `Pet` and `Temperature` ignored a `weight_index` passed to the constructor.
+- Calibration state: committing a global calibration after a seasonal one (or vice
+  versa) left the previous state behind, so `ds_balance` / `spatial_sidi` read a
+  seasonal configuration while `self.SIDI` was global. The two states are now mutually
+  exclusive (see Changed).
+- `spatial_sidi` at a new date invalidated `reverse_SPI_grid` but kept `SPI_grid`,
+  which was then drawn with the new date in the title.
+- `analyze_correlation_seasonal(agg='monthly')` plotted even with `plot=False`.
+- `BFI()` on a `Streamflow` built from `ts`/`m_cal` failed with a TypeError; it now
+  raises a clear error (the daily series is re-read from `data_path`).
+- `export_scan_plot_csv(optimal_k=...)` failed on an import.
+- `_eval_metrics`: documented as "squared Pearson" but computed NSE-like
+  1 − SS_res/SS_tot; now computes r² explicitly (numerically identical at every
+  current call site, where the simulation is OLS-rescaled).
+
+#### Changed
+- **R² is the squared Pearson correlation everywhere** (`_r2_surface`, `_convolve_r2`,
+  the benchmark fits, `_eval_metrics`), so every R² is comparable with D(SPI)'s. The
+  OLS benchmarks still select K on R²_adj.
+- `benchmark_nash`: admissible range of τ is `0 < τ <= 36` months (was `τ <= K`), as in
+  the paper (Benchmark C); docstrings rewritten in the paper's notation (j = 1 is the
+  contemporaneous month).
+- `benchmark_ihacres`: new `driver_var` ('P'|'SPI') and `target_var` ('SQI'|'Q'), also
+  honoured by the bootstrap; defaults unchanged (raw P → SQI1). Plot labels follow.
+- `analyze_convolution_irf(streamflow, driver_var='SPI', plot=True, plot_mode='all')`:
+  the five SIDI weighting shapes used as fixed lag kernels on SPI1 (or raw P); same
+  return keys as `analyze_correlation`.
+- `set_optimal_SIDI(..., overwrite=True)` returns None, like `set_optimal_SIDI_seasonal`.
+- `Pet` can now be calibrated (`set_optimal_SIDI*`), like Precipitation and Balance.
+- New `calibration_mode` property (`None` | `'global'` | `'seasonal'`); every
+  `set_*(overwrite=True)` discards the other calibration, with a note. Methods reading
+  the calibrated SIDI (`plot_scan`, `plot_covariates`, `gap_filling`,
+  `export_scan_plot_csv`, `ds_balance*`, `spatial_sidi`) print which calibration it is.
+- Default SIDI column (`_resolve_weight_index`): explicit `weight_index` → **0 after a
+  seasonal calibration** → `optimal_weight_index` after a global one → construction
+  `weight_index` → 2. `plot_spatial` and `export_scan_plot_csv` now follow it (they
+  hard-coded 2).
+- `ds_balance` defaults to `weight_index=0` whatever the calibration, with a printed
+  reminder.
+- Spatial maps for every gridded class: `spatial_sidi`, `spatial_spi`, `plot_spatial`
+  work for `Pet` (`PETgrid`), `Balance` (pixel-wise `prec_grid − pet_grid`) and
+  `Temperature` (`Tgrid`), labelled with the object's index name.
+- One spatial date: both spatial methods default to the stored `spatial_timestamp`
+  (else the last month), and moving the date removes every product of the other method.
+- Standardization-method registry (`drought_indices.register_standardization` /
+  `get_standardization`): forward/inverse transforms, parameter widths and domain of
+  each method in one place; `core.py` no longer branches on `f_spi/f_spei/f_kde/f_zscore`.
+  Custom methods work once registered; an unknown method fails at construction. The
+  pixel deficit now uses exactly the basin inverse (tail clipping included).
+- Bootstrap `K_CI` rounded outward (floor/ceil) once, at the source in `_peak_summary`:
+  the clustering rule, `ref_K_CI`, tables, prints and figures share the same integers.
+- Constructor defaults aligned: `weight_index=None` (→ 2) on every class; `Streamflow`
+  gains `verbose` and `threshold=None` (→ −1); `Balance` gains `weight_index`.
+- Result keys: `analyze_correlation` returns `R2_matrix`, `R2_boot`, `R2_ci` (were
+  `MatCorr`, `MatCorr_boot`, `MatCorr_ci`), as the seasonal entries do;
+  `"sample number"` → `sample_number` everywhere.
+- `find_trends` documents the Streamflow unit it actually returns: mm-equivalent.
+- `severe_events_old` documented as obsolete, kept only to reproduce Di Paola et al.
+  (2025).
+- Messages and docstrings in English throughout; obsolete comments removed.
+
+#### Added
+- `spi_sqi_corr_lagged(streamflow, max_lag=24, lag=0)`: month-wise R²(SPI_k(t−l), SQI1(t));
+  `lag=0` reproduces `spi_sqi_corr`.
+- `analyze_correlation_lagged(streamflow, lag=1)`: R²(SIDI_{K,w}(t−lag), SQI1(t));
+  `lag=0` reproduces `analyze_correlation`'s `R2_matrix`.
+- Guides (`tests/docs`): capability table per class, calibration states, lagged
+  correlation, `ds_balance`, benchmarks; `spatial_guide.md` rewritten.
+
+#### Removed
+- `spi_sqi_corr_test`, `analyze_correlation_test` (replaced, see Added).
+- The `diagnostics` optional dependency group (the diagnostics site lives in the
+  forecasting twin library).
+
+### Fixed (analysis / benchmarks — this dev cycle)
+- `_nash_kernel` (`benchmark_nash`): with τ ≈ 0.001 the Gamma PDF evaluated at lags
+  1..K underflows to zero everywhere, making `h.sum() == 0`. The old fallback returned
+  uniform weights (1/K), the opposite of the correct τ→0 limit (all mass on lag 0).
+  Now checks `np.isfinite(s) and s > 0`; fallback sets `h[0] = 1.0`.
+- `_convolve_r2` (benchmark Nash hot path): computed R² via OLS (1 − SS_res/SS_tot),
+  which is identical to ρ² for a linear fit with intercept. Replaced with
+  `r = np.corrcoef(y_hat[mask], target[mask])[0, 1]; return float(r**2)` — same
+  result, consistent with `_r2_surface` (which uses `pearsonr`) and avoids the
+  OLS matrix path.
+- `peak_by_family` / `_print_peak_summary`: K_CI bounds were cast with `int()`, which
+  truncates (a bootstrap percentile of 5.9 appeared as 5). Changed to `np.floor` for
+  the lower bound and `np.ceil` for the upper bound, consistent with `_cluster_stats`.
+
+### Added (analysis / visualization — this dev cycle)
+- `analyze_correlation` / `analyze_correlation_seasonal`: after the "Best K per
+  weighting scheme" line, each scheme now also prints `mean_age` — the barycenter
+  (centre of mass) of the effective weight W_eff(j) at that scheme's optimal K.
+  Computed via the new `effective_weights_at_optimum` function in `drought_indices.py`.
+- `analyze_correlation`: new Fig 3 — effective weight curves at each scheme's optimal K
+  (`effective_weights_at_optimum(..., plot=True)`), with mean-age triangles on the
+  x-axis.
+- `analyze_correlation_seasonal`: same Fig 3, one panel per season; panels follow the
+  same `nrows`/`ncols` layout as the scatter figure. The per-season R²(K,w) fill-between
+  figure is removed; the bootstrap peak/cluster figure (`_plot3_peak_clusters`) is
+  retained and shown when `n_boot > 0`.
+- `_plot3_peak_clusters` (visualization.py): curves now use `WEIGHT_COLORS` instead of
+  matplotlib's auto-cycle, so errorbar crosses are colour-consistent with all other
+  scheme-colour plots.
+- `bootstrap_summary_table` (statistics.py): new `mean_age` column (barycenter of
+  effective weight, in months) added to every row of the exported DataFrame/list.
+  Computed via a lazy import of `effective_weights_at_optimum` using `best_k_per_weight`
+  already stored in each season's dict.
+
+### Fixed
+- `spatial_sidi` passed `self.K` to the grid workers instead of the resolved `K`, so
+  an explicit `K=` (or a seasonal/committed calibration) was accepted, reported in
+  `spatial_K`, and then ignored by the actual computation — every pixel was built at
+  `self.K`.
+- `_process_grid_point_spi` took a `K` argument it never used.
+- `spatial_sidi(seasonal_params=...)` produced the GLOBAL SIDI evaluated at a seasonal
+  K, not the seasonal SIDI: it resolved the season's K but then standardized every
+  pixel against the whole baseline, while `recalculate_SIDI_seasonal` standardizes
+  per season. On the Po the two differed by up to 0.16 index units (JJA); the map was
+  labelled seasonal and was not. `_process_grid_point` takes a `season_months`
+  argument and `spatial_sidi` forwards the season's months alongside its K. Agreement
+  with the basin-level seasonal SIDI is now ~1e-15.
+- `spatial_sidi` assigned `self.K = K` for the duration of the computation and
+  restored it at the end, so any exception in between (a failing grid point, an
+  interrupt) left the object permanently carrying the spatial K — and a per-scheme
+  sequence left `self.K` as a list. It no longer touches `self.K` at all.
+- `ds_balance`: the weighted rain deficit used `np.nansum` over the k accumulation
+  scales, treating a scale that is not yet defined as a zero contribution. Over the
+  first k-1 months of the record this silently under-reported the deficit instead of
+  reporting it as undefined; it is now a plain sum, so those months are NaN.
+- `_compute_spi` left `c2rspi` unbound for a `calculation_method` outside the four
+  known ones, failing with `NameError` instead of saying what was wrong. It now
+  raises a `ValueError` naming the expected methods. (The unused `way` flag is gone.)
+- `_get_kde_fit` reported "the SPI-like set must be computed first" when a fit had
+  been attempted but no usable baseline value existed at that scale. The two cases
+  now get different messages.
+- `f_kde`'s no-valid-data early exit returned `None if fit_params is None else None`.
+- `f_kde` and `statistics._fit_single_dist` disagreed about which points enter a KDE
+  fit. With the log transform off (i.e. on real-valued data — the P-PET balance,
+  temperature), the operational fit kept the negative half of the sample while the
+  diagnostic kept only `dataset[dataset > 0]`. On a synthetic balance series the
+  diagnostic fitted 11 points where `f_kde` fitted 30, so the "distributions" page
+  reported how well a KDE described half the data. Both now call one shared
+  `drought_indices.kde_fit_sample`, which decides the log transform, the
+  zero-inflation fraction and the continuous-part sample in one place.
+- The zero-inflation point mass was applied to real-valued fits, where it is not
+  defined: a variable that goes negative has no floor for values to pile up on, and
+  putting a mass `qq` at zero placed it *below* the negative half of the
+  distribution — `kde_cdf` then returned `H(0) = qq` regardless of the kernels, so
+  the CDF was non-monotone (`H(0) < H(-1)`). `qq` is now 0 whenever negatives are
+  present, and `kde_cdf` pins `x == 0` to the point mass only when there is one.
+  Behaviour on non-negative data (precipitation, streamflow) is unchanged.
+- `statistics._mixture_pdf` clamped the KDE density to 0 for every `x <= 0`, which
+  drew the left half of every real-valued fit as a flat line on the diagnostic PDF
+  panels. It is now clamped only when a point mass at zero was actually fitted.
+- The KDE log-likelihood summed the density over the strictly-positive points only;
+  it now covers the points the continuous part actually models.
+- `BaseDroughtAnalysis.__init__` now guarantees `self.weight_index` exists on every
+  class. `Balance` never set it, and `Pet`/`Temperature` set it only when the argument
+  was `None` — so `Pet(..., weight_index=3)` silently left the attribute undefined and
+  `_savedsplot` raised `AttributeError` later. Both constructors now honour an
+  explicitly passed value.
+- `Streamflow.gap_filling` read `precipitation.SIDI[:, 0]` for a seasonally-optimised
+  driver. Column 0 is equal weights, not the best scheme — it only looked right while
+  all five columns were copies of the mosaic. It now regresses on one column of
+  `self.SIDI`, chosen with `weight_index` (see `_resolve_weight_index`).
+- `severe_events` renamed to `severe_events_old` pending replacement, with its known
+  defects recorded in the docstring (polynomial deficit inconsistent with
+  `deficit_from_spi`; `-1` hardcoded instead of `threshold` when choosing run parity;
+  drought condition inverted for a positive threshold, as on `Pet`/`Temperature`).
+- `analyze_correlation` / `analyze_correlation_seasonal`: the scatter plots were drawn
+  on a SIDI rescaled over the overlap window, not the SIDI the corresponding
+  `set_optimal_SIDI` / `set_optimal_SIDI_seasonal` would commit. A point read off the
+  figure did not correspond to the value the rest of the library reports for that
+  month — on the Po record the two axes differed by up to 0.14 index units. Both now
+  plot the committed series itself (`recalculate_SIDI` / `recalculate_SIDI_seasonal`).
+  The seasonal one additionally standardized every panel over the whole overlap,
+  mixing the seasons back together in the very step the seasonal SIDI exists to keep
+  apart; it now shows the per-season-standardized mosaic.
+- `analyze_correlation`: read its R² surface with `np.max`/`np.argmax`, which return
+  the position of the first NaN when any cell is unscorable. Now `np.nanmax`/
+  `np.nanargmax`, matching the seasonal variants, with an explicit error when no cell
+  could be scored at all.
+- `diagnostics.basin_response.compute_seasonal_sidi_calibration`: picked each
+  weighting scheme's per-season optimal k with `np.argmax` on a surface that can
+  contain NaN, so a single unscorable cell silently produced a wrong k. Now
+  `np.nanargmax`, skipping columns with no scored cell.
+- `f_spi` / `native_to_spi` / `spi_to_native`: the forward transform applied the
+  zero-inflation mixture `Hx = qq + (1-qq)*Gamma.cdf(x)`, but the reverse ones used
+  a bare `gamma.cdf`/`gamma.ppf` with no `qq` term, so the two directions were not
+  inverse to each other on any month with exact zeros in the baseline. `qq` was
+  never stored: `fit_params` carried only `(alpha, loc, beta)`. Measured on a
+  July with 32% dry months: `native_to_spi(20 mm)` returned 0.09 where `f_spi`
+  had produced 0.49, a 0 mm month round-tripped back to 8.4 mm, and the SPI=0
+  "normal value" came out at 17.5 mm instead of 6.1 mm — an error that propagated
+  into `normal_values`, `_monthly_normals`, `deficit_from_spi`,
+  `volume_anomaly_rolling`, `monthly_profile`, `plot_cdn_trends`, `ds_balance`,
+  `plot_spi_fit` and the pixel-level deficit in `spatial_cdn`. `qq` is now the
+  fourth element of f_spi's fitted parameters, and both directions go through the
+  new shared `gamma_cdf_zi`/`gamma_ppf_zi` (the counterpart of `kde_cdf`/`kde_ppf`
+  for f_kde), which `statistics._mixture_cdf`/`_mixture_ppf` and
+  `_process_grid_point_trends` also use — one definition instead of four.
+  Round-trip error is now ~1e-12 native units. A legacy 3-tuple `fit_params` is
+  still accepted, with a `RuntimeWarning` when it forces `qq` to be re-estimated.
+- `f_spi`: when `fit_params` was supplied, `qq` was re-derived from the data being
+  transformed rather than taken from the calibration — the same defect fixed in
+  `f_kde` earlier on this branch. The stored `qq` is now honoured.
+- `statistics`: `shift_for_gamma` defaulted to `True`, so every diagnostic fit
+  (`test_standardization`, `fit_distribution_stats`, `plot_cdf_comparison` and the
+  methodology report) scored a Gamma fitted on `x + 1` — a different model from the
+  one `f_spi` applies (`gamma.fit(x[x > 0], floc=0)`, zeros carried by `qq`). The
+  default is now `False`, matching `f_spi` exactly; the shift remains available as
+  an opt-in. `_bootstrap_ks_pvalue` also refit the bootstrap replicates as shifted
+  regardless of the fit under test, comparing `D*` against a `D_obs` from a
+  different model; it now follows the fit's own `shift_applied`.
+- `diagnostics.methodology`: the test that decides which `calculation_method` the
+  whole pipeline uses ran on the full record, while `f_spi`/`f_kde` calibrate the
+  fit, `qq` and the log decision on the baseline alone. It now runs on the baseline
+  slice, and the report page plots that same slice and states the period. Widening
+  the evidence is done by widening the baseline.
+- `spatial_spi` (ex `spatial_cdn`): a pixel whose SPI was undefined for a window
+  (record shorter than the window at that timestamp, or gaps in the series) was
+  written to `reverse_SPI_grid` as `0.0`, i.e. as a pixel with no anomaly. NaN now
+  stays NaN, and is visibly distinct from the greyed near-neutral band.
+- `refit_gamma_shifted` (`data_io`): returned `(alpha, loc, beta, shift)`, absorbing
+  zeros by adding a constant. With `qq` now f_spi's fourth parameter the two tuples
+  had the same length, so a shift would have been read as a zero-inflation fraction.
+  It now follows f_spi's convention — Gamma on the strictly-positive samples, exact
+  zeros carried as `qq` — and raises on negative aggregates. The function has no
+  callers in the library.
+- `normal_values`: tiled the 12 monthly normals from position 0 and truncated to
+  `len(ts)`, silently assuming the record starts in January — on a series starting
+  in August every timestep received the wrong month's normal. Each timestep now
+  takes the normal of its own calendar month. The 12-value climatology is available
+  as `_monthly_normals`.
+- `f_kde`: `fit_params` was accepted but ignored — `xb`, `h`, `qq` and
+  `log_transform` were recomputed from the supplied data, so a stored calibration
+  silently recalibrated on whatever it was applied to. It is the path the
+  scenarios/forecast module drives, where the whole point is to keep modified series
+  comparable to the original fit. Now honoured when the calibration keys are
+  present; when they are not (the dict shape emitted by older versions) the previous
+  behaviour is kept but an explicit `RuntimeWarning` states that the result is not in
+  the reference frame of the fit passed in.
+- `f_spi` / `f_kde`: the zero-inflation fraction `qq` was estimated over the whole
+  record while the continuous part of the same mixture was fitted on the baseline
+  alone. Both halves now come from the baseline.
+- `f_kde`: the log-transform decision was taken from `min(xbase, x)`, so a single
+  value anywhere in the record could flip an entire (scale, month) cell to a
+  different model family — appending one dry month moved historical SPI values by up
+  to 3.2. The decision now comes from the baseline alone; values outside the
+  calibrated domain yield NaN with an explicit warning instead of silently switching
+  model.
+- CDN was computed two different ways under one name: the basin-level version
+  cumulated SPI-1 from the start of the baseline, rounded to 3 decimals and zeroed
+  the span before it, while the pixel-level version in `_process_grid_point_trends`
+  cumulated from index 0 with no rounding and NaN before the baseline. Unified in
+  `_cdn_from_spi1`.
+- `deficit_from_spi`: converted Streamflow deficits to volume with a fixed average
+  month length, while `volume_anomaly_rolling` — its documented counterpart — used
+  each month's real length, diverging by up to 7.9%. It now averages the seconds of
+  the months actually inside the window.
+- `native_to_spi` / `spi_to_native`: did not clip cumulative probabilities, so the
+  forward transform saturated near ±4 while the reverse returned ±inf beyond the
+  calibrated range. Both now clip through the shared `PROB_CLIP` constant.
+- `_process_grid_point`: carried a fourth hand-rolled copy of the baseline z-score
+  with a weaker guard, and returned a 2-tuple on a degenerate baseline where the
+  caller unpacks three values. It now uses the shared `_zscore_baseline`, whose
+  error is caught and reported like any other grid-point failure.
+- `Streamflow.gap_filling`: `Q_pred` was referenced outside the block defining it,
+  crashing whenever a gap fell outside the precipitation overlap window.
+- `_rolling_phase_test`: referenced an undefined `self` instead of its `DSO`
+  parameter, failing on every call.
+- `test_standardization`: missing `import warnings` broke the handler meant to
+  warn-and-skip a failed fit, and the bootstrap RNG was the `Generator` class rather
+  than an instance, so `seed` was ignored and bootstrap p-values never computed.
+- `c2r_index` is `[mean, std]` for `calculation_method=f_zscore`, but every reverse
+  conversion evaluated it with `np.polyval`, computing `mean*x + std` instead of
+  `x*std + mean` — wrong everywhere except by coincidence at x=1.
+- `f_spei`: now rounds to 4 decimals like `f_spi` and `f_kde`.
+
+### Internal
+- Exact numeric inverse for `f_kde` (`kde_cdf` / `kde_ppf`), so `native_to_spi`,
+  `spi_to_native` and `spatial_trends` support it instead of raising
+  `NotImplementedError`. All live (non-`_old`) reverse conversions now go through
+  the exact inverse of the fitted distribution rather than the degree-3 polynomial
+  approximation; `c2r_index` is still computed and stored for backward
+  compatibility.
+- Baseline z-score standardization deduplicated into `_zscore_baseline`
+  (was reimplemented independently in four places, with inconsistent guards).
+- Docstrings across `core.py` and `utils/` corrected against the implementation
+  after a full audit (signatures, return values, defaults, described behaviour).
+
+### Migration from 3.x
+
+- `self.SIDI` after `set_optimal_SIDI_seasonal(..., overwrite=True)` is no longer
+  five identical columns: `SIDI[:, w]` is scheme *w*'s own seasonal series, each at
+  its own per-season K. There is no single "best" seasonal series; pick a column
+  (default 0 after a seasonal calibration).
+- `analyze_correlation` keys `MatCorr`, `MatCorr_boot`, `MatCorr_ci` → `R2_matrix`,
+  `R2_boot`, `R2_ci`; `"sample number"` → `sample_number`.
+- `set_optimal_SIDI(..., overwrite=True)` returns None: read `self.SIDI`.
+- `spi_sqi_corr_test` → `spi_sqi_corr_lagged`; `analyze_correlation_test` →
+  `analyze_correlation_lagged`.
+- Default SIDI column after a seasonal calibration is 0 (was the construction
+  default, 2); `ds_balance` defaults to 0.
+- IHACRES and Nash results change (kernel orientation fix; τ bound 36).
+- `spatial_cdn()` is removed — use `spatial_spi()`. `spatial_trends()` still works
+  but is deprecated.
+- `plot_spatial(var='CDN')` is removed — use `var='reverse_spi'`.
+- `severe_events()` is renamed `severe_events_old()` pending replacement.
+- `f_spi` returns four fitted parameters `(alpha, loc, beta, qq)` instead of three;
+  `self.fit_params` is correspondingly `(K, 12, 4)` for `f_spi`. A stored 3-tuple is
+  still accepted with a warning. `native_to_spi`/`spi_to_native` now invert the
+  zero-inflation mixture, so native-unit results (`normal_values`,
+  `deficit_from_spi`, `ds_balance`, …) change on any series with exact zeros.
+- `test_standardization` and friends default to `shift_for_gamma=False`, and their
+  `recommendation` is now the lowest mean CDF deviation rather than the lowest KS.
+- `ds_balance_all_schemes(streamflow, seasonal_corr, seasons)` — the last two
+  arguments are now optional.
+- `spatial_maps()` is renamed **`spatial_sidi()`** (pairs with `spatial_spi()`).
+  Its `month_scales` argument is gone; SPI maps come from `spatial_spi()`. With no
+  `K`, `spatial_sidi` now follows the committed calibration instead of `self.K`.
+- `spatial_maps_old`, `_process_grid_point_trends_old`, `spatial_trends()` and the
+  `trend_grid` property are removed.
+
 ## [3.6.2] - Unreleased
 
 ### Added
-- `spatial_maps`: new `seasonal_params` argument. When passed the output of
+- `spatial_sidi`: new `seasonal_params` argument. When passed the output of
   `set_optimal_SIDI_seasonal`'s `self.seasonal_params`, `K` is automatically
   resolved to the season-specific `best_k` matching the requested `timestamp`,
   and a warning reports the corresponding `weight_index` to use for consistent
   plotting. This allows the spatial SIDI grid to reflect a seasonal optimization
   that a single global `K` cannot represent.
-- `spatial_maps`: emits a warning when `K` is left unspecified and `self.optimal_k`
+- `spatial_sidi`: emits a warning when `K` is left unspecified and `self.optimal_k`
   is present on the instance (i.e. `set_optimal_SIDI` was called), signalling that
   the spatial grid is being computed with `self.K` rather than the optimized value,
   and pointing to `K=self.optimal_k` as the fix.
@@ -41,15 +513,17 @@
 - `plot_spatial(var='SIDI', ...)`: title now shows the temporal scale (`K=...`)
   and the weighting scheme spelled out (e.g. "logarithmically decreasing")
   instead of the bare `weight_index` int, matching the naming used in
-  `user_guide.md`. `spatial_maps` now stores the `K` it actually ran with in
+  `user_guide.md`. `spatial_sidi` now stores the `K` it actually ran with in
   `self.spatial_K`, since it resets `self.K` to its pre-call value on exit —
   reading `self.K` alone at plot time could report a stale/wrong scale.
 
 ### Documentation
-- `spatial_guide.md` §2.6 (new): "Using an optimized SIDI" — documents the three
-  supported workflows for aligning `spatial_maps` with a point-scale SIDI
-  optimization: explicit manual `K`, `set_optimal_SIDI` (with the new warning),
-  and `set_optimal_SIDI_seasonal` (via `seasonal_params`).
+- `spatial_guide.md` §2.6 (new): "Using an optimized SIDI" — documents the
+  supported workflows for aligning `spatial_sidi` with a point-scale SIDI
+  optimization: explicit manual `K`; `set_optimal_SIDI` (picked up automatically);
+  and seasonal, either by passing the raw `analyze_correlation_seasonal` output
+  (with `agg=`) to score it without committing, or by `set_optimal_SIDI_seasonal
+  (overwrite=True)` then a bare `spatial_sidi()`.
 - `spatial_guide.md` §3.1: updated to describe `spatial_trends`'s deficit/surplus
   computation via the reverse-gamma transform (`deficit_from_spi`-consistent),
   replacing the previous description based on the linear `std_to_mm`

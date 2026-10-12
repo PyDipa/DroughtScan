@@ -1,0 +1,7 @@
+# Keep local working files out of the sdist (and therefore out of the wheel,
+# which `python -m build` builds from the sdist).
+exclude drought_scan/dev.py
+prune _HELPER
+prune .claude
+prune paper
+global-exclude .DS_Store *.py[cod] __pycache__

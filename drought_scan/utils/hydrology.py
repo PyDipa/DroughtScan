@@ -11,15 +11,18 @@ This module provides functions for **hydrological drought analysis**, including:
 - **Water balance modeling**.
 
 Main functions:
-- `calculate_PET()`: Computes PET using different empirical methods.
-- `streamflow_anomalies()`: Detects anomalies in streamflow data.
-- `compute_water_balance()`: Estimates basin-level water balance.
+- `Qcs2Qmm()` / `Qmm2Qcs()`: Convert streamflow between m³/s and mm of runoff.
+- `era_snowfall_to_mm()`: Convert ERA5 snowfall rate (m/s) to mm/month.
+- `compute_extended_c2r_index()`: Extend c2r calibration coefficients for scales > K.
+- `severe_events_deficits_computation_old()`: Detect and characterize severe drought
+  events (deprecated — still polynomial/c2r-based, not migrated to the exact inverse).
 
 Used by: `core.py`, `drought_indices.py`.
 """
 
 import numpy as np
 from itertools import groupby
+from drought_scan.utils.drought_indices import c2r_eval
 
 
 # ===================================================================
@@ -109,10 +112,10 @@ def era_snowfall_to_mm(DSO):
 
     Parameters
     ----------
-    snowfall_rate : np.ndarray
-        Monthly mean snowfall rate (1D array) in m/s.
-    m_cal : np.ndarray
-        Calendar array of shape (N, 2), with month in column 0.
+    DSO : object
+        DroughtScan-like object providing the monthly mean snowfall rate in
+        m/s as `DSO.ts` and the calendar array (N, 2), with month in column 0,
+        as `DSO.m_cal`.
 
     Returns
     -------
@@ -157,7 +160,7 @@ def compute_extended_c2r_index(ds_object, K=60):
         c2rspi[k - 1, :, :] = coeff
     return c2rspi
 
-def severe_events_deficits_computation(ds_object,weight_index=None):
+def severe_events_deficits_computation_old(ds_object,weight_index=None):
     """
     Identify severe drought events and calculate their durations and deficits.
 
@@ -186,7 +189,7 @@ def severe_events_deficits_computation(ds_object,weight_index=None):
         raise AttributeError("ds_object must have attributes: SIDI, ts, and m_cal.")
 
     if weight_index is None:
-        weight_index = 2  # Default to logarithmically decreasing weights
+        weight_index = 2  # Default to geometrically decreasing weights
 
     # Replace NaN values in SIDI with a placeholder
     SIDI = np.array(ds_object.SIDI[:, weight_index], copy=True)
@@ -214,14 +217,14 @@ def severe_events_deficits_computation(ds_object,weight_index=None):
         duration = np.array(dummylen[0::2])  # Odd indices for drought durations
     tendid = tstartid + duration - 1
 
-    # Calculate deficits using polynomial coefficients
+    # Calculate deficits using c2r reverse coefficients
     try:
-        normal = np.array([np.polyval(ds_object.c2r_index[duration[i] - 1, ds_object.m_cal[tendid[i], 0].astype(int) - 1, :], 0)
+        normal = np.array([c2r_eval(ds_object.c2r_index[duration[i] - 1, ds_object.m_cal[tendid[i], 0].astype(int) - 1, :], 0, ds_object.calculation_method)
                 for i in range(len(tstartid))])
     except IndexError:
         extended_c2r_index = compute_extended_c2r_index(ds_object,K=60)
         normal = np.array([
-            np.polyval(extended_c2r_index[duration[i] - 1, ds_object.m_cal[tendid[i], 0].astype(int) - 1, :], 0)
+            c2r_eval(extended_c2r_index[duration[i] - 1, ds_object.m_cal[tendid[i], 0].astype(int) - 1, :], 0, ds_object.calculation_method)
             for i in range(len(tstartid))
         ])
     actual = np.array([np.sum(ds_object.ts[tstartid[i]:tendid[i] + 1]) for i in range(len(tstartid))])

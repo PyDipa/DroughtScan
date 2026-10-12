@@ -14,7 +14,6 @@ Public API:
     - Teleindex
     - utils        (submodule, lazy)
 """
-
 from typing import TYPE_CHECKING
 
 # --- Version (PEP 621 / pyproject.toml) --------------------------------------
@@ -23,18 +22,14 @@ from importlib.metadata import version, PackageNotFoundError
 try:
     __version__ = version("droughtscan")
 except PackageNotFoundError:
-    __version__ = "3.3.0"
+    # Fallback for a source tree that was never pip-installed; keep in step
+    # with pyproject.toml's `version`.
+    __version__ = "4.0.0"
 
-# --- Public API ---------------------------------------------------------------
-from .core import (
-    BaseDroughtAnalysis,
-    Precipitation,
-    Streamflow,
-    Pet,
-    Balance,
-    Temperature,
-    Teleindex,
-)
+
+# --- Public API (leggera) ----------------------------------------------------
+# Import diretti delle classi core: devono essere leggeri e senza side-effect.
+from .core import BaseDroughtAnalysis, Precipitation, Streamflow, Pet, Balance, Temperature, Teleindex
 
 __all__ = [
     "BaseDroughtAnalysis",
@@ -44,20 +39,22 @@ __all__ = [
     "Balance",
     "Temperature",
     "Teleindex",
-    "utils",
+    "utils",        # lazy
     "__version__",
 ]
 
-# --- Typing-only imports (avoid costs at runtime) -----------------------------
+# --- Typing-only imports (evita costi a runtime) -----------------------------
 if TYPE_CHECKING:
-    from . import utils
+    from . import utils  # noqa: F401
 
-# --- Lazy submodules ----------------------------------------------------------
+
+# --- Lazy submodules ---------------------------------------------------------
 def __getattr__(name: str):
     if name == "utils":
         from . import utils as _utils
         return _utils
     raise AttributeError(name)
+
 
 def __dir__():
     return sorted(list(globals().keys()) + ["utils"])
