@@ -206,5 +206,15 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Diagnostic pipeline scaffolding: local-only for now, not to be published.
+# Diagnostics site: lives in the twin library (Drought-Scan), never here.
 drought_scan/diagnostics/
+
+# Local working files: never published (also excluded from the PyPI sdist via
+# MANIFEST.in).
+drought_scan/dev.py
+_HELPER/
+.claude/
+
+# OS and IDE files
+.DS_Store
+.idea/

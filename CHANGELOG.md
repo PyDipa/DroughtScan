@@ -1,4 +1,4 @@
-## [4.0.0] - Unreleased
+## [4.0.0] - 2026-10-12
 
 Major version: the SIDI data model, the spatial API and the forward/reverse
 transform pair all changed in ways that break existing code. Migration notes are
