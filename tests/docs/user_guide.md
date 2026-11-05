@@ -775,14 +775,15 @@ the interval is never narrower than the one estimated, and the same integer boun
 are used by the clustering rule, the table, the printout and the figure. Those are
 the horizontal + vertical arms of the **cross** in the peak figure.
 
-**Which schemes are not distinguishable.** Two schemes are statistically
-indistinguishable when **each one's observed peak K falls inside the other's
-bootstrap K CI** (symmetric, on K) **and** the same holds for their peak R² CIs
-— i.e. neither the timescale nor the strength of the response separates them.
-A scheme whose peak K or peak R² sits clearly outside another's CI stays on its
-own. This is exactly the rule that decides which schemes share the same marker
-symbol at their peak in the response-surface figure (Fig. 3, see below); the
-table's `not_distinguishable_from` column names them directly.
+**Which schemes are not distinguishable.** Two schemes are directly linked when
+**each one's observed peak K falls inside the other's bootstrap K CI** (symmetric,
+on K) **and**, within the resulting K group, the same holds for their peak R² CIs.
+Schemes sharing a marker at their peak in the response-surface figure (Fig. 3, see
+below) belong to the same connected group: each is linked to at least one other
+member by that mutual inclusion, first on K, then on R². Membership does not imply
+that every pair within the group satisfies this criterion, nor does it constitute a
+formal test of equivalence: to compare two schemes, check their CIs directly. The
+table's `not_distinguishable_from` column names the other group members.
 
 It is also printed, one block per season:
 
@@ -810,9 +811,10 @@ It is also printed, one block per season:
 
 Reading it: a scheme with `"-"` in `not_distinguishable_from` marks its own
 response mechanism, at its own timescale and strength. Several schemes sharing
-a value there are not separable given the record length — pick any one of them,
-or keep the simplest (`ew`), rather than reading real meaning into which one
-happens to have the highest point estimate.
+a value there form a connected group, not a set of pairwise equivalent schemes:
+don't read real meaning into which one happens to have the highest point
+estimate, but check the CIs of a specific pair before treating the two as
+interchangeable.
 
 **The "most economical" scheme — R² only, across the whole record.** The
 `not_distinguishable_from` groups above are nested: two schemes only land in
@@ -823,10 +825,10 @@ different, simpler question, using **R² alone** (rule 2), applied globally
 across all five schemes regardless of K: starting from the scheme with the
 single highest peak R², every other scheme whose peak R² is statistically tied
 with it (mutual CI inclusion, chained transitively) joins the same group —
-even schemes at a clearly different K, which rule 1 would have kept apart.
+even schemes at a clearly different K, which rule 1 would have kept apart. Because
+the rule is chained, a member may be tied to the best only through another member.
 Within that group, the scheme with the **smallest peak K** is printed as the
-"most economical": the shortest, cheapest memory that is not measurably worse
-than the best. In the example, `geoiw` (K=4) is printed even though `geodw`
+"most economical": the shortest memory in the group. In the example, `geoiw` (K=4) is printed even though `geodw`
 (K=12) has the nominally higher point estimate — their R² CIs overlap, so the
 shorter-memory scheme is the more defensible pick.
 

@@ -1725,11 +1725,13 @@ def bootstrap_summary_table(result, ci=(2.5, 97.5), weight_labels=WEIGHT_LABELS,
     - ``peak_K`` [``peak_K_CI``] : the K where this scheme's R²(K) peaks, with
       its bootstrap CI.
     - ``peak_R2`` [``peak_R2_CI``] : that peak R², with its bootstrap CI.
-    - ``not_distinguishable_from`` : the OTHER weighting schemes whose peak K
-      and peak R² bootstrap CIs both mutually contain this scheme's observed
-      peak (same rule, same groups as the shared marker in the response-
+    - ``not_distinguishable_from`` : the OTHER members of this scheme's
+      connected group (same groups as the shared marker in the response-
       surface figure, Fig. 3 — see ``_peak_summary``), or ``"-"`` when this
-      scheme's peak stands on its own.
+      scheme's peak stands on its own. Each member is linked to at least one
+      other by mutual CI inclusion (first on K, then on R²); membership does
+      not imply that every pair satisfies this criterion, nor is it a formal
+      test of equivalence.
 
     ``as_frame=True`` returns a pandas DataFrame (falls back to a list of dicts).
     """
@@ -2270,9 +2272,10 @@ def _economical_scheme(pbf, weight_labels=WEIGHT_LABELS):
     from the scheme with the highest peak R2, every other scheme reachable
     through that pairwise rule (connected component) is R2-indistinguishable
     from the best — even when their K clearly differs (rule 1 would have kept
-    them apart, e.g. in different K clusters). Among that group, the scheme
-    with the SMALLEST peak K is the most economical way to reach the top R2 —
-    the shortest memory that is not statistically worse than the best.
+    them apart, e.g. in different K clusters). A member may be linked to the
+    best only through another member, so it need not pass the rule against the
+    best directly. Among that group, the scheme with the SMALLEST peak K is
+    reported as the most economical — the shortest memory in the group.
 
     Returns ``(cheapest, group)`` — ``cheapest`` the scheme name, ``group``
     the sorted list of R2-indistinguishable schemes (``[cheapest]`` alone

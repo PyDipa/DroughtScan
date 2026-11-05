@@ -1527,9 +1527,10 @@ class BaseDroughtAnalysis:
         ``_peak_summary`` dict for that season); the returned dict also gains a
         top-level ``"summary"`` — one row per (season, weighting scheme): its
         peak K and peak R², each with its bootstrap CI, plus
-        ``not_distinguishable_from`` naming the other schemes whose peak K and
-        peak R² CIs mutually overlap with this one's (the same schemes drawn
-        with a shared marker in the response-surface figure, Fig. 3). See
+        ``not_distinguishable_from`` naming the other members of this scheme's
+        connected group (drawn with a shared marker in the response-surface
+        figure, Fig. 3); membership does not imply that every pair satisfies
+        the mutual-inclusion rule. See
         ``utils.statistics.bootstrap_summary_table``.
         ``n_boot=0`` leaves the return value unchanged.
 
