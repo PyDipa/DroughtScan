@@ -553,8 +553,9 @@ def plot_cdn_trends(DSO, windows, figsize=(14, 10), ax=None,
 
         lines = [line1, line2[0]]
         labels = ['CDN',
-                  f'water anomaly over {window} months '
-                  f'(|{DSO.index_name}{window}| \u2265 {NEUTRAL_BAND})']
+                  f'water anomaly over {window} months ']
+                  # f'(|{DSO.index_name}{window}| \u2265 {NEUTRAL_BAND})']
+
 
         if show_spi:
             ax3 = ax[i].twinx()
