@@ -67,7 +67,9 @@ def extract_variable(data, possible_names):
     for name in possible_names:
         if name in data.variables:
             try:
-                return np.asarray(data[name])
+                # Masked cells (outside the data domain, _FillValue) become NaN:
+                # np.asarray would drop the mask and leak the raw fill (-999).
+                return np.ma.filled(data[name][:].astype(float), np.nan)
             except Exception as e:
                 raise ValueError(f"Error extracting variable '{name}': {e}")
     # raise ValueError(f"None of {possible_names} found in NetCDF variables.")
@@ -164,8 +166,12 @@ def import_netcdf_for_cumulative_variable(file_path, possible_names,shape,verbos
             # tp_var = next(var for var in data.variables if data[var].ndim == 3)
             Pgrid = extract_variable(data,possible_names)
             # Pgrid = np.array(data['tp'][:], dtype=float)
-            Pgrid[Pgrid < 0] = 0  # Mask invalid values
             Pgrid = Pgrid.astype(float)
+            # Negative values are invalid only for cumulative (flux) variables
+            # such as precipitation/PET. Mean variables (temperature in °C) are
+            # legitimately negative and must NOT be clamped.
+            if cumulative:
+                Pgrid[Pgrid < 0] = 0
 
 
             # Create time metadata
